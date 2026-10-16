@@ -1,0 +1,63 @@
+package interfaces
+
+import (
+	"context"
+	"errors"
+	"time"
+)
+
+// Provider outcomes that are known, not ambiguous. Adapters wrap them with
+// %w. Any other storage error may be transient or of unknown outcome.
+var (
+	// ErrObjectNotFound: the provider answered that the object is absent.
+	ErrObjectNotFound = errors.New("storage object not found")
+	// ErrStorageUploadNotFound: the provider answered that the multipart
+	// upload is absent (completed, aborted, or never created).
+	ErrStorageUploadNotFound = errors.New("storage multipart upload not found")
+)
+
+// UploadTarget describes the object that the storage adapter
+// should prepare for upload.
+type UploadTarget struct {
+	Bucket      string
+	ObjectKey   string
+	ContentType string
+	SizeBytes   int64
+	ExpiresAt   time.Time
+}
+
+// UploadPlan contains the information the API needs to give
+// the client permission to upload an object.
+type UploadPlan struct {
+	UploadURL string
+	ExpiresAt time.Time
+}
+
+// ObjectStorage describes the storage operations needed by
+// the application, independently of any cloud provider.
+type ObjectStorage interface {
+	CreateUploadPlan(
+		ctx context.Context,
+		target UploadTarget,
+	) (UploadPlan, error)
+
+	HeadObject(
+		ctx context.Context,
+		bucket string,
+		objectKey string,
+	) (ObjectMetadata, error)
+
+	DeleteObject(
+		ctx context.Context,
+		bucket string,
+		objectKey string,
+	) error
+}
+
+// ObjectMetadata contains information verified by the storage adapter.
+type ObjectMetadata struct {
+	SizeBytes   int64
+	ContentType string
+	ETag        string
+	VersionID   string
+}

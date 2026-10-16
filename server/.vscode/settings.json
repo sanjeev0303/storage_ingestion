@@ -1,0 +1,16 @@
+{
+    "go.useLanguageServer": true,
+    "go.lintTool": "staticcheck",
+    "go.lintOnSave": "package",
+    "[go]": {
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+            "source.organizeImports": "always"
+        },
+        "editor.defaultFormatter": "golang.go"
+    },
+    "gopls": {
+        "ui.semanticTokens": true,
+        "ui.completion.usePlaceholders": true
+    }
+}
