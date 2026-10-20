@@ -3,13 +3,17 @@ package unit
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	httpapi "github.com/sanjeev0303/object-storage-platform/internal/handler/http"
+	"github.com/sanjeev0303/object-storage-platform/internal/model"
 	"github.com/sanjeev0303/object-storage-platform/internal/repository/memory"
+	"github.com/sanjeev0303/object-storage-platform/internal/server/middleware"
 	uploadservice "github.com/sanjeev0303/object-storage-platform/internal/service/upload"
 )
 
@@ -23,7 +27,13 @@ func newTestUploadHandler() *httpapi.UploadHandler {
 		time.Minute,
 	)
 
-	return httpapi.NewUploadHandler(svc, "tenant-1", "user-1")
+	return httpapi.NewUploadHandler(svc, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+// asMember adds the principal the authentication middleware would.
+func asMember(r *http.Request) *http.Request {
+	p := model.Principal{TenantID: "tenant-1", UserID: "user-1", Permissions: model.PermUploadsWrite}
+	return r.WithContext(middleware.WithPrincipal(r.Context(), p))
 }
 
 func TestCreateUploadHandler(t *testing.T) {
@@ -44,7 +54,7 @@ func TestCreateUploadHandler(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 
 	recorder := httptest.NewRecorder()
-	handler.Create(recorder, req)
+	handler.Create(recorder, asMember(req))
 
 	if recorder.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s",
@@ -85,7 +95,7 @@ func TestCreateUploadHandlerRejectsInvalidJSON(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 
 	recorder := httptest.NewRecorder()
-	handler.Create(recorder, req)
+	handler.Create(recorder, asMember(req))
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", recorder.Code)
@@ -111,7 +121,7 @@ func TestCreateUploadHandlerRejectsUnknownFields(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 
 	recorder := httptest.NewRecorder()
-	handler.Create(recorder, req)
+	handler.Create(recorder, asMember(req))
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", recorder.Code)

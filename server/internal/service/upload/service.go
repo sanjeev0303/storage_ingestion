@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -25,6 +26,22 @@ type Service struct {
 	storage    interfaces.ObjectStorage
 	bucket     string
 	now        func() time.Time
+	// quotas, when set, reserves each new session's bytes against its
+	// tenant's quota; audit records uploads started and completed.
+	quotas Reserver
+	audit  interfaces.AuditRecorder
+}
+
+// Reserver stores an upload session with its quota reservation.
+type Reserver interface {
+	CreateReservedUpload(ctx context.Context, upload *model.UploadSession, idempotencyKey string, multipart bool) error
+}
+
+// Guard makes s reserve quota for new sessions and audit its
+// principal-facing operations. The API and the workers set both.
+func (s *Service) Guard(quotas Reserver, audit interfaces.AuditRecorder) *Service {
+	s.quotas, s.audit = quotas, audit
+	return s
 }
 
 // NewService receives its devendencies insted of constructing them.
@@ -60,7 +77,10 @@ func NewService(
 type CreateInput struct {
 	TenantID string
 	OwnerID  string
-	Request  request.CreateUploadRequest
+	// Dataset optionally labels the upload and its asset; set only by a
+	// trusted caller (bulk ingestion), never from the request body.
+	Dataset string
+	Request request.CreateUploadRequest
 }
 
 // CreateResult tessl the caller wheterh this is a newly created session.
@@ -139,6 +159,17 @@ func (s *Service) Create(
 		return CreateResult{}, ErrUploadTooLarge
 	}
 
+	if input.Dataset == "" {
+		input.Dataset = req.Dataset
+	}
+	if input.Dataset != "" && !model.ValidDataset(input.Dataset) {
+		return CreateResult{}, fmt.Errorf("%w: invalid dataset", ErrInvalidRequest)
+	}
+	path, err := catalogPath(req.Path, req.FileName, req.Metadata)
+	if err != nil {
+		return CreateResult{}, err
+	}
+
 	// We only validate the checksum's shape here. The actual checksum
 	// must be verified against the uploaded bytes later.
 	if req.ChecksumSHA256 != "" {
@@ -161,7 +192,7 @@ func (s *Service) Create(
 	)
 
 	if err == nil {
-		if !sameUploadRequest(existing, req) {
+		if !sameUploadRequest(existing, input) {
 			return CreateResult{}, ErrIdempotencyConflict
 		}
 
@@ -188,21 +219,25 @@ func (s *Service) Create(
 		ContentType:    strings.TrimSpace(req.ContentType),
 		ExpectedSize:   req.SizeBytes,
 		ChecksumSHA256: strings.ToLower(req.ChecksumSHA256),
+		Dataset:        input.Dataset,
 		Status:         model.UploadStatusPending,
 		CreatedAt:      now,
 		UpdatedAt:      now,
 		ExpiresAt:      now.Add(s.ttl),
+		Path:           path,
+		Metadata:       req.Metadata,
+		CreateOnly:     req.CreateOnly,
 	}
 
 	if err := session.Validate(); err != nil {
 		return CreateResult{}, fmt.Errorf("validate upload session: %w", err)
 	}
 
-	if err := s.repository.CreateWithIdempotency(
-		ctx,
-		session,
-		req.IdempotencyKey,
-	); err != nil {
+	if err := s.save(ctx, session, req.IdempotencyKey); err != nil {
+		var quotaErr *model.QuotaError
+		if errors.As(err, &quotaErr) || errors.Is(err, model.ErrPathExists) || errors.Is(err, model.ErrPathBusy) {
+			return CreateResult{}, err
+		}
 		// Another request may have insterted that same idempotency key
 		// after our initial lookup. Replay its result if the request
 		// metadata matches.
@@ -214,7 +249,7 @@ func (s *Service) Create(
 				req.IdempotencyKey,
 			)
 
-			if lookupErr == nil && sameUploadRequest(existing, req) {
+			if lookupErr == nil && sameUploadRequest(existing, input) {
 				return s.createResult(ctx, existing, true)
 			}
 
@@ -240,13 +275,36 @@ func (s *Service) Create(
 
 func sameUploadRequest(
 	existing *model.UploadSession,
-	req request.CreateUploadRequest,
+	input CreateInput,
 ) bool {
+	req := input.Request
+	path, _ := catalogPath(req.Path, req.FileName, nil)
 	return existing != nil &&
 		existing.FileName == strings.TrimSpace(req.FileName) &&
 		existing.ContentType == strings.TrimSpace(req.ContentType) &&
 		existing.ExpectedSize == req.SizeBytes &&
-		existing.ChecksumSHA256 == strings.ToLower(req.ChecksumSHA256)
+		existing.ChecksumSHA256 == strings.ToLower(req.ChecksumSHA256) &&
+		existing.Dataset == input.Dataset &&
+		existing.Path == path &&
+		existing.CreateOnly == req.CreateOnly &&
+		maps.Equal(existing.Metadata, req.Metadata)
+}
+
+// catalogPath validates the catalog part of an upload: its logical path
+// (the file name when none is given), returned normalized, and its user
+// metadata.
+func catalogPath(path, fileName string, metadata map[string]string) (string, error) {
+	if path == "" {
+		path = strings.TrimSpace(fileName)
+	}
+	normalized, _, err := model.NormalizePath(path, model.DefaultPathPolicy)
+	if err != nil {
+		return "", fmt.Errorf("%w: path: %v", ErrInvalidRequest, err)
+	}
+	if err := model.ValidateUserMetadata(metadata, model.DefaultMetadataLimits); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrInvalidRequest, err)
+	}
+	return normalized, nil
 }
 
 // newUploadID generates a rendom identifier using the standard library.
@@ -268,4 +326,13 @@ func newUploadID() (string, error) {
 		encoded[12:16] + "-" +
 		encoded[16:20] + "-" +
 		encoded[20:32], nil
+}
+
+// save stores a new session, with its quota reservation when quotas are
+// enforced.
+func (s *Service) save(ctx context.Context, session *model.UploadSession, idempotencyKey string) error {
+	if s.quotas != nil {
+		return s.quotas.CreateReservedUpload(ctx, session, idempotencyKey, false)
+	}
+	return s.repository.CreateWithIdempotency(ctx, session, idempotencyKey)
 }

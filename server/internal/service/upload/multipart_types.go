@@ -9,6 +9,8 @@ import (
 // StartMultipartInput is created by the HTTP handler after
 // validating the incoming request and authenticated identity.
 type StartMultipartInput struct {
+	// Dataset is optional; see model.ValidDataset.
+	Dataset        string
 	TenantID       string
 	OwnerID        string
 	FileName       string
@@ -16,6 +18,11 @@ type StartMultipartInput struct {
 	SizeBytes      int64
 	ChecksumSHA256 string
 	IdempotencyKey string
+	// The catalog: the logical path (the file name when empty), the
+	// version's user metadata, and create-only.
+	Path       string
+	Metadata   map[string]string
+	CreateOnly bool
 }
 
 // MultipartResult contains application-level session information.

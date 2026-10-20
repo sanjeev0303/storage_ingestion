@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/sanjeev0303/object-storage-platform/internal/dto/event"
 	checksum "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/checksum/sha256"
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
+	"github.com/sanjeev0303/object-storage-platform/internal/platform/correlation"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/retry"
 )
 
@@ -175,9 +177,13 @@ func (s *MultipartService) ResolveAbort(ctx context.Context, tenantID, uploadID 
 		return "", fmt.Errorf("delete aborted part metadata: %w", err)
 	}
 
+	// The reason recorded when the abort was claimed says how it ends.
 	final := model.UploadStatusFailed
-	if session.FailureReason == model.FailureExpired {
+	switch session.FailureReason {
+	case model.FailureExpired:
 		final = model.UploadStatusExpired
+	case model.FailureAbortedByClient:
+		final = model.UploadStatusAborted
 	}
 	return s.finish(ctx, session, final, "")
 }
@@ -260,14 +266,22 @@ func (s *MultipartService) VerifyIntegrity(ctx context.Context, tenantID, upload
 
 // finish moves the session from its current status to `to`. If another
 // actor moved it first, that newer state wins and is returned unchanged.
+// Completion writes upload.completed in the same transaction, so a
+// completed upload always has the event that starts its processing.
 func (s *MultipartService) finish(
 	ctx context.Context,
 	session model.UploadSession,
 	to model.UploadStatus,
 	reason string,
 ) (model.UploadStatus, error) {
+	now := s.now()
+	var events []model.OutboxEvent
+	if to == model.UploadStatusCompleted {
+		events = append(events, event.NewUploadCompleted(session.TenantID, session.ID, now, correlation.From(ctx)))
+	}
+
 	err := s.uploads.TransitionStatus(ctx, session.TenantID, session.ID,
-		[]model.UploadStatus{session.Status}, to, reason, s.now())
+		[]model.UploadStatus{session.Status}, to, reason, now, events...)
 	if errors.Is(err, model.ErrInvalidUploadState) {
 		return s.currentStatus(ctx, session.TenantID, session.ID)
 	}

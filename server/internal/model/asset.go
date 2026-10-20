@@ -14,7 +14,11 @@ const (
 	AssetStatusProcessing  AssetStatus = "PROCESSING"
 	AssetStatusAvailable   AssetStatus = "AVAILABLE"
 	AssetStatusRejected    AssetStatus = "REJECTED"
-	AssetStatusDeleted     AssetStatus = "DELETED"
+	// AssetStatusSoftDeleted: deletion was requested. The asset is never
+	// delivered, and can be restored until its objects start to be removed.
+	AssetStatusSoftDeleted AssetStatus = "SOFT_DELETED"
+	// AssetStatusDeleted is a tombstone: the asset's objects are gone.
+	AssetStatusDeleted AssetStatus = "DELETED"
 )
 
 // Rejection reasons recorded with REJECTED assets. Sanitized codes only.
@@ -26,6 +30,11 @@ const (
 	RejectMalwareDetected    = "malware_detected"
 	RejectScannerUnavailable = "scanner_unavailable"
 	RejectSourceMissing      = "source_object_missing"
+	RejectEmptyFile          = "empty_file"
+	RejectUnsafeFileName     = "unsafe_file_name"
+	RejectExtensionMismatch  = "extension_does_not_match_type"
+	RejectUnknownType        = "unknown_content_type"
+	RejectUnsafeArchive      = "unsafe_archive"
 )
 
 // Asset contains the metadata used to identify and deliver a file.
@@ -41,28 +50,48 @@ type Asset struct {
 	ContentType    string
 	SizeBytes      int64
 	ChecksumSHA256 string
-	Status         AssetStatus
+	// Dataset optionally groups assets for retention policies.
+	Dataset string
+	Status  AssetStatus
 	// RejectionReason explains a REJECTED asset.
 	RejectionReason string
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	// StorageETag and StorageVersionID identify the exact stored object the
+	// asset was published as (VersionID only where the provider versions
+	// objects). The ETag is a provider validator, not a content checksum.
+	StorageETag      string
+	StorageVersionID string
+	PublishedAt      *time.Time
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	// The catalog: the logical object this asset is a version of, its
+	// version number (0 until published), and the user metadata it was
+	// uploaded with. Assets from before the catalog have no object.
+	ObjectID string
+	Version  int
+	Metadata map[string]string
 }
 
 // CanTransitionAsset reports whether the asset lifecycle allows from -> to:
 //
 //	QUARANTINED -> PROCESSING -> AVAILABLE
 //	QUARANTINED / PROCESSING -> REJECTED
+//	any state except DELETED -> SOFT_DELETED -> DELETED
 //	any state except DELETED -> DELETED
 //
 // AVAILABLE is reachable only from PROCESSING, which an asset enters only
-// after its stored bytes passed verification.
+// after its stored bytes passed verification. Restoring a SOFT_DELETED
+// asset is not a general transition: it returns the asset to the status
+// recorded by its deletion operation, and only the deletion repository
+// performs it.
 func CanTransitionAsset(from, to AssetStatus) bool {
 	switch from {
 	case AssetStatusQuarantined:
-		return to == AssetStatusProcessing || to == AssetStatusRejected || to == AssetStatusDeleted
+		return to == AssetStatusProcessing || to == AssetStatusRejected || to == AssetStatusSoftDeleted || to == AssetStatusDeleted
 	case AssetStatusProcessing:
-		return to == AssetStatusAvailable || to == AssetStatusRejected || to == AssetStatusDeleted
+		return to == AssetStatusAvailable || to == AssetStatusRejected || to == AssetStatusSoftDeleted || to == AssetStatusDeleted
 	case AssetStatusAvailable, AssetStatusRejected:
+		return to == AssetStatusSoftDeleted || to == AssetStatusDeleted
+	case AssetStatusSoftDeleted:
 		return to == AssetStatusDeleted
 	}
 	return false

@@ -13,6 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+
 	checksum "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/checksum/sha256"
 	s3storage "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/s3"
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
@@ -37,6 +40,15 @@ func openTestProvider(t *testing.T) (*s3storage.ObjectStorage, string) {
 	client, err := s3storage.NewClient(ctx, cfg)
 	if err != nil {
 		t.Fatalf("S3 client: %v", err)
+	}
+
+	// Local MinIO only: create the dedicated test bucket when asked to.
+	if os.Getenv("TEST_S3_CREATE_BUCKET") == "true" {
+		if _, err := client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(bucket)}); err != nil {
+			if _, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
+				t.Fatalf("create test bucket: %v", err)
+			}
+		}
 	}
 	return s3storage.NewObjectStorage(client), bucket
 }

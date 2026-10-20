@@ -14,10 +14,13 @@ import (
 // ReconciliationRepository keeps tasks in memory with the same enqueue,
 // claim and lease rules as the PostgreSQL adapter. For tests only.
 type ReconciliationRepository struct {
-	mu      sync.Mutex
-	uploads *UploadRepository
-	tasks   map[string]model.ReconciliationTask
-	nextID  int
+	mu       sync.Mutex
+	uploads  *UploadRepository
+	tasks    map[string]model.ReconciliationTask
+	findings []model.ReconciliationFinding
+	nextID   int
+	// Parts, when set, lets StaleParts see part rows.
+	Parts *MultipartUploadRepository
 }
 
 var _ interfaces.ReconciliationRepository = (*ReconciliationRepository)(nil)
@@ -171,6 +174,7 @@ func (r *ReconciliationRepository) Finish(
 	owner string,
 	now time.Time,
 	state model.ReconciliationState,
+	outcome string,
 	lastError string,
 ) error {
 	if state != model.ReconcileSucceeded && state != model.ReconcileExhausted {
@@ -178,6 +182,7 @@ func (r *ReconciliationRepository) Finish(
 	}
 	return r.release(ctx, taskID, owner, now, func(t *model.ReconciliationTask) {
 		t.State = state
+		t.Outcome = outcome
 		t.LastError = lastError
 	})
 }
@@ -221,4 +226,114 @@ func (r *ReconciliationRepository) Tasks() []model.ReconciliationTask {
 		out = append(out, t)
 	}
 	return out
+}
+
+func (r *ReconciliationRepository) ListDue(ctx context.Context, now time.Time, grace time.Duration, limit int) ([]model.DueReconciliation, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	r.uploads.mu.RLock()
+	sessions := make([]model.UploadSession, 0, len(r.uploads.uploads))
+	for _, s := range r.uploads.uploads {
+		sessions = append(sessions, s)
+	}
+	r.uploads.mu.RUnlock()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var due []model.DueReconciliation
+	for _, s := range sessions {
+		operation, ok := operationFor(s, now, grace)
+		if !ok || r.hasOpenOrExhausted(s.ID) {
+			continue
+		}
+		due = append(due, model.DueReconciliation{
+			UploadRef: model.UploadRef{TenantID: s.TenantID, UploadID: s.ID}, Operation: operation, Status: s.Status,
+		})
+		if len(due) == limit {
+			break
+		}
+	}
+	return due, nil
+}
+
+func (r *ReconciliationRepository) RecordFinding(ctx context.Context, finding model.ReconciliationFinding) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.findings = append(r.findings, finding)
+	return nil
+}
+
+func (r *ReconciliationRepository) StaleParts(ctx context.Context, olderThan time.Time, limit int) ([]model.UploadRef, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if r.Parts == nil {
+		return nil, nil
+	}
+
+	r.uploads.mu.RLock()
+	defer r.uploads.mu.RUnlock()
+
+	var refs []model.UploadRef
+	for _, s := range r.uploads.uploads {
+		if s.Status.IsTerminal() && !s.UpdatedAt.After(olderThan) && r.Parts.hasParts(s.TenantID, s.ID) {
+			refs = append(refs, model.UploadRef{TenantID: s.TenantID, UploadID: s.ID})
+			if len(refs) == limit {
+				break
+			}
+		}
+	}
+	return refs, nil
+}
+
+func (r *ReconciliationRepository) CountStuck(ctx context.Context, olderThan time.Time) (map[model.UploadStatus]int, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.uploads.mu.RLock()
+	defer r.uploads.mu.RUnlock()
+
+	counts := map[model.UploadStatus]int{}
+	for _, s := range r.uploads.uploads {
+		switch s.Status {
+		case model.UploadStatusPending, model.UploadStatusUploading, model.UploadStatusCompleting, model.UploadStatusAborting:
+			if !s.UpdatedAt.After(olderThan) {
+				counts[s.Status]++
+			}
+		}
+	}
+	return counts, nil
+}
+
+// Findings returns a snapshot of recorded findings, for assertions.
+func (r *ReconciliationRepository) Findings() []model.ReconciliationFinding {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]model.ReconciliationFinding(nil), r.findings...)
+}
+
+func (r *ReconciliationRepository) FinishedSessions(ctx context.Context, since, until time.Time, afterID string, limit int) ([]model.UploadSession, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.uploads.mu.RLock()
+	var out []model.UploadSession
+	for _, s := range r.uploads.uploads {
+		if s.Status.IsTerminal() && s.UpdatedAt.After(since) && !s.UpdatedAt.After(until) && s.ID > afterID {
+			out = append(out, s)
+		}
+	}
+	r.uploads.mu.RUnlock()
+
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }

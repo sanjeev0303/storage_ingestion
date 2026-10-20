@@ -34,18 +34,18 @@ func TestPostgresDeliveryUsesCurrentStateAndIsAudited(t *testing.T) {
 	}
 
 	storage := storagememory.NewObjectStorage()
-	svc, err := delivery.NewService(assets, storage, audit, delivery.Config{
+	svc, err := delivery.NewService(assets, storage, audit, nil, delivery.Config{
 		Bucket: "private", Prefix: "assets", DefaultTTL: time.Minute, MaxTTL: 5 * time.Minute,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	principal := model.Principal{TenantID: env.tenant, UserID: "owner"}
+	principal := member(env.tenant, "owner", model.RoleDeveloper)
 
 	if _, err := svc.CreateDownloadURL(ctx, principal, asset.ID, delivery.URLRequest{}); err != nil {
 		t.Fatalf("download URL: %v", err)
 	}
-	if _, err := svc.CreateDownloadURL(ctx, model.Principal{TenantID: "other-tenant", UserID: "owner"}, asset.ID, delivery.URLRequest{}); !errors.Is(err, delivery.ErrNotFound) {
+	if _, err := svc.CreateDownloadURL(ctx, member("other-tenant", "owner", model.RoleOwner), asset.ID, delivery.URLRequest{}); !errors.Is(err, delivery.ErrNotFound) {
 		t.Fatalf("another tenant must get not found, got %v", err)
 	}
 
@@ -75,7 +75,7 @@ func TestPostgresDeliveryUsesCurrentStateAndIsAudited(t *testing.T) {
 		}
 		outcomes = append(outcomes, outcome+":"+reason)
 	}
-	want := []string{"ALLOWED:", "DENIED:not_found", "DENIED:not_found"}
+	want := []string{"ALLOWED:via_storage", "DENIED:not_found", "DENIED:not_found"}
 	if len(outcomes) != len(want) {
 		t.Fatalf("audit trail %v, want %v", outcomes, want)
 	}

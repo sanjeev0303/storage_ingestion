@@ -1,0 +1,8 @@
+{"path":"pets/cat-1.txt","label":"cat","split":"train","metadata":{"license":"cc0","source":"fixture"}}
+{"path":"pets/cat-2.txt","label":"cat","split":"train","metadata":{"license":"cc0","source":"fixture"}}
+{"path":"pets/dog-1.txt","label":"dog","split":"train","metadata":{"license":"cc0","source":"fixture"}}
+{"path":"pets/dog-2.txt","label":"dog","split":"validation","metadata":{"license":"cc0","source":"fixture"}}
+{"path":"pets/dog-3.txt","label":"dog","split":"test","metadata":{"license":"cc0","source":"fixture"}}
+{"path":"pets/cat-1-copy.txt","label":"cat","split":"test"}
+{"path":"pets/../secrets.txt","label":"cat"}
+{"path":"pets/missing.txt","label":"cat"}

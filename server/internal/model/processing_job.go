@@ -35,11 +35,32 @@ const (
 	ProcessingExhausted ProcessingState = "EXHAUSTED"
 )
 
-// Scan outcomes. NOT_SCANNED is recorded, never treated as CLEAN.
+// Scan outcomes. Only CLEAN (or the development-only NOT_SCANNED) allows
+// promotion; UNSUPPORTED, TIMEOUT and ERROR are incomplete scans and are
+// never treated as clean.
 const (
-	ScanClean      = "CLEAN"
-	ScanInfected   = "INFECTED"
-	ScanNotScanned = "NOT_SCANNED"
+	ScanClean       = "CLEAN"
+	ScanInfected    = "INFECTED"
+	ScanUnsupported = "UNSUPPORTED"
+	ScanTimeout     = "TIMEOUT"
+	ScanError       = "ERROR"
+	ScanNotScanned  = "NOT_SCANNED"
+)
+
+// Per-stage results recorded on the job.
+const (
+	StagePassed   = "PASSED"
+	StageFailed   = "FAILED"
+	StageRejected = "REJECTED"
+
+	// ChecksumDeclared: compared with the checksum the client sent.
+	ChecksumDeclared = "DECLARED"
+	// ChecksumComputed: computed here only; it proves the bytes did not
+	// change after upload, not that they match the sender's original.
+	ChecksumComputed = "COMPUTED"
+
+	PromotionPending   = "PENDING"
+	PromotionPublished = "PUBLISHED"
 )
 
 // ProcessingJob is one asset's way through verification, scanning and
@@ -58,13 +79,19 @@ type ProcessingJob struct {
 	LeaseOwner     string
 	LeaseExpiresAt *time.Time
 
+	VerificationStatus  string
+	ChecksumSource      string
 	ChecksumAlgorithm   string
 	ChecksumVerifiedAt  *time.Time
+	ValidationStatus    string
+	ValidationReason    string
 	DetectedContentType string
 	Scanner             string
 	ScanResult          string
 	ScanSignature       string
+	ScanError           string
 	ScannedAt           *time.Time
+	PromotionStatus     string
 	PromotionKey        string
 	PromotedAt          *time.Time
 

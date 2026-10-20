@@ -43,7 +43,9 @@ type UploadRepository interface {
 	// TransitionStatus moves the session to `to` only while its current
 	// status is one of `from`, as one conditional write. It returns
 	// model.ErrInvalidUploadState when the session is in any other status,
-	// so a stale caller can never overwrite a newer state.
+	// so a stale caller can never overwrite a newer state. Events are
+	// written to the outbox in the same transaction: both commit, or
+	// neither does.
 	TransitionStatus(
 		ctx context.Context,
 		tenantID string,
@@ -52,6 +54,7 @@ type UploadRepository interface {
 		to model.UploadStatus,
 		failureReason string,
 		at time.Time,
+		events ...model.OutboxEvent,
 	) error
 
 	// SetStorageUploadID records the provider upload ID once, and only

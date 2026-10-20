@@ -4,7 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
+	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -14,6 +17,7 @@ import (
 	s3storage "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/s3"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/config"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/logger"
+	"github.com/sanjeev0303/object-storage-platform/internal/platform/metrics"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/retry"
 	reconciliationservice "github.com/sanjeev0303/object-storage-platform/internal/service/reconciliation"
 	uploadservice "github.com/sanjeev0303/object-storage-platform/internal/service/upload"
@@ -28,6 +32,10 @@ func main() {
 }
 
 func run() error {
+	once := flag.Bool("once", false, "run a single reconciliation cycle, print its report as JSON and exit")
+	dryRun := flag.Bool("dry-run", false, "report what would be done without changing storage or the database")
+	flag.Parse()
+
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load configuration: %w", err)
@@ -38,6 +46,10 @@ func run() error {
 	}
 
 	log := logger.New(cfg.AppEnv)
+	if *once {
+		// stdout carries the JSON report; logs go to stderr.
+		log = logger.NewTo(os.Stderr, cfg.AppEnv)
+	}
 
 	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelStartup()
@@ -62,16 +74,16 @@ func run() error {
 		return fmt.Errorf("S3_BUCKET is required")
 	}
 
-	// The same limits as the API, so both judge sessions alike.
+	// UPLOAD_* limits are shared with the API, so every process judges sessions alike.
 	multipartService, err := uploadservice.NewMultipartService(
 		postgres.NewUploadRepository(db),
 		postgres.NewMultipartUploadRepository(db),
 		s3storage.NewObjectStorage(s3Client),
 		uploadservice.MultipartServiceConfig{
 			Bucket:     bucket,
-			MaxSize:    5 * 1024 * 1024 * 1024,
-			SessionTTL: 30 * time.Minute,
-			PartURLTTL: 15 * time.Minute,
+			MaxSize:    cfg.UploadMaxSize,
+			SessionTTL: cfg.UploadSessionTTL,
+			PartURLTTL: cfg.UploadURLTTL,
 		},
 	)
 	if err != nil {
@@ -81,6 +93,17 @@ func run() error {
 	owner, err := workerID()
 	if err != nil {
 		return fmt.Errorf("create worker ID: %w", err)
+	}
+
+	registry := metrics.New()
+	if workerCfg.MetricsAddr != "" {
+		registry.Publish("reconciliation")
+		// expvar serves /debug/vars on the default mux.
+		go func() {
+			if err := http.ListenAndServe(workerCfg.MetricsAddr, nil); err != nil {
+				log.Error("metrics listener stopped", "error", err)
+			}
+		}()
 	}
 
 	service, err := reconciliationservice.NewService(
@@ -97,8 +120,17 @@ func run() error {
 				MaxDelay:    workerCfg.BackoffMax,
 				MaxAttempts: workerCfg.MaxAttempts,
 			},
+			DryRun:           workerCfg.DryRun || *dryRun,
+			ScanPageSize:     workerCfg.ScanPageSize,
+			ScanPages:        workerCfg.ScanPages,
+			OrphanMinAge:     workerCfg.OrphanMinAge,
+			StuckAfter:       workerCfg.StuckAfter,
+			SessionScan:      workerCfg.SessionScan,
+			SessionLookback:  workerCfg.SessionLookback,
+			DeleteUnrecorded: workerCfg.DeleteUnrecorded,
 		},
 		log,
+		registry,
 	)
 	if err != nil {
 		return fmt.Errorf("create reconciliation service: %w", err)
@@ -107,12 +139,25 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if *once {
+		stats, err := service.RunOnce(ctx)
+		report, _ := json.MarshalIndent(stats, "", "  ")
+		fmt.Println(string(report))
+		if err != nil {
+			return fmt.Errorf("reconciliation cycle: %w", err)
+		}
+		return nil
+	}
+
 	log.Info("reconciliation worker starting",
 		"worker_id", owner,
 		"poll_interval", workerCfg.PollInterval.String(),
 		"batch_size", workerCfg.BatchSize,
 		"lease", workerCfg.LeaseDuration.String(),
 		"max_attempts", workerCfg.MaxAttempts,
+		"dry_run", workerCfg.DryRun || *dryRun,
+		"session_scan", workerCfg.SessionScan,
+		"delete_unrecorded", workerCfg.DeleteUnrecorded,
 	)
 	reconciliationworker.Run(ctx, service, workerCfg.PollInterval, log)
 	log.Info("reconciliation worker stopped")

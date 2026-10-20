@@ -23,14 +23,16 @@ import (
 
 var deliveredBytes = []byte("0123456789abcdefghij")
 
-// testIdentity authenticates "Bearer <tenant>/<user>" for these tests only.
+// testIdentity authenticates "Bearer <tenant>/<user>" for these tests
+// only, as a member with the built-in developer role.
 func testIdentity(r *http.Request) (model.Principal, error) {
 	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	tenant, user, found := strings.Cut(token, "/")
 	if !ok || !found {
 		return model.Principal{}, errors.New("no credentials")
 	}
-	return model.Principal{TenantID: tenant, UserID: user}, nil
+	developer, _ := model.BuiltInRole(model.RoleDeveloper)
+	return model.Principal{TenantID: tenant, UserID: user, RoleID: developer.ID, Permissions: developer.Permissions}, nil
 }
 
 type deliveryAPI struct {
@@ -60,14 +62,14 @@ func newDeliveryAPI(t *testing.T, identity middleware.Resolver, proxy bool) deli
 	}
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc, err := delivery.NewService(assets, storage, memory.NewDeliveryAuditRepository(), delivery.Config{
+	svc, err := delivery.NewService(assets, storage, memory.NewDeliveryAuditRepository(), memory.NewDownloadTokenRepository(), delivery.Config{
 		Bucket: "private-bucket", Prefix: "assets", DefaultTTL: 5 * time.Minute, MaxTTL: 15 * time.Minute,
 	}, log)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return deliveryAPI{
-		handler: server.NewRouter(nil, nil, server.DeliveryRoutes{Service: svc, Identity: identity, ProxyEnabled: proxy, Log: log}),
+		handler: server.NewRouter(server.Routes{Resolver: identity, Delivery: svc, ProxyEnabled: proxy, Log: log}),
 		storage: storage,
 	}
 }

@@ -14,6 +14,11 @@ type Config struct {
 	HTTPPort        string
 	DatabaseUrl     string
 	ShutdownTimeout time.Duration
+	// Upload limits shared by the API and the workers, so every process
+	// judges a session by the same rules.
+	UploadMaxSize    int64
+	UploadSessionTTL time.Duration
+	UploadURLTTL     time.Duration
 }
 
 // Load reads configuration from environment variables.
@@ -38,6 +43,25 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("DATABASE_URL is required")
 	}
 
+	cfg.UploadMaxSize, err = strconv.ParseInt(getEnv("UPLOAD_MAX_SIZE_BYTES", "5368709120"), 10, 64)
+	if err != nil || cfg.UploadMaxSize <= 0 {
+		return Config{}, fmt.Errorf("UPLOAD_MAX_SIZE_BYTES must be a positive number of bytes")
+	}
+	seconds := []struct {
+		key, fallback string
+		target        *time.Duration
+	}{
+		{"UPLOAD_SESSION_TTL_SECONDS", "1800", &cfg.UploadSessionTTL},
+		{"UPLOAD_URL_TTL_SECONDS", "900", &cfg.UploadURLTTL},
+	}
+	for _, s := range seconds {
+		n, err := strconv.Atoi(getEnv(s.key, s.fallback))
+		if err != nil || n <= 0 {
+			return Config{}, fmt.Errorf("%s must be a positive number of seconds", s.key)
+		}
+		*s.target = time.Duration(n) * time.Second
+	}
+
 	return cfg, nil
 }
 
@@ -51,13 +75,30 @@ type Reconciliation struct {
 	BackoffBase     time.Duration
 	BackoffMax      time.Duration
 	StorageProvider string
+
+	DryRun       bool
+	ScanPageSize int
+	ScanPages    int
+	OrphanMinAge time.Duration
+	StuckAfter   time.Duration
+	// SessionScan is provider (AWS S3), database (MinIO) or off.
+	SessionScan     string
+	SessionLookback time.Duration
+	// DeleteUnrecorded: RECONCILIATION_UNRECORDED_ACTION=delete (default report).
+	DeleteUnrecorded bool
+	// MetricsAddr, when set, serves /debug/vars there (e.g. 127.0.0.1:9101).
+	MetricsAddr string
 }
 
 // LoadReconciliation reads the worker settings. Durations use Go syntax
 // such as "15s" or "10m".
 func LoadReconciliation() (Reconciliation, error) {
 	cfg := Reconciliation{
-		StorageProvider: getEnv("STORAGE_PROVIDER", "s3"),
+		StorageProvider:  getEnv("STORAGE_PROVIDER", "s3"),
+		DryRun:           strings.EqualFold(getEnv("RECONCILIATION_DRY_RUN", "false"), "true"),
+		MetricsAddr:      getEnv("METRICS_ADDR", ""),
+		SessionScan:      strings.ToLower(getEnv("RECONCILIATION_SESSION_SCAN", "provider")),
+		DeleteUnrecorded: strings.EqualFold(getEnv("RECONCILIATION_UNRECORDED_ACTION", "report"), "delete"),
 	}
 
 	durations := []struct {
@@ -70,6 +111,9 @@ func LoadReconciliation() (Reconciliation, error) {
 		{"RECONCILIATION_GRACE_PERIOD", "2m", &cfg.GracePeriod},
 		{"RECONCILIATION_BACKOFF_BASE", "30s", &cfg.BackoffBase},
 		{"RECONCILIATION_BACKOFF_MAX", "30m", &cfg.BackoffMax},
+		{"RECONCILIATION_ORPHAN_MIN_AGE", "24h", &cfg.OrphanMinAge},
+		{"RECONCILIATION_STUCK_AFTER", "1h", &cfg.StuckAfter},
+		{"RECONCILIATION_SESSION_LOOKBACK", "168h", &cfg.SessionLookback},
 	}
 	for _, d := range durations {
 		value, err := time.ParseDuration(getEnv(d.key, d.fallback))
@@ -86,6 +130,8 @@ func LoadReconciliation() (Reconciliation, error) {
 	}{
 		{"RECONCILIATION_BATCH_SIZE", "10", &cfg.BatchSize},
 		{"RECONCILIATION_MAX_ATTEMPTS", "8", &cfg.MaxAttempts},
+		{"RECONCILIATION_SCAN_PAGE_SIZE", "100", &cfg.ScanPageSize},
+		{"RECONCILIATION_SCAN_PAGES", "5", &cfg.ScanPages},
 	}
 	for _, n := range ints {
 		value, err := strconv.Atoi(getEnv(n.key, n.fallback))
@@ -95,6 +141,12 @@ func LoadReconciliation() (Reconciliation, error) {
 		*n.target = value
 	}
 
+	if cfg.SessionScan != "provider" && cfg.SessionScan != "database" && cfg.SessionScan != "off" {
+		return Reconciliation{}, fmt.Errorf("RECONCILIATION_SESSION_SCAN must be provider, database or off")
+	}
+	if cfg.ScanPageSize > 1000 {
+		return Reconciliation{}, fmt.Errorf("RECONCILIATION_SCAN_PAGE_SIZE must be at most 1000")
+	}
 	if cfg.BackoffMax < cfg.BackoffBase {
 		return Reconciliation{}, fmt.Errorf("RECONCILIATION_BACKOFF_MAX must not be less than RECONCILIATION_BACKOFF_BASE")
 	}
@@ -113,12 +165,24 @@ type Processing struct {
 	BackoffMax      time.Duration
 	MaxFileBytes    int64
 	AllowedTypes    []string
-	Scanner         string // "none" or "clamav"
+	DeniedTypes     []string // added to the built-in deny list
+	UnknownType     string   // "allow" or "reject"
+	Scanner         string   // "none" or "clamav"
 	ClamAVAddress   string
 	ClamAVTimeout   time.Duration
 	ScanPolicy      string // used when Scanner is "none"
 	PromotionBucket string // empty: the quarantine bucket
 	PromotionPrefix string
+
+	QuarantineRetention time.Duration
+
+	// Archive inspection is off unless ArchiveInspection is set.
+	ArchiveInspection  bool
+	ArchiveMaxBytes    int64
+	ArchiveMaxEntries  int
+	ArchiveMaxExpanded int64
+	ArchiveMaxRatio    int64
+	MetricsAddr        string
 }
 
 // LoadProcessing reads the processing worker settings.
@@ -129,6 +193,10 @@ func LoadProcessing() (Processing, error) {
 		ScanPolicy:      strings.ToLower(getEnv("SCAN_UNAVAILABLE_POLICY", "hold")),
 		PromotionBucket: getEnv("PROMOTION_BUCKET", ""),
 		PromotionPrefix: getEnv("PROMOTION_PREFIX", "assets"),
+		UnknownType:     strings.ToLower(getEnv("PROCESSING_UNKNOWN_TYPE_ACTION", "allow")),
+
+		ArchiveInspection: strings.EqualFold(getEnv("ARCHIVE_INSPECTION_ENABLED", "false"), "true"),
+		MetricsAddr:       getEnv("METRICS_ADDR", ""),
 	}
 
 	var err error
@@ -141,6 +209,7 @@ func LoadProcessing() (Processing, error) {
 		{"PROCESSING_BACKOFF_BASE", "30s", &cfg.BackoffBase},
 		{"PROCESSING_BACKOFF_MAX", "30m", &cfg.BackoffMax},
 		{"CLAMAV_TIMEOUT", "2m", &cfg.ClamAVTimeout},
+		{"QUARANTINE_RETENTION", "720h", &cfg.QuarantineRetention},
 	}
 	for _, d := range durations {
 		if *d.target, err = time.ParseDuration(getEnv(d.key, d.fallback)); err != nil || *d.target <= 0 {
@@ -155,6 +224,7 @@ func LoadProcessing() (Processing, error) {
 		{"PROCESSING_BATCH_SIZE", "10", &cfg.BatchSize},
 		{"PROCESSING_CONCURRENCY", "2", &cfg.Concurrency},
 		{"PROCESSING_MAX_ATTEMPTS", "8", &cfg.MaxAttempts},
+		{"ARCHIVE_MAX_ENTRIES", "10000", &cfg.ArchiveMaxEntries},
 	}
 	for _, n := range ints {
 		if *n.target, err = strconv.Atoi(getEnv(n.key, n.fallback)); err != nil || *n.target <= 0 {
@@ -162,15 +232,29 @@ func LoadProcessing() (Processing, error) {
 		}
 	}
 
-	cfg.MaxFileBytes, err = strconv.ParseInt(getEnv("PROCESSING_MAX_FILE_BYTES", "5368709120"), 10, 64)
-	if err != nil || cfg.MaxFileBytes <= 0 {
-		return Processing{}, fmt.Errorf("PROCESSING_MAX_FILE_BYTES must be a positive integer")
+	int64s := []struct {
+		key, fallback string
+		target        *int64
+	}{
+		{"PROCESSING_MAX_FILE_BYTES", "5368709120", &cfg.MaxFileBytes},
+		{"ARCHIVE_MAX_BYTES", "536870912", &cfg.ArchiveMaxBytes},
+		{"ARCHIVE_MAX_UNCOMPRESSED_BYTES", "2147483648", &cfg.ArchiveMaxExpanded},
+		{"ARCHIVE_MAX_RATIO", "100", &cfg.ArchiveMaxRatio},
+	}
+	for _, n := range int64s {
+		if *n.target, err = strconv.ParseInt(getEnv(n.key, n.fallback), 10, 64); err != nil || *n.target <= 0 {
+			return Processing{}, fmt.Errorf("%s must be a positive integer", n.key)
+		}
 	}
 
-	for _, t := range strings.Split(getEnv("PROCESSING_ALLOWED_CONTENT_TYPES", ""), ",") {
-		if t = strings.TrimSpace(t); t != "" {
-			cfg.AllowedTypes = append(cfg.AllowedTypes, t)
-		}
+	cfg.AllowedTypes = splitList(getEnv("PROCESSING_ALLOWED_CONTENT_TYPES", ""))
+	cfg.DeniedTypes = splitList(getEnv("PROCESSING_DENIED_CONTENT_TYPES", ""))
+
+	if cfg.UnknownType != "allow" && cfg.UnknownType != "reject" {
+		return Processing{}, fmt.Errorf("PROCESSING_UNKNOWN_TYPE_ACTION must be allow or reject")
+	}
+	if cfg.ClamAVTimeout >= cfg.LeaseDuration {
+		return Processing{}, fmt.Errorf("CLAMAV_TIMEOUT must be shorter than PROCESSING_LEASE_DURATION")
 	}
 
 	if cfg.Scanner != "none" && cfg.Scanner != "clamav" {
@@ -202,6 +286,15 @@ type Delivery struct {
 	DefaultTTL   time.Duration
 	MaxTTL       time.Duration
 	ProxyEnabled bool
+	// URLMode is "storage" (presigned, not revocable) or "token"
+	// (revocable API links) when a request names no mode.
+	URLMode string
+	// StallTimeout ends a proxied download when no bytes move for this long.
+	StallTimeout time.Duration
+	// MaxStreams caps concurrent proxied downloads.
+	MaxStreams int
+	// MetricsAddr, when set, serves /debug/vars there.
+	MetricsAddr string
 
 	CDNEnabled bool
 	CDNBaseURL string
@@ -221,9 +314,24 @@ func LoadDelivery() (Delivery, error) {
 		CDNBaseURL:        getEnv("DELIVERY_CDN_BASE_URL", ""),
 		CDNKeyPairID:      getEnv("DELIVERY_CDN_KEY_PAIR_ID", ""),
 		CDNPrivateKeyFile: getEnv("DELIVERY_CDN_PRIVATE_KEY_FILE", ""),
+		URLMode:           strings.ToLower(getEnv("DELIVERY_URL_MODE", "storage")),
+		MetricsAddr:       getEnv("METRICS_ADDR", ""),
 	}
 
 	var err error
+	if cfg.URLMode != "storage" && cfg.URLMode != "token" {
+		return Delivery{}, fmt.Errorf("DELIVERY_URL_MODE must be storage or token")
+	}
+	// Token links are served by the proxy routes.
+	if cfg.URLMode == "token" && !cfg.ProxyEnabled {
+		return Delivery{}, fmt.Errorf("DELIVERY_URL_MODE=token requires DELIVERY_PROXY_ENABLED=true")
+	}
+	if cfg.StallTimeout, err = time.ParseDuration(getEnv("DELIVERY_STALL_TIMEOUT", "30s")); err != nil || cfg.StallTimeout <= 0 {
+		return Delivery{}, fmt.Errorf("DELIVERY_STALL_TIMEOUT must be a positive duration such as 30s")
+	}
+	if cfg.MaxStreams, err = strconv.Atoi(getEnv("DELIVERY_MAX_STREAMS", "64")); err != nil || cfg.MaxStreams <= 0 {
+		return Delivery{}, fmt.Errorf("DELIVERY_MAX_STREAMS must be a positive integer")
+	}
 	if cfg.DefaultTTL, err = time.ParseDuration(getEnv("DELIVERY_URL_TTL", "5m")); err != nil || cfg.DefaultTTL <= 0 {
 		return Delivery{}, fmt.Errorf("DELIVERY_URL_TTL must be a positive duration such as 5m")
 	}
@@ -237,6 +345,17 @@ func LoadDelivery() (Delivery, error) {
 	}
 
 	return cfg, nil
+}
+
+// splitList reads a comma-separated list, dropping empty entries.
+func splitList(value string) []string {
+	var out []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func getEnv(key, fallback string) string {

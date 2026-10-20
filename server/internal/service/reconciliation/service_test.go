@@ -62,6 +62,20 @@ func (r *scriptedResolver) VerifyIntegrity(context.Context, string, string) (mod
 	return r.next()
 }
 
+// The scans find nothing here; scan behaviour is tested with real services.
+func (r *scriptedResolver) ScanOrphanSessions(context.Context, string, uploadservice.ScanOptions) ([]model.ReconciliationFinding, string, error) {
+	return nil, "", nil
+}
+func (r *scriptedResolver) ScanOrphanObjects(context.Context, string, uploadservice.ScanOptions) ([]model.ReconciliationFinding, string, error) {
+	return nil, "", nil
+}
+func (r *scriptedResolver) CleanStaleParts(context.Context, []model.UploadRef, bool) ([]model.ReconciliationFinding, error) {
+	return nil, nil
+}
+func (r *scriptedResolver) AbortLeftoverSessions(context.Context, []model.UploadSession, bool) ([]model.ReconciliationFinding, error) {
+	return nil, nil
+}
+
 type fixture struct {
 	uploads *memory.UploadRepository
 	tasks   *memory.ReconciliationRepository
@@ -94,7 +108,8 @@ func (f *fixture) service(t *testing.T, owner string, resolver Resolver) *Servic
 	svc, err := NewService(f.tasks, resolver, Config{
 		Owner: owner, StorageProvider: "s3", BatchSize: 10,
 		Lease: 5 * time.Minute, Grace: time.Minute, Retry: policy,
-	}, quietLog)
+		ScanPageSize: 10, ScanPages: 3, OrphanMinAge: time.Hour, StuckAfter: time.Hour,
+	}, quietLog, nil)
 	if err != nil {
 		t.Fatalf("new service: %v", err)
 	}
@@ -209,7 +224,7 @@ func TestExpiredLeaseIsReclaimedAndTheStaleWorkerCannotWrite(t *testing.T) {
 	}
 
 	// Worker A wakes up: its stale claim must not overwrite the outcome.
-	err = f.tasks.Finish(ctx, claimed[0].ID, "worker-a", f.clock, model.ReconcileExhausted, "stale")
+	err = f.tasks.Finish(ctx, claimed[0].ID, "worker-a", f.clock, model.ReconcileExhausted, "", "stale")
 	if !errors.Is(err, model.ErrLeaseLost) || f.onlyTask(t).State != model.ReconcileSucceeded {
 		t.Fatalf("stale write: %v, task %+v", err, f.onlyTask(t))
 	}
@@ -332,7 +347,8 @@ func TestWorkerRecoversALostCompletion(t *testing.T) {
 	tasks := memory.NewReconciliationRepository(uploads)
 	svc, err := NewService(tasks, multipart, Config{
 		Owner: "worker-a", StorageProvider: "s3", BatchSize: 10, Lease: time.Minute, Grace: 0, Retry: policy,
-	}, quietLog)
+		ScanPageSize: 10, ScanPages: 3, OrphanMinAge: time.Hour, StuckAfter: time.Hour,
+	}, quietLog, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

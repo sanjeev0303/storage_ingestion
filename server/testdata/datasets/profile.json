@@ -1,0 +1,19 @@
+{
+  "name": "pets-fixture",
+  "description": "The fixture's profile: labels, splits, licence metadata, malware scans, leakage and a re-read of every object's bytes.",
+  "kind": "supervised-classification",
+  "rules": [
+    {"id": "object-exists", "version": 1, "type": "object_exists", "severity": "ERROR"},
+    {"id": "accessible", "version": 1, "type": "lifecycle_state", "severity": "ERROR"},
+    {"id": "label", "version": 1, "type": "required_label", "severity": "ERROR"},
+    {"id": "split", "version": 1, "type": "split_assignment", "severity": "ERROR"},
+    {"id": "licence", "version": 1, "type": "governance_metadata", "severity": "WARNING", "config": {"keys": ["license"]}},
+    {"id": "text-only", "version": 1, "type": "allowed_media_types", "severity": "ERROR", "config": {"types": ["text/plain"]}},
+    {"id": "scanned", "version": 1, "type": "malware_scan", "severity": "ERROR", "config": {"policy": "clean"}},
+    {"id": "bytes", "version": 1, "type": "content_checksum", "severity": "ERROR", "config": {"reverify": true}},
+    {"id": "leakage", "version": 1, "type": "split_leakage", "severity": "ERROR"},
+    {"id": "duplicates", "version": 1, "type": "duplicate_content", "severity": "WARNING"},
+    {"id": "balance", "version": 1, "type": "label_distribution", "severity": "WARNING", "config": {"min_per_class": 2}}
+  ],
+  "thresholds": {"max_errors": 0}
+}

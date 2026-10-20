@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -94,9 +95,67 @@ func (r *AssetRepository) TransitionStatus(
 	if objectKey != "" {
 		asset.ObjectKey = objectKey
 	}
+	if to == model.AssetStatusAvailable {
+		published := at
+		asset.PublishedAt = &published
+	}
 	asset.UpdatedAt = at
 	r.assets[assetID] = asset
 	return nil
+}
+
+func (r *AssetRepository) RecordStorageVersion(ctx context.Context, tenantID, assetID, etag, versionID string, at time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	asset, ok := r.assets[assetID]
+	if !ok || asset.TenantID != tenantID {
+		return model.ErrAssetNotFound
+	}
+	if asset.Status != model.AssetStatusProcessing {
+		return model.ErrInvalidAssetState
+	}
+	asset.StorageETag = etag
+	asset.StorageVersionID = versionID
+	asset.UpdatedAt = at
+	r.assets[assetID] = asset
+	return nil
+}
+
+func (r *AssetRepository) GetByUpload(ctx context.Context, tenantID, uploadID string) (*model.Asset, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	asset, ok := r.byUpload(uploadID)
+	if !ok || asset.TenantID != tenantID {
+		return nil, model.ErrAssetNotFound
+	}
+	return &asset, nil
+}
+
+func (r *AssetRepository) ListAfter(ctx context.Context, afterID, tenantID string, statuses []model.AssetStatus, limit int) ([]model.Asset, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var matched []model.Asset
+	for _, asset := range r.assets {
+		if asset.ID > afterID && (tenantID == "" || asset.TenantID == tenantID) && slices.Contains(statuses, asset.Status) {
+			matched = append(matched, asset)
+		}
+	}
+	slices.SortFunc(matched, func(a, b model.Asset) int { return strings.Compare(a.ID, b.ID) })
+	if len(matched) > limit {
+		matched = matched[:limit]
+	}
+	return matched, nil
 }
 
 // byUpload returns the asset made from an upload, for EnqueueDue.
@@ -109,4 +168,16 @@ func (r *AssetRepository) byUpload(uploadID string) (model.Asset, bool) {
 		}
 	}
 	return model.Asset{}, false
+}
+
+// Update changes a stored asset directly, to set up test states.
+func (r *AssetRepository) Update(assetID string, change func(*model.Asset)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	asset, ok := r.assets[assetID]
+	if !ok {
+		return
+	}
+	change(&asset)
+	r.assets[assetID] = asset
 }

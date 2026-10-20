@@ -25,9 +25,20 @@ const (
 	// ABORTING: an abort or expiry cleanup was requested and the provider
 	// has not yet confirmed that the multipart upload is gone.
 	UploadStatusAborting UploadStatus = "ABORTING"
-	UploadStatusFailed   UploadStatus = "FAILED"
-	UploadStatusExpired  UploadStatus = "EXPIRED"
+	// ABORTED: the client's abort is confirmed: no provider upload and no
+	// assembled object remain.
+	UploadStatusAborted UploadStatus = "ABORTED"
+	// FAILED: a terminal failure recovery cannot safely continue past.
+	UploadStatusFailed UploadStatus = "FAILED"
+	// EXPIRED: the session outlived its lifetime and was cleaned up.
+	UploadStatusExpired UploadStatus = "EXPIRED"
 )
+
+// IsTerminal reports whether no further transition is possible for the
+// upload itself (processing continues separately from VERIFIED).
+func (s UploadStatus) IsTerminal() bool {
+	return s == UploadStatusAborted || s == UploadStatusFailed || s == UploadStatusExpired
+}
 
 // Failure reasons recorded with FAILED, EXPIRED and ABORTING sessions.
 const (
@@ -53,16 +64,31 @@ type UploadSession struct {
 	ContentType    string
 	ExpectedSize   int64
 	ChecksumSHA256 string
+	// Dataset optionally groups the resulting asset for retention.
+	Dataset string
 	// StorageUploadID identifies the multipart upload created
 	// by the object-storage provider.
 	// It is empty for sessions that have not started multipart upload.
 	StorageUploadID string
 	Status          UploadStatus
-	// FailureReason explains a FAILED, EXPIRED or ABORTING session.
+	// FailureReason explains a FAILED, EXPIRED, ABORTED or ABORTING session.
 	FailureReason string
 	ExpiresAt     time.Time
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
+	// CompletedAt and AbortedAt record when completion or abort/expiry was
+	// confirmed. Nil until then.
+	CompletedAt *time.Time
+	AbortedAt   *time.Time
+
+	// The catalog: the normalized logical path the upload publishes to
+	// (in Dataset's namespace), the object claimed for it, and the user
+	// metadata of the version. CreateOnly refuses an existing path.
+	// Sessions with no path are not catalogued.
+	Path       string
+	ObjectID   string
+	CreateOnly bool
+	Metadata   map[string]string
 }
 
 // Validate checks the basic invariants of an upload session.
@@ -148,8 +174,9 @@ func CanTransition(from, next UploadStatus) bool {
 			next == UploadStatusFailed
 
 	case UploadStatusAborting:
-		return next == UploadStatusFailed ||
-			next == UploadStatusExpired
+		return next == UploadStatusAborted ||
+			next == UploadStatusExpired ||
+			next == UploadStatusFailed
 	}
 
 	return false

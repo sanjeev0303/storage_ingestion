@@ -31,7 +31,36 @@ services:
     volumes:
       - minio_data:/data
 
+  # Malware scanner for the processing worker (clamd INSTREAM on 3310).
+  # The first start downloads signatures and takes a few minutes.
+  clamav:
+    image: clamav/clamav:1.4
+    container_name: object-storage-clamav
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3310:3310"
+    volumes:
+      - clamav_data:/var/lib/clamav
+    healthcheck:
+      test: ["CMD", "clamdcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 5m
+
+  # Local SQS-compatible queue for the event pipeline (outbox publisher and
+  # consumers). Queues are created by the workers when SQS_CREATE_QUEUES is
+  # true; nothing is persisted across restarts, the outbox is the source of
+  # truth.
+  elasticmq:
+    image: softwaremill/elasticmq-native:1.6.14
+    container_name: object-storage-elasticmq
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9324:9324"
+      - "127.0.0.1:9325:9325"
 
 volumes:
   postgres_data:
   minio_data:
+  clamav_data:

@@ -63,13 +63,25 @@ func IsPermanent(err error) bool {
 }
 
 // Sanitize turns an error into the short, single-line text that is stored
-// with a task or job and logged. Errors reaching it carry provider codes
-// and operation names, never presigned URLs, credentials or file content.
+// with a task, job or event and logged. Errors reaching it carry provider
+// codes and operation names, never presigned URLs, credentials or file
+// content. As a second line of defence, a URL's query string and any
+// signature parameter are cut out, so a signed URL that slipped into an
+// error is stored without its signature.
 func Sanitize(err error) string {
 	if err == nil {
 		return ""
 	}
-	text := strings.Join(strings.Fields(err.Error()), " ")
+	fields := strings.Fields(err.Error())
+	for i, field := range fields {
+		if strings.Contains(field, "://") && strings.Contains(field, "?") {
+			base, _, _ := strings.Cut(field, "?")
+			fields[i] = base + "?[redacted]"
+		} else if strings.Contains(field, "X-Amz-") || strings.Contains(field, "Signature=") {
+			fields[i] = "[redacted]"
+		}
+	}
+	text := strings.Join(fields, " ")
 	const limit = 500
 	if len(text) > limit {
 		text = text[:limit]

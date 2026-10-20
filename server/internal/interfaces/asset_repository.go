@@ -36,4 +36,17 @@ type AssetRepository interface {
 		objectKey string,
 		at time.Time,
 	) error
+
+	// ListAfter pages through assets in ID order after afterID, of one
+	// tenant when tenantID is not empty, and only in the given statuses.
+	ListAfter(ctx context.Context, afterID, tenantID string, statuses []model.AssetStatus, limit int) ([]model.Asset, error)
+
+	// GetByUpload returns the tenant's asset made from an upload, or
+	// model.ErrAssetNotFound.
+	GetByUpload(ctx context.Context, tenantID, uploadID string) (*model.Asset, error)
+
+	// RecordStorageVersion saves the validators of the verified delivery
+	// copy while the asset is still PROCESSING, before it is published.
+	// model.ErrInvalidAssetState in any other status.
+	RecordStorageVersion(ctx context.Context, tenantID, assetID, etag, versionID string, at time.Time) error
 }

@@ -2,6 +2,8 @@ package delivery
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"log/slog"
@@ -17,16 +19,29 @@ import (
 var quietLog = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 var (
-	owner    = model.Principal{TenantID: "tenant-1", UserID: "user-1"}
-	content  = []byte("0123456789abcdefghij") // 20 bytes
-	baseTime = time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	owner      = member("tenant-1", "user-1", model.RoleDeveloper)
+	content    = []byte("0123456789abcdefghij") // 20 bytes
+	contentSum = sha256Hex(content)
+	baseTime   = time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
 )
+
+// member is an organization member with the built-in role roleID.
+func member(tenantID, userID, roleID string) model.Principal {
+	role, _ := model.BuiltInRole(roleID)
+	return model.Principal{TenantID: tenantID, UserID: userID, RoleID: role.ID, Permissions: role.Permissions}
+}
+
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
 
 type env struct {
 	svc     *Service
 	assets  *memory.AssetRepository
 	storage *storagememory.ObjectStorage
 	audit   *memory.DeliveryAuditRepository
+	tokens  *memory.DownloadTokenRepository
 }
 
 func newEnv(t *testing.T, cdn *CDNConfig) *env {
@@ -35,8 +50,9 @@ func newEnv(t *testing.T, cdn *CDNConfig) *env {
 		assets:  memory.NewAssetRepository(),
 		storage: storagememory.NewObjectStorage(),
 		audit:   memory.NewDeliveryAuditRepository(),
+		tokens:  memory.NewDownloadTokenRepository(),
 	}
-	svc, err := NewService(e.assets, e.storage, e.audit, Config{
+	svc, err := NewService(e.assets, e.storage, e.audit, e.tokens, Config{
 		Bucket: "private-bucket", Prefix: "assets", DefaultTTL: 5 * time.Minute, MaxTTL: 15 * time.Minute, CDN: cdn,
 	}, quietLog)
 	if err != nil {
@@ -51,13 +67,19 @@ func newEnv(t *testing.T, cdn *CDNConfig) *env {
 func (e *env) asset(t *testing.T, id string, status model.AssetStatus) {
 	t.Helper()
 	key := "quarantine/tenant-1/up-" + id
+	storageETag := ""
+	var published *time.Time
 	if status == model.AssetStatusAvailable {
 		key = "assets/tenant-1/" + id
 		e.storage.PutObject(key, content)
+		storageETag = e.storage.ETag(key)
+		at := baseTime
+		published = &at
 	}
 	asset := model.Asset{
 		ID: id, TenantID: "tenant-1", OwnerID: "user-1", UploadID: "up-" + id, ObjectKey: key,
 		FileName: "report.pdf", ContentType: "application/pdf", SizeBytes: int64(len(content)),
+		ChecksumSHA256: contentSum, StorageETag: storageETag, PublishedAt: published,
 		Status: status, CreatedAt: baseTime, UpdatedAt: baseTime,
 	}
 	if status == model.AssetStatusRejected {
@@ -88,7 +110,7 @@ func TestOnlyAvailableAssetsAreDelivered(t *testing.T) {
 			if !errors.Is(err, c.want) {
 				t.Fatalf("URL: got %v, want %v", err, c.want)
 			}
-			_, err = e.svc.Open(context.Background(), owner, "a1", "", "")
+			_, err = e.svc.Open(context.Background(), owner, "a1", DownloadRequest{})
 			if !errors.Is(err, c.want) {
 				t.Fatalf("proxy: got %v, want %v", err, c.want)
 			}
@@ -99,13 +121,13 @@ func TestOnlyAvailableAssetsAreDelivered(t *testing.T) {
 	}
 }
 
-func TestOtherTenantsAndOwnersGetTheSameNotFound(t *testing.T) {
+func TestOtherTenantsGetTheSameNotFound(t *testing.T) {
 	e := newEnv(t, nil)
 	e.asset(t, "a1", model.AssetStatusAvailable)
 
 	for _, intruder := range []model.Principal{
-		{TenantID: "tenant-2", UserID: "user-1"}, // another tenant, same user ID
-		{TenantID: "tenant-1", UserID: "user-2"}, // same tenant, not the owner
+		member("tenant-2", "user-1", model.RoleDeveloper), // another tenant, same user ID
+		member("tenant-2", "user-2", model.RoleOwner),     // another tenant's owner
 	} {
 		for _, call := range []func() error{
 			func() error { _, err := e.svc.Metadata(context.Background(), intruder, "a1"); return err },
@@ -113,7 +135,10 @@ func TestOtherTenantsAndOwnersGetTheSameNotFound(t *testing.T) {
 				_, err := e.svc.CreateDownloadURL(context.Background(), intruder, "a1", URLRequest{})
 				return err
 			},
-			func() error { _, err := e.svc.Open(context.Background(), intruder, "a1", "", ""); return err },
+			func() error {
+				_, err := e.svc.Open(context.Background(), intruder, "a1", DownloadRequest{})
+				return err
+			},
 		} {
 			if err := call(); !errors.Is(err, ErrNotFound) {
 				t.Fatalf("%+v: expected ErrNotFound, got %v", intruder, err)
@@ -129,14 +154,45 @@ func TestOtherTenantsAndOwnersGetTheSameNotFound(t *testing.T) {
 	}
 }
 
+func TestMembersAccessByPermission(t *testing.T) {
+	e := newEnv(t, nil)
+	e.asset(t, "a1", model.AssetStatusAvailable)
+
+	// The asset belongs to the organization: a teammate with the
+	// developer role downloads it.
+	if _, err := e.svc.CreateDownloadURL(context.Background(), member("tenant-1", "user-2", model.RoleDeveloper), "a1", URLRequest{}); err != nil {
+		t.Fatalf("teammate download: %v", err)
+	}
+
+	// An auditor reads metadata but cannot download.
+	auditor := member("tenant-1", "user-3", model.RoleAuditor)
+	if _, err := e.svc.Metadata(context.Background(), auditor, "a1"); err != nil {
+		t.Fatalf("auditor metadata: %v", err)
+	}
+	presigned := len(e.storage.Presigns)
+	if _, err := e.svc.CreateDownloadURL(context.Background(), auditor, "a1", URLRequest{}); !errors.Is(err, model.ErrForbidden) {
+		t.Fatalf("auditor download URL: expected ErrForbidden, got %v", err)
+	}
+	if _, err := e.svc.Open(context.Background(), auditor, "a1", DownloadRequest{}); !errors.Is(err, model.ErrForbidden) {
+		t.Fatalf("auditor download: expected ErrForbidden, got %v", err)
+	}
+	if len(e.storage.Presigns) != presigned {
+		t.Fatal("no URL may be signed for a caller without assets.download")
+	}
+}
+
 func TestUnauthenticatedCallersGetNothing(t *testing.T) {
 	e := newEnv(t, nil)
 	e.asset(t, "a1", model.AssetStatusAvailable)
 
-	for _, nobody := range []model.Principal{{}, {TenantID: "tenant-1"}, {UserID: "user-1"}} {
+	for _, nobody := range []model.Principal{{}, {TenantID: "tenant-1", Permissions: model.AllPermissions}} {
 		if _, err := e.svc.CreateDownloadURL(context.Background(), nobody, "a1", URLRequest{}); !errors.Is(err, model.ErrUnauthenticated) {
 			t.Fatalf("expected ErrUnauthenticated, got %v", err)
 		}
+	}
+	// A signed-in caller who named no organization has no tenant access.
+	if _, err := e.svc.CreateDownloadURL(context.Background(), model.Principal{UserID: "user-1"}, "a1", URLRequest{}); !errors.Is(err, model.ErrTenantRequired) {
+		t.Fatalf("expected ErrTenantRequired, got %v", err)
 	}
 	if len(e.storage.Presigns) != 0 {
 		t.Fatal("no URL may be signed without a principal")
@@ -165,7 +221,7 @@ func TestURLLifetimeIsBounded(t *testing.T) {
 		}
 	}
 
-	if _, err := NewService(e.assets, e.storage, e.audit, Config{
+	if _, err := NewService(e.assets, e.storage, e.audit, nil, Config{
 		Bucket: "b", Prefix: "assets", DefaultTTL: time.Minute, MaxTTL: 2 * time.Hour,
 	}, quietLog); err == nil {
 		t.Fatal("a maximum above the hard limit must be refused")
@@ -214,7 +270,7 @@ func TestStorageFailureIsMappedAndAudited(t *testing.T) {
 	}
 
 	e.storage.RangeErr = errors.New("get object range: provider error InternalError")
-	if _, err := e.svc.Open(context.Background(), owner, "a1", "", ""); err != ErrStorageUnavailable {
+	if _, err := e.svc.Open(context.Background(), owner, "a1", DownloadRequest{}); err != ErrStorageUnavailable {
 		t.Fatalf("expected ErrStorageUnavailable for the proxy, got %v", err)
 	}
 }
@@ -277,7 +333,7 @@ func TestDeletionTakesEffectOnTheNextRequest(t *testing.T) {
 	if _, err := e.svc.CreateDownloadURL(context.Background(), owner, "a1", URLRequest{}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("a deleted asset must not get a URL, got %v", err)
 	}
-	if _, err := e.svc.Open(context.Background(), owner, "a1", "", ""); !errors.Is(err, ErrNotFound) {
+	if _, err := e.svc.Open(context.Background(), owner, "a1", DownloadRequest{}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("a deleted asset must not be streamed, got %v", err)
 	}
 }
@@ -311,7 +367,7 @@ func TestCDNDeliveryIsAlwaysSigned(t *testing.T) {
 		{BaseURL: "http://cdn.example.test", Signer: signer}, // not https
 		{BaseURL: "https://cdn.example.test?x=1", Signer: signer},
 	} {
-		if _, err := NewService(e.assets, e.storage, e.audit, Config{
+		if _, err := NewService(e.assets, e.storage, e.audit, nil, Config{
 			Bucket: "b", Prefix: "assets", DefaultTTL: time.Minute, MaxTTL: time.Minute, CDN: bad,
 		}, quietLog); err == nil {
 			t.Fatalf("CDN config %+v must be refused", bad)
@@ -323,7 +379,7 @@ func TestProxiedRangesAndCancellation(t *testing.T) {
 	e := newEnv(t, nil)
 	e.asset(t, "a1", model.AssetStatusAvailable)
 	read := func(header string) (Download, string, error) {
-		d, err := e.svc.Open(context.Background(), owner, "a1", header, "")
+		d, err := e.svc.Open(context.Background(), owner, "a1", DownloadRequest{Range: header})
 		if err != nil {
 			return d, "", err
 		}
@@ -347,7 +403,7 @@ func TestProxiedRangesAndCancellation(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := e.svc.Open(ctx, owner, "a1", "", ""); !errors.Is(err, context.Canceled) {
+	if _, err := e.svc.Open(ctx, owner, "a1", DownloadRequest{}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation must reach storage, got %v", err)
 	}
 }
@@ -373,11 +429,25 @@ func TestParseRange(t *testing.T) {
 		{"bytes=9-1", 0, 99, false, nil},     // malformed: ignored
 		{"items=0-1", 0, 99, false, nil},
 		{"bytes=abc", 0, 99, false, nil},
+		{"bytes=+5-9", 0, 99, false, nil},  // signs are not digits
+		{"bytes=-", 0, 99, false, nil},     // no bounds at all
+		{"bytes= 5 - 9 ", 5, 9, true, nil}, // optional whitespace
+		{"bytes=99999999999999999999-", 0, 99, false, nil},
 	}
 	for _, c := range cases {
 		first, last, partial, err := parseRange(c.header, size)
 		if first != c.first || last != c.last || partial != c.partial || !errors.Is(err, c.err) {
 			t.Errorf("%q: got %d-%d partial=%v err=%v", c.header, first, last, partial, err)
 		}
+	}
+
+	// An empty object has no satisfiable range, only the whole (empty) body.
+	for _, header := range []string{"bytes=0-", "bytes=0-0", "bytes=-1"} {
+		if _, _, _, err := parseRange(header, 0); !errors.Is(err, ErrRangeNotSatisfiable) {
+			t.Errorf("empty object %q: got %v", header, err)
+		}
+	}
+	if first, last, partial, err := parseRange("", 0); err != nil || partial || last-first+1 != 0 {
+		t.Errorf("empty object, no range: %d-%d %v %v", first, last, partial, err)
 	}
 }

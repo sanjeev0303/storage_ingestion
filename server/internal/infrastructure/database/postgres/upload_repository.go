@@ -37,11 +37,19 @@ const uploadColumns = `
 	created_at,
 	updated_at,
 	COALESCE(storage_upload_id, ''),
-	COALESCE(failure_reason, '')
+	COALESCE(failure_reason, ''),
+	completed_at,
+	aborted_at,
+	COALESCE(dataset, ''),
+	COALESCE(path, ''),
+	COALESCE(object_id, ''),
+	create_only,
+	metadata
 `
 
 func scanUpload(row pgx.Row) (*model.UploadSession, error) {
 	var upload model.UploadSession
+	var metadata []byte
 
 	err := row.Scan(
 		&upload.ID,
@@ -58,8 +66,18 @@ func scanUpload(row pgx.Row) (*model.UploadSession, error) {
 		&upload.UpdatedAt,
 		&upload.StorageUploadID,
 		&upload.FailureReason,
+		&upload.CompletedAt,
+		&upload.AbortedAt,
+		&upload.Dataset,
+		&upload.Path,
+		&upload.ObjectID,
+		&upload.CreateOnly,
+		&metadata,
 	)
 	if err != nil {
+		return nil, err
+	}
+	if upload.Metadata, err = decodeMetadata(metadata); err != nil {
 		return nil, err
 	}
 
@@ -73,39 +91,7 @@ func (r *UploadRepository) Create(
 	if upload == nil {
 		return errors.New("upload session must not be nil")
 	}
-
-	_, err := r.db.Pool.Exec(ctx, `
-		INSERT INTO upload_sessions (
-			id, tenant_id, owner_id, object_key,
-			file_name, content_type, expected_size,
-			checksum_sha256, status, expires_at,
-			created_at, updated_at, storage_upload_id
-		)
-		VALUES (
-			$1, $2, $3, $4, $5, $6, $7,
-			NULLIF($8, ''), $9, $10, $11, $12,
-			NULLIF($13, '')
-		)
-	`,
-		upload.ID,
-		upload.TenantID,
-		upload.OwnerID,
-		upload.ObjectKey,
-		upload.FileName,
-		upload.ContentType,
-		upload.ExpectedSize,
-		upload.ChecksumSHA256,
-		upload.Status,
-		upload.ExpiresAt,
-		upload.CreatedAt,
-		upload.UpdatedAt,
-		upload.StorageUploadID,
-	)
-	if err != nil {
-		return mapDatabaseError(err)
-	}
-
-	return nil
+	return r.insert(ctx, upload, "")
 }
 
 func (r *UploadRepository) CreateWithIdempotency(
@@ -122,16 +108,53 @@ func (r *UploadRepository) CreateWithIdempotency(
 
 	// The upload row and its idempotency key are committed together.
 	// PostgreSQL's unique index arbitrates concurrent requests.
-	_, err := r.db.Pool.Exec(ctx, `
+	return r.insert(ctx, upload, key)
+}
+
+// insert stores a session without a quota reservation; a catalogued one
+// claims its object in the same transaction.
+func (r *UploadRepository) insert(ctx context.Context, upload *model.UploadSession, key string) error {
+	if upload.Path == "" {
+		return insertUploadSession(ctx, r.db.Pool, upload, key, false, false)
+	}
+	return withTx(ctx, r.db, func(tx pgx.Tx) error {
+		if err := claimObject(ctx, tx, upload); err != nil {
+			return err
+		}
+		return insertUploadSession(ctx, tx, upload, key, false, false)
+	})
+}
+
+type execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// insertUploadSession stores a session. With reserved set, its declared
+// size is recorded as the tenant quota it holds (see QuotaRepository).
+func insertUploadSession(ctx context.Context, q execer, upload *model.UploadSession, idempotencyKey string, reserved, multipart bool) error {
+	var quotaState any
+	var reservedBytes int64
+	if reserved {
+		quotaState, reservedBytes = "RESERVED", upload.ExpectedSize
+	}
+	metadata, err := encodeMetadata(upload.Metadata)
+	if err != nil {
+		return err
+	}
+	_, err = q.Exec(ctx, `
 		INSERT INTO upload_sessions (
 			id, tenant_id, owner_id, object_key,
 			file_name, content_type, expected_size,
-			checksum_sha256, status, idempotancy_key,
-			expires_at, created_at, updated_at
+			checksum_sha256, status, idempotancy_key, expires_at,
+			created_at, updated_at, storage_upload_id, dataset,
+			quota_state, reserved_bytes, multipart,
+			path, object_id, create_only, metadata
 		)
 		VALUES (
 			$1, $2, $3, $4, $5, $6, $7,
-			NULLIF($8, ''), $9, $10, $11, $12, $13
+			NULLIF($8, ''), $9, NULLIF($10, ''), $11, $12, $13,
+			NULLIF($14, ''), NULLIF($15, ''), $16, $17, $18,
+			NULLIF($19, ''), NULLIF($20, ''), $21, $22
 		)
 	`,
 		upload.ID,
@@ -143,15 +166,23 @@ func (r *UploadRepository) CreateWithIdempotency(
 		upload.ExpectedSize,
 		upload.ChecksumSHA256,
 		upload.Status,
-		key,
+		idempotencyKey,
 		upload.ExpiresAt,
 		upload.CreatedAt,
 		upload.UpdatedAt,
+		upload.StorageUploadID,
+		upload.Dataset,
+		quotaState,
+		reservedBytes,
+		multipart,
+		upload.Path,
+		upload.ObjectID,
+		upload.CreateOnly,
+		metadata,
 	)
 	if err != nil {
 		return mapDatabaseError(err)
 	}
-
 	return nil
 }
 
@@ -256,6 +287,7 @@ func (r *UploadRepository) TransitionStatus(
 	to model.UploadStatus,
 	failureReason string,
 	at time.Time,
+	events ...model.OutboxEvent,
 ) error {
 	allowed := make([]string, 0, len(from))
 	for _, status := range from {
@@ -267,12 +299,20 @@ func (r *UploadRepository) TransitionStatus(
 		return fmt.Errorf("%w: no allowed transition to %s", model.ErrInvalidUploadState, to)
 	}
 
+	tx, err := r.db.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin upload transition: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
 	// The status condition makes this a compare-and-set: of two racing
 	// writers (complete vs abort, worker vs request) exactly one wins.
-	tag, err := r.db.Pool.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 		UPDATE upload_sessions
 		SET status = $3,
 		    failure_reason = COALESCE(NULLIF($4, ''), failure_reason),
+		    completed_at = CASE WHEN $3 = 'COMPLETED' THEN $5 ELSE completed_at END,
+		    aborted_at = CASE WHEN $3 IN ('ABORTED', 'EXPIRED') THEN $5 ELSE aborted_at END,
 		    updated_at = $5
 		WHERE tenant_id = $1
 		  AND id = $2
@@ -281,11 +321,26 @@ func (r *UploadRepository) TransitionStatus(
 	if err != nil {
 		return mapDatabaseError(err)
 	}
-	if tag.RowsAffected() == 1 {
-		return nil
+	if tag.RowsAffected() == 0 {
+		return r.missingOrInvalid(ctx, tenantID, uploadID)
 	}
 
-	return r.missingOrInvalid(ctx, tenantID, uploadID)
+	// An upload that ends without an object gives back its quota in the
+	// same transaction.
+	switch to {
+	case model.UploadStatusFailed, model.UploadStatusAborted, model.UploadStatusExpired:
+		if err := releaseReservation(ctx, tx, tenantID, uploadID, at); err != nil {
+			return err
+		}
+	}
+
+	if err := insertOutbox(ctx, tx, events...); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit upload transition: %w", err)
+	}
+	return nil
 }
 
 func (r *UploadRepository) SetStorageUploadID(
