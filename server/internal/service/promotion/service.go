@@ -26,11 +26,51 @@ type Config struct {
 // delete are not atomic, so promotion is split: Promote copies, verifies
 // the copy and records AVAILABLE; RemoveSource deletes the quarantine
 // object only afterwards. Every step is safe to repeat.
+//
+// The source is the asset's staging connection and the destination its
+// storage connection (Phase 11). On one connection the copy stays inside
+// the provider; between two (an upload staged on the platform for a
+// tenant's bucket) the bytes are streamed, one part in memory at a time.
 type Service struct {
 	assets  interfaces.AssetRepository
 	storage interfaces.MultipartStorage
 	cfg     Config
 	now     func() time.Time
+	// router reaches tenants' storage connections; nil keeps promotion on
+	// the platform's buckets.
+	router interfaces.StorageRouter
+}
+
+// Route lets promotion reach tenants' storage connections.
+func (s *Service) Route(router interfaces.StorageRouter) *Service {
+	s.router = router
+	return s
+}
+
+// side is one of an asset's connections: where it is and how to reach it.
+type side struct {
+	interfaces.StoragePlace
+	storage interfaces.MultipartStorage
+	// writer streams into a tenant connection; nil on the platform.
+	writer interfaces.StorageProvider
+}
+
+func (s *Service) place(ctx context.Context, tenantID, connectionID string) (side, error) {
+	if model.IsPlatformConnection(connectionID) {
+		return side{storage: s.storage, StoragePlace: interfaces.StoragePlace{
+			ConnectionID:  model.PlatformConnectionID,
+			StagingBucket: s.cfg.SourceBucket, StagingPrefix: "quarantine",
+			ReadyBucket: s.cfg.DestinationBucket, ReadyPrefix: s.cfg.Prefix,
+		}}, nil
+	}
+	if s.router == nil {
+		return side{}, model.ErrStorageNotConfigured
+	}
+	loc, err := s.router.Locate(ctx, tenantID, connectionID)
+	if err != nil {
+		return side{}, fmt.Errorf("resolve storage connection: %w", err)
+	}
+	return side{StoragePlace: loc.StoragePlace, storage: loc.Storage, writer: loc.Storage}, nil
 }
 
 func NewService(assets interfaces.AssetRepository, storage interfaces.MultipartStorage, cfg Config) (*Service, error) {
@@ -48,9 +88,18 @@ func NewService(assets interfaces.AssetRepository, storage interfaces.MultipartS
 	return &Service{assets: assets, storage: storage, cfg: cfg, now: func() time.Time { return time.Now().UTC() }}, nil
 }
 
-// DestinationKey is where an asset is promoted to.
-func (s *Service) DestinationKey(asset model.Asset) string {
-	return fmt.Sprintf("%s/%s/%s", s.cfg.Prefix, asset.TenantID, asset.ID)
+// DestinationKey is where an asset is promoted to, on its storage
+// connection.
+func (s *Service) DestinationKey(ctx context.Context, asset model.Asset) (string, error) {
+	dst, err := s.place(ctx, asset.TenantID, asset.StorageConnectionID)
+	if err != nil {
+		return "", err
+	}
+	return readyKey(dst, asset), nil
+}
+
+func readyKey(dst side, asset model.Asset) string {
+	return fmt.Sprintf("%s/%s/%s", dst.ReadyPrefix, asset.TenantID, asset.ID)
 }
 
 // Promote copies the quarantine object to destinationKey, verifies the copy
@@ -59,7 +108,15 @@ func (s *Service) DestinationKey(asset model.Asset) string {
 // resulting status. A REJECTED or DELETED result means someone else
 // finished the asset first; the caller then removes the copy.
 func (s *Service) Promote(ctx context.Context, asset model.Asset, destinationKey string) (model.AssetStatus, error) {
-	if destinationKey != s.DestinationKey(asset) {
+	src, err := s.place(ctx, asset.TenantID, asset.StagingConnectionID)
+	if err != nil {
+		return "", err
+	}
+	dst, err := s.place(ctx, asset.TenantID, asset.StorageConnectionID)
+	if err != nil {
+		return "", err
+	}
+	if destinationKey != readyKey(dst, asset) {
 		return "", retry.Permanent(errors.New("promotion destination does not match the derived key"))
 	}
 
@@ -75,18 +132,18 @@ func (s *Service) Promote(ctx context.Context, asset model.Asset, destinationKey
 		return asset.Status, nil
 	}
 
-	if asset.ObjectKey != quarantineKey(asset.TenantID, asset.UploadID) {
+	if asset.ObjectKey != src.StagingKey(asset.TenantID, asset.UploadID) {
 		return "", retry.Permanent(errors.New("asset source is not its verified quarantine key"))
 	}
 
 	// A crash after an earlier copy leaves a destination object behind. A
 	// matching one is reused; anything else is overwritten by the copy.
-	stored, matches, err := s.copyMatches(ctx, asset, destinationKey)
+	stored, matches, err := s.copyMatches(ctx, dst, asset, destinationKey)
 	if err != nil {
 		return "", err
 	}
 	if !matches {
-		err := s.storage.CopyObject(ctx, s.cfg.SourceBucket, asset.ObjectKey, s.cfg.DestinationBucket, destinationKey)
+		err := s.transfer(ctx, src, dst, asset, destinationKey)
 		if errors.Is(err, interfaces.ErrObjectNotFound) {
 			// The verified source is gone and the asset was never promoted, so
 			// there is nothing that could be delivered.
@@ -96,13 +153,13 @@ func (s *Service) Promote(ctx context.Context, asset model.Asset, destinationKey
 			return "", fmt.Errorf("copy to delivery key: %w", err)
 		}
 
-		stored, matches, err = s.copyMatches(ctx, asset, destinationKey)
+		stored, matches, err = s.copyMatches(ctx, dst, asset, destinationKey)
 		if err != nil {
 			return "", err
 		}
 		if !matches {
 			// A bad copy is never promoted.
-			if err := s.RemoveDestination(ctx, destinationKey); err != nil {
+			if err := s.RemoveDestination(ctx, asset, destinationKey); err != nil {
 				return "", fmt.Errorf("promoted copy failed verification and could not be removed: %w", err)
 			}
 			return "", errors.New("promoted copy failed verification; it was removed and will be copied again")
@@ -130,11 +187,31 @@ func (s *Service) Promote(ctx context.Context, asset model.Asset, destinationKey
 	return model.AssetStatusAvailable, nil
 }
 
+// transfer copies the verified source to the destination: inside the
+// provider when both are one connection, otherwise streamed from one to
+// the other. A failed stream leaves no object (the writer aborts it) or a
+// partial one that copyMatches refuses, so promotion just runs again.
+func (s *Service) transfer(ctx context.Context, src, dst side, asset model.Asset, destinationKey string) error {
+	if src.ConnectionID == dst.ConnectionID {
+		return src.storage.CopyObject(ctx, src.StagingBucket, asset.ObjectKey, dst.ReadyBucket, destinationKey)
+	}
+	if dst.writer == nil {
+		return retry.Permanent(errors.New("an upload staged on a tenant connection cannot be published on the platform"))
+	}
+	body, err := src.storage.OpenObject(ctx, src.StagingBucket, asset.ObjectKey)
+	if err != nil {
+		return err
+	}
+	defer body.Close()
+	_, err = dst.writer.WriteObject(ctx, dst.ReadyBucket, destinationKey, body, asset.SizeBytes, asset.ContentType)
+	return err
+}
+
 // copyMatches reports whether the destination holds exactly the verified
 // bytes: same size, then the same SHA-256, streamed. A missing destination
 // does not match. It returns the destination's validators.
-func (s *Service) copyMatches(ctx context.Context, asset model.Asset, destinationKey string) (interfaces.ObjectMetadata, bool, error) {
-	metadata, err := s.storage.HeadObject(ctx, s.cfg.DestinationBucket, destinationKey)
+func (s *Service) copyMatches(ctx context.Context, dst side, asset model.Asset, destinationKey string) (interfaces.ObjectMetadata, bool, error) {
+	metadata, err := dst.storage.HeadObject(ctx, dst.ReadyBucket, destinationKey)
 	if errors.Is(err, interfaces.ErrObjectNotFound) {
 		return metadata, false, nil
 	}
@@ -145,7 +222,7 @@ func (s *Service) copyMatches(ctx context.Context, asset model.Asset, destinatio
 		return metadata, false, nil
 	}
 
-	body, err := s.storage.OpenObject(ctx, s.cfg.DestinationBucket, destinationKey)
+	body, err := dst.storage.OpenObject(ctx, dst.ReadyBucket, destinationKey)
 	if err != nil {
 		return metadata, false, fmt.Errorf("open promoted copy: %w", err)
 	}
@@ -163,16 +240,25 @@ func (s *Service) RemoveSource(ctx context.Context, asset model.Asset) error {
 	if asset.Status != model.AssetStatusAvailable {
 		return retry.Permanent(errors.New("the quarantine source is only removed after promotion"))
 	}
-	err := s.storage.DeleteObject(ctx, s.cfg.SourceBucket, quarantineKey(asset.TenantID, asset.UploadID))
+	src, err := s.place(ctx, asset.TenantID, asset.StagingConnectionID)
+	if err != nil {
+		return err
+	}
+	err = src.storage.DeleteObject(ctx, src.StagingBucket, src.StagingKey(asset.TenantID, asset.UploadID))
 	if err != nil && !errors.Is(err, interfaces.ErrObjectNotFound) {
 		return fmt.Errorf("remove quarantine source: %w", err)
 	}
 	return nil
 }
 
-// RemoveDestination deletes a copy that must not be delivered.
-func (s *Service) RemoveDestination(ctx context.Context, destinationKey string) error {
-	err := s.storage.DeleteObject(ctx, s.cfg.DestinationBucket, destinationKey)
+// RemoveDestination deletes a copy of the asset that must not be
+// delivered.
+func (s *Service) RemoveDestination(ctx context.Context, asset model.Asset, destinationKey string) error {
+	dst, err := s.place(ctx, asset.TenantID, asset.StorageConnectionID)
+	if err != nil {
+		return err
+	}
+	err = dst.storage.DeleteObject(ctx, dst.ReadyBucket, destinationKey)
 	if err != nil && !errors.Is(err, interfaces.ErrObjectNotFound) {
 		return fmt.Errorf("remove promoted copy: %w", err)
 	}
@@ -194,9 +280,4 @@ func (s *Service) reject(ctx context.Context, asset model.Asset, reason string) 
 		return "", fmt.Errorf("reject asset: %w", err)
 	}
 	return model.AssetStatusRejected, nil
-}
-
-// quarantineKey matches the key the upload service gives every session.
-func quarantineKey(tenantID, uploadID string) string {
-	return fmt.Sprintf("quarantine/%s/%s", tenantID, uploadID)
 }

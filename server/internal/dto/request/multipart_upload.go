@@ -12,6 +12,8 @@ type StartMultipartUploadRequest struct {
 	Path       string            `json:"path,omitempty"`
 	Metadata   map[string]string `json:"metadata,omitempty"`
 	CreateOnly bool              `json:"create_only,omitempty"`
+	// StorageConnectionID, as in CreateUploadRequest.
+	StorageConnectionID string `json:"storage_connection_id,omitempty"`
 }
 
 type PresignPartsRequest struct {

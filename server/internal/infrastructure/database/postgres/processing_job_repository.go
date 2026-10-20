@@ -121,11 +121,11 @@ func enqueue(ctx context.Context, tx pgx.Tx, now time.Time, maxAttempts int, upl
 		INSERT INTO assets (
 			id, tenant_id, owner_id, upload_id, object_key, file_name,
 			content_type, size_bytes, checksum_sha256, dataset, status, created_at, updated_at,
-			object_id, metadata
+			object_id, metadata, storage_connection_id, staging_connection_id
 		)
 		SELECT gen_random_uuid()::text, s.tenant_id, s.owner_id, s.id, s.object_key, s.file_name,
 		       s.content_type, s.expected_size, s.checksum_sha256, s.dataset, 'QUARANTINED', $1, $1,
-		       s.object_id, s.metadata
+		       s.object_id, s.metadata, s.storage_connection_id, s.staging_connection_id
 		FROM upload_sessions AS s
 		WHERE s.status IN ('COMPLETED', 'VERIFIED')
 		  AND ($2 = '' OR s.id = $2)
@@ -139,9 +139,10 @@ func enqueue(ctx context.Context, tx pgx.Tx, now time.Time, maxAttempts int, upl
 	tag, err := tx.Exec(ctx, `
 		INSERT INTO processing_jobs (
 			id, tenant_id, asset_id, upload_id, stage, state,
-			max_attempts, next_attempt_at, created_at, updated_at
+			max_attempts, next_attempt_at, created_at, updated_at, storage_connection_id
 		)
-		SELECT gen_random_uuid()::text, a.tenant_id, a.id, a.upload_id, 'VERIFY', 'PENDING', $2, $1, $1, $1
+		SELECT gen_random_uuid()::text, a.tenant_id, a.id, a.upload_id, 'VERIFY', 'PENDING', $2, $1, $1, $1,
+		       a.storage_connection_id
 		FROM assets AS a
 		WHERE a.status IN ('QUARANTINED', 'PROCESSING')
 		  AND ($3 = '' OR a.upload_id = $3)

@@ -210,6 +210,15 @@ const (
 	// PermOwnership grants or takes the owner role and deactivates the
 	// organization. Only owners have it; custom roles cannot.
 	PermOwnership
+	// PermStorageRead lists storage providers and the organization's
+	// storage connections (never their credentials).
+	PermStorageRead
+	// PermStorageUse sends an upload to a connection other than the
+	// organization's default.
+	PermStorageUse
+	// PermStorageManage creates, tests, rotates, disables and deletes
+	// storage connections and sets the default.
+	PermStorageManage
 )
 
 // permissionNames are the stable names used by the API and the database.
@@ -239,6 +248,9 @@ var permissionNames = []struct {
 	{PermCatalogWrite, "catalog.write"},
 	{PermDatasetsManage, "datasets.manage"},
 	{PermOwnership, "org.ownership"},
+	{PermStorageRead, "storage.read"},
+	{PermStorageUse, "storage.use"},
+	{PermStorageManage, "storage.manage"},
 }
 
 // AllPermissions is every tenant permission.
@@ -313,11 +325,11 @@ var builtInRoles = []Role{
 	{ID: RoleDeveloper, Name: "Developer", BuiltIn: true,
 		Permissions: PermOrgRead | PermMembersRead | PermDatasetsRead | PermDatasetsWrite | PermIngestionRead |
 			PermIngestionWrite | PermIngestionManage | PermUploadsWrite | PermAssetsRead | PermAssetsDownload |
-			PermAssetsDelete | PermQuarantineRead | PermQuotaRead | PermCatalogWrite,
+			PermAssetsDelete | PermQuarantineRead | PermQuotaRead | PermCatalogWrite | PermStorageRead | PermStorageUse,
 		Description: "Uploads, ingests, reads and deletes data"},
 	{ID: RoleAuditor, Name: "Auditor", BuiltIn: true,
 		Permissions: PermOrgRead | PermMembersRead | PermDatasetsRead | PermIngestionRead | PermAssetsRead |
-			PermQuarantineRead | PermQuotaRead | PermAuditRead,
+			PermQuarantineRead | PermQuotaRead | PermAuditRead | PermStorageRead,
 		Description: "Reads metadata, usage and the audit log; cannot download or change anything"},
 }
 

@@ -23,6 +23,8 @@ import (
 type ObjectStorage struct {
 	client    *s3.Client
 	presigner *s3.PresignClient
+	// partBytes is the buffer of a streaming write (connection.go).
+	partBytes int64
 }
 
 // Compile-time assertions: ObjectStorage must satisfy both interfaces.
@@ -488,6 +490,8 @@ func classify(operation string, err error) error {
 			return fmt.Errorf("%s: %s: %w", operation, code, interfaces.ErrStorageThrottled)
 		case code == "AccessDenied":
 			return retry.Permanent(fmt.Errorf("%s: %s: %w", operation, code, interfaces.ErrStorageAccessDenied))
+		case code == "InvalidAccessKeyId" || code == "SignatureDoesNotMatch" || code == "InvalidToken" || code == "ExpiredToken":
+			return retry.Permanent(fmt.Errorf("%s: %s: %w", operation, code, interfaces.ErrStorageCredentialsRejected))
 		case permanentCodes[code]:
 			return retry.Permanent(fmt.Errorf("%s: %s", operation, code))
 		default:

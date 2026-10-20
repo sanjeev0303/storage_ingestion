@@ -342,7 +342,7 @@ func (r *DatasetRepository) MemberEvidence(ctx context.Context, tenantID, versio
 		       o.id IS NOT NULL, COALESCE(o.deleted_at IS NOT NULL, false),
 		       COALESCE(a.status, ''), COALESCE(a.size_bytes, 0), COALESCE(a.checksum_sha256, ''), COALESCE(a.object_key, ''),
 		       COALESCE(pj.verification_status, CASE WHEN pj.checksum_verified_at IS NOT NULL THEN 'PASSED' END, ''),
-		       COALESCE(pj.checksum_source, ''), COALESCE(pj.scan_result, '')
+		       COALESCE(pj.checksum_source, ''), COALESCE(pj.scan_result, ''), COALESCE(a.storage_connection_id, '')
 		FROM dataset_version_members AS vm
 		LEFT JOIN catalog_objects AS o ON o.id = vm.object_id AND o.tenant_id = vm.tenant_id
 		LEFT JOIN assets AS a ON a.id = vm.asset_id AND a.tenant_id = vm.tenant_id
@@ -361,7 +361,7 @@ func (r *DatasetRepository) MemberEvidence(ctx context.Context, tenantID, versio
 		err := row.Scan(&e.Ordinal, &e.ObjectID, &e.AssetID, &e.ObjectVersion, &e.Path, &e.Label, &e.Split,
 			&e.SizeBytes, &e.ContentType, &e.ChecksumSHA256, &metadata,
 			&e.ObjectExists, &e.ObjectDeleted, &status, &e.AssetSizeBytes, &e.AssetChecksum, &e.ObjectKey,
-			&e.VerificationStatus, &e.ChecksumSource, &e.ScanResult)
+			&e.VerificationStatus, &e.ChecksumSource, &e.ScanResult, &e.StorageConnectionID)
 		if err != nil {
 			return e, err
 		}

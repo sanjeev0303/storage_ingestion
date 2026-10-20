@@ -36,6 +36,8 @@ type MultipartService struct {
 	newID      func() (string, error)
 	quotas     Reserver
 	audit      interfaces.AuditRecorder
+	chooser    interfaces.StorageChooser
+	router     interfaces.StorageRouter
 }
 
 // Guard makes s reserve quota for new sessions and audit its
@@ -121,12 +123,24 @@ func (s *MultipartService) Start(
 		return MultipartResult{}, fmt.Errorf("generate upload ID: %w", err)
 	}
 
+	principal := input.Principal
+	if principal.TenantID == "" {
+		principal = model.Principal{TenantID: input.TenantID, UserID: input.OwnerID}
+	}
+	bound, err := chooseBinding(ctx, s.chooser, principal, input.StorageConnectionID, input.Dataset, id)
+	if err != nil {
+		return MultipartResult{}, err
+	}
+	if bound.staging != nil && !bound.staging.Capabilities.Multipart {
+		return MultipartResult{}, fmt.Errorf("%w: the storage connection cannot take multipart uploads", model.ErrUnsupportedProvider)
+	}
+
 	now := s.now()
 	session := model.UploadSession{
 		ID:             id,
 		TenantID:       input.TenantID,
 		OwnerID:        input.OwnerID,
-		ObjectKey:      quarantineKey(input.TenantID, id),
+		ObjectKey:      bound.key,
 		FileName:       input.FileName,
 		ContentType:    input.ContentType,
 		ExpectedSize:   input.SizeBytes,
@@ -139,6 +153,9 @@ func (s *MultipartService) Start(
 		Path:           path,
 		Metadata:       input.Metadata,
 		CreateOnly:     input.CreateOnly,
+
+		StorageConnectionID: bound.finalID,
+		StagingConnectionID: bound.stagingID,
 	}
 
 	if err := session.Validate(); err != nil {
@@ -152,7 +169,8 @@ func (s *MultipartService) Start(
 		saveErr = s.uploads.CreateWithIdempotency(ctx, &session, input.IdempotencyKey)
 	}
 	var quotaErr *model.QuotaError
-	if errors.As(saveErr, &quotaErr) || errors.Is(saveErr, model.ErrPathExists) || errors.Is(saveErr, model.ErrPathBusy) {
+	if errors.As(saveErr, &quotaErr) || errors.Is(saveErr, model.ErrPathExists) || errors.Is(saveErr, model.ErrPathBusy) ||
+		errors.Is(saveErr, model.ErrConnectionNotActive) || errors.Is(saveErr, model.ErrConnectionNotFound) {
 		return MultipartResult{}, saveErr
 	}
 	if err := saveErr; err != nil {
@@ -175,9 +193,13 @@ func (s *MultipartService) Start(
 	// the provider's uploads for this exact object key and adopts or cleans
 	// up what it finds. Nothing here ever initiates a second upload for the
 	// same session. No database transaction is open across this call.
-	storageUploadID, err := s.storage.BeginMultipart(
+	at, err := s.staging(ctx, session)
+	if err != nil {
+		return MultipartResult{}, fmt.Errorf("%w: %w", ErrMultipartStartPending, err)
+	}
+	storageUploadID, err := at.storage.BeginMultipart(
 		ctx,
-		s.bucket,
+		at.bucket,
 		session.ObjectKey,
 		session.ContentType,
 	)
@@ -189,7 +211,7 @@ func (s *MultipartService) Start(
 	if errors.Is(err, model.ErrInvalidUploadState) {
 		// Reconciliation already closed this session while the provider
 		// call was in flight, so the new provider upload has no owner.
-		if abortErr := s.storage.AbortMultipart(ctx, s.bucket, session.ObjectKey, storageUploadID); abortErr != nil {
+		if abortErr := at.storage.AbortMultipart(ctx, at.bucket, session.ObjectKey, storageUploadID); abortErr != nil {
 			return MultipartResult{}, fmt.Errorf("%w: orphaned provider upload not aborted: %w", ErrMultipartNotActive, abortErr)
 		}
 		return MultipartResult{}, ErrMultipartNotActive
@@ -199,7 +221,7 @@ func (s *MultipartService) Start(
 		// client can use it: abort it now. If that fails too, the PENDING
 		// session (tenant, object key) is enough for reconciliation to find
 		// the provider session by listing and resolve it later.
-		if abortErr := s.storage.AbortMultipart(ctx, s.bucket, session.ObjectKey, storageUploadID); abortErr != nil {
+		if abortErr := at.storage.AbortMultipart(ctx, at.bucket, session.ObjectKey, storageUploadID); abortErr != nil {
 			return MultipartResult{}, fmt.Errorf("%w: persist storage upload ID: %w (cleanup failed, left for reconciliation: %w)",
 				ErrMultipartStartPending, err, abortErr)
 		}
@@ -212,7 +234,7 @@ func (s *MultipartService) Start(
 
 // replayStart answers a retry that carries an existing idempotency key.
 func replayStart(existing model.UploadSession, input StartMultipartInput) (MultipartResult, error) {
-	if !sameMultipartRequest(existing, input) {
+	if !sameMultipartRequest(existing, input) || !requestedMatches(input.StorageConnectionID, existing.StorageConnectionID) {
 		return MultipartResult{}, model.ErrIdempotencyConflict
 	}
 	if existing.StorageUploadID == "" {
@@ -272,10 +294,14 @@ func (s *MultipartService) PresignParts(
 		return nil, ErrMultipartNotActive
 	}
 
+	at, err := s.staging(ctx, session)
+	if err != nil {
+		return nil, err
+	}
 	for _, number := range numbers {
-		url, err := s.storage.PresignPart(
+		url, err := at.storage.PresignPart(
 			ctx,
-			s.bucket,
+			at.bucket,
 			session.ObjectKey,
 			session.StorageUploadID,
 			number,
@@ -317,7 +343,11 @@ func (s *MultipartService) RecordParts(
 		return ErrInvalidPart
 	}
 
-	stored, err := s.storage.ListParts(ctx, s.bucket, session.ObjectKey, session.StorageUploadID)
+	at, err := s.staging(ctx, session)
+	if err != nil {
+		return err
+	}
+	stored, err := at.storage.ListParts(ctx, at.bucket, session.ObjectKey, session.StorageUploadID)
 	if errors.Is(err, interfaces.ErrStorageUploadNotFound) {
 		return ErrMultipartNotActive
 	}
@@ -334,7 +364,7 @@ func (s *MultipartService) RecordParts(
 	seen := make(map[int32]struct{}, len(inputs))
 	for _, input := range inputs {
 		if input.PartNumber < 1 || input.PartNumber > maxMultipartParts ||
-			strings.TrimSpace(input.ETag) == "" ||
+			(at.rules.checkETag && strings.TrimSpace(input.ETag) == "") ||
 			input.SizeBytes <= 0 {
 			return ErrInvalidPart
 		}
@@ -347,7 +377,7 @@ func (s *MultipartService) RecordParts(
 		if !exists {
 			return fmt.Errorf("%w: part %d is not stored at the provider", ErrInvalidPart, input.PartNumber)
 		}
-		if !sameETag(actual.ETag, input.ETag) || actual.SizeBytes != input.SizeBytes {
+		if (at.rules.checkETag && !sameETag(actual.ETag, input.ETag)) || actual.SizeBytes != input.SizeBytes {
 			return fmt.Errorf("%w: part %d does not match the provider's record", ErrInvalidPart, input.PartNumber)
 		}
 
@@ -410,7 +440,11 @@ func (s *MultipartService) Complete(
 		return model.UploadSession{}, ErrMultipartNotStarted
 	}
 
-	stored, err := s.storage.ListParts(ctx, s.bucket, session.ObjectKey, session.StorageUploadID)
+	at, err := s.staging(ctx, session)
+	if err != nil {
+		return model.UploadSession{}, err
+	}
+	stored, err := at.storage.ListParts(ctx, at.bucket, session.ObjectKey, session.StorageUploadID)
 	if errors.Is(err, interfaces.ErrStorageUploadNotFound) {
 		// A concurrent completion consumes the provider session; if that is
 		// what happened, this request is a retry of it.
@@ -427,7 +461,7 @@ func (s *MultipartService) Complete(
 		return model.UploadSession{}, err
 	}
 
-	completedParts, err := validateCompletion(session, recorded, input)
+	completedParts, err := validateCompletion(session, recorded, input, at.rules)
 	if err != nil {
 		return model.UploadSession{}, err
 	}
@@ -445,9 +479,9 @@ func (s *MultipartService) Complete(
 	}
 	session.Status = model.UploadStatusCompleting
 
-	if err := s.storage.CompleteMultipart(
+	if err := at.storage.CompleteMultipart(
 		ctx,
-		s.bucket,
+		at.bucket,
 		session.ObjectKey,
 		session.StorageUploadID,
 		completedParts,
@@ -682,6 +716,7 @@ func validateCompletion(
 	session model.UploadSession,
 	recorded []model.UploadPart,
 	input CompleteMultipartInput,
+	rules partRules,
 ) ([]interfaces.CompletedPart, error) {
 	if len(input.Parts) == 0 {
 		return nil, fmt.Errorf("%w: no parts listed", ErrInvalidCompletion)
@@ -715,7 +750,7 @@ func validateCompletion(
 		if !ok || part.Status != model.UploadPartUploaded {
 			return nil, fmt.Errorf("%w: part %d was not uploaded", ErrInvalidCompletion, number)
 		}
-		if strings.TrimSpace(requested.ETag) == "" || !sameETag(part.ETag, requested.ETag) {
+		if rules.checkETag && (strings.TrimSpace(requested.ETag) == "" || !sameETag(part.ETag, requested.ETag)) {
 			return nil, fmt.Errorf("%w: ETag of part %d does not match the uploaded part", ErrInvalidCompletion, number)
 		}
 		result = append(result, interfaces.CompletedPart{PartNumber: number, ETag: part.ETag})
@@ -739,8 +774,8 @@ func validateCompletion(
 		switch {
 		case size <= 0 || size > maxPartSize:
 			return nil, fmt.Errorf("%w: part %d size %d is outside 1 byte to 5 GiB", ErrInvalidCompletion, completed.PartNumber, size)
-		case !isLast && size < minNonFinalPartSize:
-			return nil, fmt.Errorf("%w: part %d is smaller than 5 MiB and is not the last part", ErrInvalidCompletion, completed.PartNumber)
+		case !isLast && size < rules.minPart:
+			return nil, fmt.Errorf("%w: part %d is smaller than %d MiB and is not the last part", ErrInvalidCompletion, completed.PartNumber, rules.minPart>>20)
 		}
 		totalSize += size
 	}

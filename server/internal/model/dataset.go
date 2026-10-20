@@ -538,9 +538,10 @@ type MemberEvidence struct {
 	// AssetSizeBytes and AssetChecksum are the asset's own records.
 	AssetSizeBytes int64
 	AssetChecksum  string
-	// ObjectKey is where the version's bytes are; it never leaves the
-	// service.
-	ObjectKey string
+	// ObjectKey is where the version's bytes are, on the storage
+	// connection StorageConnectionID; neither leaves the service.
+	ObjectKey           string
+	StorageConnectionID string
 	// From the version's processing job: PASSED or FAILED (or "" when there
 	// is no record), DECLARED or COMPUTED, and the scan's result.
 	VerificationStatus string

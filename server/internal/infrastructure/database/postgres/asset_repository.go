@@ -39,14 +39,16 @@ func (r *AssetRepository) Create(ctx context.Context, asset *model.Asset) error 
 		INSERT INTO assets (
 			id, tenant_id, owner_id, upload_id, object_key, file_name,
 			content_type, size_bytes, checksum_sha256, status,
-			rejection_reason, created_at, updated_at, dataset, object_id, metadata
+			rejection_reason, created_at, updated_at, dataset, object_id, metadata,
+			storage_connection_id, staging_connection_id
 		)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), $10, NULLIF($11, ''), $12, $13, NULLIF($14, ''),
-		        NULLIF($15, ''), $16)
+		        NULLIF($15, ''), $16, COALESCE(NULLIF($17, ''), 'platform'), COALESCE(NULLIF($18, ''), 'platform'))
 	`,
 		asset.ID, asset.TenantID, asset.OwnerID, asset.UploadID, asset.ObjectKey, asset.FileName,
 		asset.ContentType, asset.SizeBytes, asset.ChecksumSHA256, string(asset.Status),
 		asset.RejectionReason, asset.CreatedAt, asset.UpdatedAt, asset.Dataset, asset.ObjectID, metadata,
+		asset.StorageConnectionID, asset.StagingConnectionID,
 	)
 	if err != nil {
 		return fmt.Errorf("insert asset: %w", err)
@@ -59,7 +61,7 @@ const assetColumns = `
 	content_type, size_bytes, COALESCE(checksum_sha256, ''), status,
 	COALESCE(rejection_reason, ''), COALESCE(storage_etag, ''), COALESCE(storage_version_id, ''),
 	published_at, created_at, updated_at, COALESCE(dataset, ''),
-	COALESCE(object_id, ''), COALESCE(version, 0), metadata
+	COALESCE(object_id, ''), COALESCE(version, 0), metadata, storage_connection_id, staging_connection_id
 `
 
 func scanAsset(row pgx.Row) (*model.Asset, error) {
@@ -71,7 +73,7 @@ func scanAsset(row pgx.Row) (*model.Asset, error) {
 		&asset.ContentType, &asset.SizeBytes, &asset.ChecksumSHA256, &status,
 		&asset.RejectionReason, &asset.StorageETag, &asset.StorageVersionID,
 		&asset.PublishedAt, &asset.CreatedAt, &asset.UpdatedAt, &asset.Dataset,
-		&asset.ObjectID, &asset.Version, &metadata,
+		&asset.ObjectID, &asset.Version, &metadata, &asset.StorageConnectionID, &asset.StagingConnectionID,
 	)
 	if err != nil {
 		return nil, err

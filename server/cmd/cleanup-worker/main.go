@@ -19,6 +19,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/dto/event"
 	"github.com/sanjeev0303/object-storage-platform/internal/infrastructure/database/postgres"
 	sqsqueue "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/queue/sqs"
+	storageregistry "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/registry"
 	s3storage "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/s3"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/config"
@@ -116,6 +117,17 @@ func run() error {
 		return fmt.Errorf("create worker ID: %w", err)
 	}
 	registry := metrics.New()
+	// Records bound to tenants' storage connections are reached through
+	// those connections (Phase 11); without BYOS they do not resolve.
+	storageCfg, err := config.LoadStorage()
+	if err != nil {
+		return fmt.Errorf("load storage connection configuration: %w", err)
+	}
+	router, err := storageregistry.ForProcess(storageCfg, storage, bucket, deliveryBucket, lc.PromotionPrefix,
+		postgres.NewStorageConnectionRepository(db), registry)
+	if err != nil {
+		return fmt.Errorf("configure storage connections: %w", err)
+	}
 
 	assets := postgres.NewAssetRepository(db)
 	uploads := postgres.NewUploadRepository(db)
@@ -127,7 +139,7 @@ func run() error {
 	lifecycle, err := assetservice.NewService(assetservice.Dependencies{
 		Assets: assets, Uploads: uploads, Jobs: jobs, Quarantine: postgres.NewQuarantineRepository(db),
 		Policies: postgres.NewRetentionPolicyRepository(db), Holds: holds, Deletions: postgres.NewDeletionRepository(db),
-		Events: events, Cursors: cursors, Storage: storage, Metrics: registry,
+		Events: events, Cursors: cursors, Storage: storage, Metrics: registry, Router: router,
 	}, assetservice.Config{
 		Owner: owner, QuarantineBucket: bucket, DeliveryBucket: deliveryBucket, DeliveryPrefix: lc.PromotionPrefix,
 		Platform: assetservice.PlatformRetention{
@@ -166,6 +178,7 @@ func run() error {
 	cleanup, err := cleanupservice.NewService(cleanupservice.Dependencies{
 		Storage: storage, Inventory: postgres.NewInventoryRepository(db), Cursors: cursors, Uploads: uploads,
 		Assets: assets, Jobs: jobs, Holds: holds, Events: events, Metrics: registry,
+		Router: router, Connections: postgres.NewStorageConnectionRepository(db),
 	}, cleanupservice.Config{
 		Owner: owner, QuarantineBucket: bucket, DeliveryBucket: deliveryBucket, DeliveryPrefix: lc.PromotionPrefix,
 		TenantID: *tenant, PageSize: lc.ScanPageSize, PagesPerRun: lc.ScanPages, Lease: lc.LeaseDuration,

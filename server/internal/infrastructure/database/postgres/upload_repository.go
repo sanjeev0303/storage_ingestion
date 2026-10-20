@@ -44,7 +44,9 @@ const uploadColumns = `
 	COALESCE(path, ''),
 	COALESCE(object_id, ''),
 	create_only,
-	metadata
+	metadata,
+	storage_connection_id,
+	staging_connection_id
 `
 
 func scanUpload(row pgx.Row) (*model.UploadSession, error) {
@@ -73,6 +75,8 @@ func scanUpload(row pgx.Row) (*model.UploadSession, error) {
 		&upload.ObjectID,
 		&upload.CreateOnly,
 		&metadata,
+		&upload.StorageConnectionID,
+		&upload.StagingConnectionID,
 	)
 	if err != nil {
 		return nil, err
@@ -148,13 +152,15 @@ func insertUploadSession(ctx context.Context, q execer, upload *model.UploadSess
 			checksum_sha256, status, idempotancy_key, expires_at,
 			created_at, updated_at, storage_upload_id, dataset,
 			quota_state, reserved_bytes, multipart,
-			path, object_id, create_only, metadata
+			path, object_id, create_only, metadata,
+			storage_connection_id, staging_connection_id
 		)
 		VALUES (
 			$1, $2, $3, $4, $5, $6, $7,
 			NULLIF($8, ''), $9, NULLIF($10, ''), $11, $12, $13,
 			NULLIF($14, ''), NULLIF($15, ''), $16, $17, $18,
-			NULLIF($19, ''), NULLIF($20, ''), $21, $22
+			NULLIF($19, ''), NULLIF($20, ''), $21, $22,
+			COALESCE(NULLIF($23, ''), 'platform'), COALESCE(NULLIF($24, ''), 'platform')
 		)
 	`,
 		upload.ID,
@@ -179,9 +185,11 @@ func insertUploadSession(ctx context.Context, q execer, upload *model.UploadSess
 		upload.ObjectID,
 		upload.CreateOnly,
 		metadata,
+		upload.StorageConnectionID,
+		upload.StagingConnectionID,
 	)
 	if err != nil {
-		return mapDatabaseError(err)
+		return mapDatabaseError(bindingError(err))
 	}
 	return nil
 }

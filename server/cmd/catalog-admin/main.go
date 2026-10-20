@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/sanjeev0303/object-storage-platform/internal/infrastructure/database/postgres"
+	storageregistry "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/registry"
 	s3storage "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/s3"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/config"
@@ -117,6 +118,18 @@ func run(command string, args []string, out io.Writer) error {
 
 	case "reconcile":
 		log := logger.NewTo(os.Stderr, cfg.AppEnv)
+		// Records bound to tenants' storage connections are reached through
+		// those connections (Phase 11); without BYOS they do not resolve.
+		storageCfg, err := config.LoadStorage()
+		if err != nil {
+			return fmt.Errorf("load storage connection configuration: %w", err)
+		}
+		router, err := storageregistry.ForProcess(storageCfg, storage, bucket, deliveryBucket, lc.PromotionPrefix,
+			postgres.NewStorageConnectionRepository(db), nil)
+		if err != nil {
+			return fmt.Errorf("configure storage connections: %w", err)
+		}
+
 		auditService := audit.NewService(postgres.NewAuditRepository(db), log, nil, sec.Audit.Retention)
 		// Replaced versions of objects without versioning are deleted
 		// through the lifecycle, as the worker would.
@@ -125,7 +138,7 @@ func run(command string, args []string, out io.Writer) error {
 			Jobs: postgres.NewProcessingJobRepository(db), Quarantine: postgres.NewQuarantineRepository(db),
 			Policies: postgres.NewRetentionPolicyRepository(db), Holds: postgres.NewLegalHoldRepository(db),
 			Deletions: postgres.NewDeletionRepository(db), Events: postgres.NewLifecycleEventRepository(db),
-			Cursors: postgres.NewCursorRepository(db), Storage: storage,
+			Cursors: postgres.NewCursorRepository(db), Storage: storage, Router: router,
 		}, assetservice.Config{
 			Owner: "catalog-admin", QuarantineBucket: bucket, DeliveryBucket: deliveryBucket, DeliveryPrefix: lc.PromotionPrefix,
 			Platform: assetservice.PlatformRetention{
@@ -154,7 +167,7 @@ func run(command string, args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		reconciler := catalog.NewReconciler(repo, catalogService, storage, deliveryBucket, lc.PromotionPrefix, auditService, nil, log)
+		reconciler := catalog.NewReconciler(repo, catalogService, storage, deliveryBucket, lc.PromotionPrefix, auditService, nil, log).Route(router)
 		report, err := reconciler.Reconcile(ctx, catalog.ReconcileOptions{
 			TenantID: *tenant, DryRun: !*repair, BatchSize: *batch, CheckStorage: *checkStorage, MaxStorageChecks: *maxChecks,
 		})

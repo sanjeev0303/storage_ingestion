@@ -7,8 +7,8 @@ import (
 
 func TestPermissionNamesRoundTrip(t *testing.T) {
 	names := AllPermissions.Names()
-	if len(names) != 22 {
-		t.Fatalf("expected 22 permissions, got %d: %v", len(names), names)
+	if len(names) != 25 {
+		t.Fatalf("expected 25 permissions, got %d: %v", len(names), names)
 	}
 	parsed, err := ParsePermissions(names)
 	if err != nil || parsed != AllPermissions {
@@ -49,6 +49,12 @@ func TestBuiltInRoleMatrix(t *testing.T) {
 		auditor.Has(PermCatalogWrite) ||
 		auditor.Has(PermIngestionWrite) || auditor.Has(PermMembersManage) {
 		t.Fatalf("auditor: %v", auditor.Names())
+	}
+	// Storage connections: everyone reads them, developers may choose one
+	// for an upload, only owners and admins manage them.
+	if !auditor.Has(PermStorageRead) || auditor.Has(PermStorageUse) || !developer.Has(PermStorageRead|PermStorageUse) ||
+		developer.Has(PermStorageManage) || !admin.Has(PermStorageManage) || !owner.Has(PermStorageManage) {
+		t.Fatal("storage permissions do not match the matrix")
 	}
 	if _, ok := BuiltInRole("superuser"); ok {
 		t.Fatal("unknown built-in role")

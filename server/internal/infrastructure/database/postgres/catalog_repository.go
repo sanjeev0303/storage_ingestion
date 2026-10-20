@@ -37,7 +37,7 @@ func NewCatalogRepository(db *DB) *CatalogRepository {
 const catalogColumns = `o.id, o.tenant_id, o.dataset, o.path, o.path_key, o.versioning, o.revision, o.metadata,
 	COALESCE(o.current_asset_id, ''), COALESCE(o.current_version, 0), COALESCE(o.size_bytes, 0),
 	COALESCE(o.content_type, ''), COALESCE(o.checksum_sha256, ''), o.published_at, o.next_version - 1,
-	o.deleted_at, o.created_by, o.created_at, o.updated_at`
+	o.deleted_at, o.created_by, o.created_at, o.updated_at, COALESCE(o.storage_connection_id, '')`
 
 func scanObject(row pgx.Row) (model.CatalogObject, error) {
 	var o model.CatalogObject
@@ -45,7 +45,7 @@ func scanObject(row pgx.Row) (model.CatalogObject, error) {
 	var metadata []byte
 	err := row.Scan(&o.ID, &o.TenantID, &o.Dataset, &o.Path, &o.PathKey, &versioning, &o.Revision, &metadata,
 		&o.CurrentAssetID, &o.CurrentVersion, &o.SizeBytes, &o.ContentType, &o.ChecksumSHA256, &o.PublishedAt,
-		&o.Versions, &o.DeletedAt, &o.CreatedBy, &o.CreatedAt, &o.UpdatedAt)
+		&o.Versions, &o.DeletedAt, &o.CreatedBy, &o.CreatedAt, &o.UpdatedAt, &o.StorageConnectionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return o, model.ErrObjectNotFound
 	}
@@ -271,7 +271,8 @@ func makeCurrent(ctx context.Context, tx pgx.Tx, tenantID, objectID, assetID str
 		_, err = tx.Exec(ctx, `
 			UPDATE catalog_objects
 			SET current_asset_id = NULL, current_version = NULL, size_bytes = NULL, content_type = NULL,
-			    checksum_sha256 = NULL, published_at = NULL, revision = revision + 1, updated_at = $3
+			    checksum_sha256 = NULL, published_at = NULL, storage_connection_id = NULL,
+			    revision = revision + 1, updated_at = $3
 			WHERE id = $1 AND tenant_id = $2
 		`, objectID, tenantID, at)
 	} else {
@@ -279,7 +280,7 @@ func makeCurrent(ctx context.Context, tx pgx.Tx, tenantID, objectID, assetID str
 			UPDATE catalog_objects AS o
 			SET current_asset_id = a.id, current_version = a.version, size_bytes = a.size_bytes,
 			    content_type = a.content_type, checksum_sha256 = a.checksum_sha256, published_at = a.published_at,
-			    revision = o.revision + 1, updated_at = $4
+			    storage_connection_id = a.storage_connection_id, revision = o.revision + 1, updated_at = $4
 			FROM assets AS a
 			WHERE o.id = $1 AND o.tenant_id = $2 AND a.id = $3 AND a.tenant_id = o.tenant_id AND a.object_id = o.id
 		`, objectID, tenantID, assetID, at)

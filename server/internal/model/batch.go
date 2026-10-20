@@ -90,6 +90,9 @@ type Dataset struct {
 	Derivation       *Derivation
 	UpdatedBy        string
 	ArchivedAt       *time.Time
+	// StorageConnectionID is the storage connection new uploads into the
+	// dataset go to ("" for the organization's default).
+	StorageConnectionID string
 }
 
 // DatasetSummary adds up the counters of a dataset's jobs.

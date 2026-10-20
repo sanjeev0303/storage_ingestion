@@ -92,6 +92,7 @@ func managedDatasetResponse(d model.Dataset) response.DatasetResponse {
 		Revision: d.Revision, MemberCount: d.MemberCount, CurrentVersionID: d.CurrentVersionID,
 		ProfileID: d.ProfileID, ProfileVersion: d.ProfileVersion, LatestReportID: d.LatestReportID,
 		Derivation: derivationInfo(d.Derivation), CreatedBy: d.CreatedBy, UpdatedBy: d.UpdatedBy, ArchivedAt: d.ArchivedAt,
+		StorageConnectionID: d.StorageConnectionID,
 	}
 	if out.Tags == nil {
 		out.Tags = []string{}
@@ -250,7 +251,7 @@ func (h *DatasetHandler) update(w nethttp.ResponseWriter, r *nethttp.Request) {
 	}
 	d, err := h.service.Update(r.Context(), principalOf(r), r.PathValue("id"), revision, dataset.UpdateInput{
 		Description: body.Description, Tags: body.Tags, Metadata: body.Metadata,
-		ProfileID: body.ProfileID, ProfileVersion: body.ProfileVersion,
+		ProfileID: body.ProfileID, ProfileVersion: body.ProfileVersion, StorageConnectionID: body.StorageConnectionID,
 	})
 	if err != nil {
 		h.fail(w, err)

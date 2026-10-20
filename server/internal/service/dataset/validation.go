@@ -521,7 +521,7 @@ func (s *Service) readContents(ctx context.Context, owner string, job model.Vali
 		go func() {
 			defer wg.Done()
 			for i := range next {
-				r := s.checkContent(ctx, rule, batch[i])
+				r := s.checkContent(ctx, job.TenantID, rule, batch[i])
 				results[i] = &r
 			}
 		}()
@@ -538,7 +538,7 @@ func (s *Service) readContents(ctx context.Context, owner string, job model.Vali
 // the rule asks to read again), otherwise by reading the bytes and
 // comparing their SHA-256 and size with the snapshot's records. Versions
 // that cannot be read are not examined; that is never a pass.
-func (s *Service) checkContent(ctx context.Context, rule *contentRule, m model.MemberEvidence) contentResult {
+func (s *Service) checkContent(ctx context.Context, tenantID string, rule *contentRule, m model.MemberEvidence) contentResult {
 	if m.AssetStatus != model.AssetStatusAvailable || m.ObjectKey == "" {
 		return contentResult{}
 	}
@@ -551,12 +551,24 @@ func (s *Service) checkContent(ctx context.Context, rule *contentRule, m model.M
 	if s.deps.Content == nil || s.deps.ContentBucket == "" {
 		return contentResult{}
 	}
+	// The member is read through the connection its version is stored on.
+	reader, bucket := s.deps.Content, s.deps.ContentBucket
+	if !model.IsPlatformConnection(m.StorageConnectionID) {
+		if s.deps.Router == nil {
+			return contentResult{}
+		}
+		loc, err := s.deps.Router.Locate(ctx, tenantID, m.StorageConnectionID)
+		if err != nil {
+			return contentResult{}
+		}
+		reader, bucket = loc.Storage, loc.ReadyBucket
+	}
 
 	var r contentResult
 	err := s.content.Do(ctx, func(ctx context.Context) error {
 		ctx, cancel := context.WithTimeout(ctx, s.cfg.ObjectTimeout)
 		defer cancel()
-		body, err := s.deps.Content.OpenObject(ctx, s.deps.ContentBucket, m.ObjectKey)
+		body, err := reader.OpenObject(ctx, bucket, m.ObjectKey)
 		if err != nil {
 			return err
 		}

@@ -33,6 +33,9 @@ type DatasetResponse struct {
 	CreatedBy        string            `json:"created_by"`
 	UpdatedBy        string            `json:"updated_by,omitempty"`
 	ArchivedAt       *time.Time        `json:"archived_at,omitempty"`
+	// StorageConnectionID is where the dataset's new uploads go; empty for
+	// the organization's default.
+	StorageConnectionID string `json:"storage_connection_id,omitempty"`
 }
 
 // DerivationInfo is what a derived dataset was made from.

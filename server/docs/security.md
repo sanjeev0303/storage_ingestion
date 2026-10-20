@@ -93,6 +93,9 @@ Checks ask for **permissions**, never role names; a role is a set of permissions
 | `ingestion.read` / `ingestion.write` | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / | jobs, manifests, claims, uploads of entries |
 | `ingestion.manage` | ✓ | ✓ | ✓ | | retry and cancel |
 | `uploads.write` | ✓ | ✓ | ✓ | | single and multipart uploads |
+| `storage.read` | ✓ | ✓ | ✓ | ✓ | the provider catalog and the organization's storage connections, never credentials (Phase 11, `docs/storage-connections.md`) |
+| `storage.use` | ✓ | ✓ | ✓ | | send an upload to a connection other than the organization's default |
+| `storage.manage` | ✓ | ✓ | | | create, change, test, rotate, set default, disable, enable and delete connections |
 | `assets.read` | ✓ | ✓ | ✓ | ✓ | asset metadata, lifecycle state |
 | `assets.download` | ✓ | ✓ | ✓ | | content, download URLs and token links |
 | `assets.delete` | ✓ | ✓ | ✓ | | delete, restore, revoke links |
@@ -125,7 +128,7 @@ Isolation is enforced by the application on every path, and by the database wher
 2. **Trusted tenant.** The principal's tenant comes only from the checked membership. Request bodies are decoded with `DisallowUnknownFields`, so a `tenant_id` field is a 400.
 3. **Permissions in the service layer.** Every `...For(ctx, principal, ...)` service method checks its permission first (`audit.Require`) and records refusals. The HTTP layer only passes the principal through.
 4. **Tenant-scoped lookups.** Every query takes `tenant_id = $principal` together with the resource ID. Another tenant's resource is the same `ErrNotFound`, with the same body, as a missing one. There is no existence oracle.
-5. **Server-generated storage keys.** Keys are `quarantine/<tenant>/<upload>` for uploads and `<prefix>/<tenant>/<asset>` once promoted. Delivery re-derives the promoted key and refuses an asset stored anywhere else. Clients never send a bucket, key or path.
+5. **Server-generated storage keys.** Keys are `quarantine/<tenant>/<upload>` for uploads and `<prefix>/<tenant>/<asset>` once promoted (on a tenant's own storage connection, its staging and ready prefixes). Delivery re-derives the promoted key and refuses an asset stored anywhere else. Clients never send a bucket, key or path; they may name a storage connection, which must be their organization's (`docs/storage-connections.md`).
 6. **Signed URLs** are issued only for an `AVAILABLE` asset of the caller's organization, to a caller with `assets.download`, and are never logged. **Token links** (`mode: token`) re-check their issuer's current membership and permission on every use, so a removed member's links stop working.
 7. **Composite foreign keys** (`(asset_id, tenant_id)` and similar; see the migration) make the database refuse rows that join two tenants:
    - an asset on another tenant's upload;

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sanjeev0303/object-storage-platform/internal/infrastructure/database/postgres"
+	storageregistry "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/registry"
 	s3storage "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/s3"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/config"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/logger"
@@ -74,11 +75,12 @@ func run() error {
 		return fmt.Errorf("S3_BUCKET is required")
 	}
 
+	platformStorage := s3storage.NewObjectStorage(s3Client)
 	// UPLOAD_* limits are shared with the API, so every process judges sessions alike.
 	multipartService, err := uploadservice.NewMultipartService(
 		postgres.NewUploadRepository(db),
 		postgres.NewMultipartUploadRepository(db),
-		s3storage.NewObjectStorage(s3Client),
+		platformStorage,
 		uploadservice.MultipartServiceConfig{
 			Bucket:     bucket,
 			MaxSize:    cfg.UploadMaxSize,
@@ -96,6 +98,19 @@ func run() error {
 	}
 
 	registry := metrics.New()
+	// Records bound to tenants' storage connections are reached through
+	// those connections (Phase 11); without BYOS they do not resolve.
+	storageCfg, err := config.LoadStorage()
+	if err != nil {
+		return fmt.Errorf("load storage connection configuration: %w", err)
+	}
+	router, err := storageregistry.ForProcess(storageCfg, platformStorage, bucket, bucket, "assets",
+		postgres.NewStorageConnectionRepository(db), registry)
+	if err != nil {
+		return fmt.Errorf("configure storage connections: %w", err)
+	}
+	multipartService.Route(nil, router)
+
 	if workerCfg.MetricsAddr != "" {
 		registry.Publish("reconciliation")
 		// expvar serves /debug/vars on the default mux.

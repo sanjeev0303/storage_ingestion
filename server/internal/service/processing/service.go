@@ -61,6 +61,9 @@ type Dependencies struct {
 	Promoter *promotion.Service
 	// Metrics is optional.
 	Metrics *metrics.Registry
+	// Router reaches tenants' storage connections; without it every asset
+	// is processed on the platform's quarantine bucket.
+	Router interfaces.StorageRouter
 }
 
 type Config struct {
@@ -126,6 +129,14 @@ func NewService(deps Dependencies, cfg Config, log *slog.Logger) (*Service, erro
 	}
 
 	return &Service{deps: deps, cfg: cfg, log: log, now: func() time.Time { return time.Now().UTC() }}, nil
+}
+
+// Route lets processing reach assets on tenants' storage connections; its
+// promoter is routed the same way.
+func (s *Service) Route(router interfaces.StorageRouter) *Service {
+	s.deps.Router = router
+	s.deps.Promoter.Route(router)
+	return s
 }
 
 // CycleStats counts what one cycle did, for the cycle's log line.
@@ -336,7 +347,7 @@ func (s *Service) run(ctx context.Context, job *model.ProcessingJob) (model.Proc
 		if asset.Status == model.AssetStatusRejected || asset.Status == model.AssetStatusDeleted ||
 			asset.Status == model.AssetStatusSoftDeleted {
 			if job.PromotionKey != "" {
-				if err := s.deps.Promoter.RemoveDestination(ctx, job.PromotionKey); err != nil {
+				if err := s.deps.Promoter.RemoveDestination(ctx, *asset, job.PromotionKey); err != nil {
 					return "", err
 				}
 			}
@@ -366,7 +377,11 @@ func (s *Service) run(ctx context.Context, job *model.ProcessingJob) (model.Proc
 // then runs the content validators, and moves the asset QUARANTINED ->
 // PROCESSING. Verification and validation are recorded separately.
 func (s *Service) verify(ctx context.Context, job *model.ProcessingJob, asset model.Asset) (model.ProcessingState, error) {
-	if asset.UploadID != job.UploadID || asset.ObjectKey != quarantineKey(asset.TenantID, asset.UploadID) {
+	storage, bucket, key, err := s.staging(ctx, asset)
+	if err != nil {
+		return "", err
+	}
+	if asset.UploadID != job.UploadID || asset.ObjectKey != key {
 		return "", retry.Permanent(errors.New("asset does not match its upload's quarantine key"))
 	}
 
@@ -415,7 +430,7 @@ func (s *Service) verify(ctx context.Context, job *model.ProcessingJob, asset mo
 	job.ChecksumAlgorithm = "SHA-256"
 	job.ChecksumVerifiedAt = &verifiedAt
 
-	head, err := s.readHead(ctx, asset.ObjectKey)
+	head, err := readHead(ctx, storage, bucket, key)
 	if err != nil {
 		return "", err
 	}
@@ -425,7 +440,7 @@ func (s *Service) verify(ctx context.Context, job *model.ProcessingJob, asset mo
 		FileName:     asset.FileName,
 		SizeBytes:    asset.SizeBytes,
 		Open: func(ctx context.Context) (io.ReadCloser, error) {
-			return s.deps.Storage.OpenObject(ctx, s.cfg.Bucket, asset.ObjectKey)
+			return storage.OpenObject(ctx, bucket, key)
 		},
 	}
 	result, err := RunValidators(ctx, s.deps.Validators, sample, policy)
@@ -498,7 +513,11 @@ func (s *Service) scan(ctx context.Context, job *model.ProcessingJob, asset mode
 	}
 	s.deps.Metrics.Set("scanner_up", 1)
 
-	body, err := s.deps.Storage.OpenObject(ctx, s.cfg.Bucket, asset.ObjectKey)
+	storage, bucket, key, err := s.staging(ctx, asset)
+	if err != nil {
+		return "", err
+	}
+	body, err := storage.OpenObject(ctx, bucket, key)
 	if err != nil {
 		return "", fmt.Errorf("open object to scan: %w", err)
 	}
@@ -563,7 +582,11 @@ func (s *Service) promote(ctx context.Context, job *model.ProcessingJob, asset m
 	}
 
 	if job.PromotionKey == "" {
-		job.PromotionKey = s.deps.Promoter.DestinationKey(asset)
+		key, err := s.deps.Promoter.DestinationKey(ctx, asset)
+		if err != nil {
+			return "", err
+		}
+		job.PromotionKey = key
 		job.PromotionStatus = model.PromotionPending
 		if _, err := s.save(ctx, job); err != nil {
 			return "", err
@@ -617,7 +640,7 @@ func (s *Service) reject(ctx context.Context, job *model.ProcessingJob, asset mo
 		AssetID:       asset.ID,
 		JobID:         job.ID,
 		UploadID:      asset.UploadID,
-		ObjectKey:     quarantineKey(asset.TenantID, asset.UploadID),
+		ObjectKey:     recordKey(asset),
 		Category:      category,
 		Reason:        reason,
 		ScanResult:    job.ScanResult,
@@ -664,7 +687,7 @@ func (s *Service) hold(ctx context.Context, job model.ProcessingJob, reason stri
 		AssetID:    asset.ID,
 		JobID:      job.ID,
 		UploadID:   asset.UploadID,
-		ObjectKey:  quarantineKey(asset.TenantID, asset.UploadID),
+		ObjectKey:  recordKey(*asset),
 		Category:   category,
 		Reason:     truncate(reason, 500),
 		ScanResult: job.ScanResult,
@@ -699,7 +722,12 @@ func (s *Service) PurgeExpired(ctx context.Context) (int, error) {
 			continue
 		}
 
-		err = s.deps.Storage.DeleteObject(ctx, s.cfg.Bucket, record.ObjectKey)
+		storage, bucket, err := s.recordStorage(ctx, record)
+		if err != nil {
+			s.log.Error("resolve storage of quarantined object", "record_id", record.ID, "error", err)
+			continue
+		}
+		err = storage.DeleteObject(ctx, bucket, record.ObjectKey)
 		if err != nil && !errors.Is(err, interfaces.ErrObjectNotFound) {
 			s.log.Error("purge quarantined object", "record_id", record.ID, "error", err)
 			continue
@@ -861,9 +889,48 @@ func (s *Service) save(ctx context.Context, job *model.ProcessingJob) (model.Pro
 	return "", s.deps.Jobs.SaveProgress(ctx, *job, s.cfg.Owner, s.now())
 }
 
+// staging resolves where an asset's upload landed: the platform's
+// quarantine bucket, or its tenant connection's staging prefix.
+func (s *Service) staging(ctx context.Context, asset model.Asset) (interfaces.MultipartStorage, string, string, error) {
+	if model.IsPlatformConnection(asset.StagingConnectionID) {
+		return s.deps.Storage, s.cfg.Bucket, quarantineKey(asset.TenantID, asset.UploadID), nil
+	}
+	if s.deps.Router == nil {
+		return nil, "", "", model.ErrStorageNotConfigured
+	}
+	loc, err := s.deps.Router.Locate(ctx, asset.TenantID, asset.StagingConnectionID)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("resolve storage connection: %w", err)
+	}
+	return loc.Storage, loc.StagingBucket, loc.StagingKey(asset.TenantID, asset.UploadID), nil
+}
+
+// recordStorage is where a quarantine record's object is: its asset's
+// staging connection.
+func (s *Service) recordStorage(ctx context.Context, record model.QuarantineRecord) (interfaces.MultipartStorage, string, error) {
+	asset, err := s.deps.Assets.GetByID(ctx, record.TenantID, record.AssetID)
+	if errors.Is(err, model.ErrAssetNotFound) {
+		return s.deps.Storage, s.cfg.Bucket, nil
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	storage, bucket, _, err := s.staging(ctx, *asset)
+	return storage, bucket, err
+}
+
+// recordKey is the quarantine object a record names: the platform's key,
+// or the staging key the asset was uploaded to.
+func recordKey(asset model.Asset) string {
+	if model.IsPlatformConnection(asset.StagingConnectionID) {
+		return quarantineKey(asset.TenantID, asset.UploadID)
+	}
+	return asset.ObjectKey
+}
+
 // readHead reads at most sniffBytes from the start of the object.
-func (s *Service) readHead(ctx context.Context, objectKey string) ([]byte, error) {
-	body, err := s.deps.Storage.OpenObject(ctx, s.cfg.Bucket, objectKey)
+func readHead(ctx context.Context, storage interfaces.MultipartStorage, bucket, objectKey string) ([]byte, error) {
+	body, err := storage.OpenObject(ctx, bucket, objectKey)
 	if err != nil {
 		return nil, fmt.Errorf("open object for type check: %w", err)
 	}

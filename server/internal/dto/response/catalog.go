@@ -29,6 +29,8 @@ type CurrentVersionResponse struct {
 	ContentType    string     `json:"content_type"`
 	ChecksumSHA256 string     `json:"checksum_sha256,omitempty"`
 	PublishedAt    *time.Time `json:"published_at,omitempty"`
+	// StorageConnectionID is the storage connection holding the version.
+	StorageConnectionID string `json:"storage_connection_id,omitempty"`
 }
 
 type CatalogPageResponse struct {

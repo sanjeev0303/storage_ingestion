@@ -19,6 +19,9 @@ var (
 	ErrStorageThrottled = errors.New("storage throttled the request")
 	// ErrStorageAccessDenied: our own credentials may not read the object.
 	ErrStorageAccessDenied = errors.New("storage access denied")
+	// ErrStorageCredentialsRejected: the provider did not accept the
+	// credentials at all (unknown key, bad signature, expired token).
+	ErrStorageCredentialsRejected = errors.New("storage rejected the credentials")
 )
 
 // DownloadOptions shape the response the storage provider sends for a

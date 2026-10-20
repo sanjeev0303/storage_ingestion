@@ -176,7 +176,10 @@ const (
 // InventoryScan is one pass over a bucket prefix. Cursor is the provider's
 // continuation token where the scan resumes.
 type InventoryScan struct {
-	ID               string
+	ID string
+	// ConnectionID is the storage connection scanned ("" reads as the
+	// platform's): the same bucket name on two connections is two buckets.
+	ConnectionID     string
 	Bucket           string
 	Prefix           string
 	Status           string
@@ -228,6 +231,7 @@ const (
 // OrphanCandidate is a stored object seen without an owner.
 type OrphanCandidate struct {
 	ID           string
+	ConnectionID string
 	Bucket       string
 	ObjectKey    string
 	ETag         string

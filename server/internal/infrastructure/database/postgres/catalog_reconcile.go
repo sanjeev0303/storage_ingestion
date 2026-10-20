@@ -41,7 +41,8 @@ func (r *CatalogRepository) CheckObjects(ctx context.Context, tenantID string, a
 		SELECT `+catalogColumns+`, COALESCE(a.status, ''),
 		       o.current_asset_id IS NOT NULL AND (a.version IS DISTINCT FROM o.current_version
 		           OR a.size_bytes IS DISTINCT FROM o.size_bytes OR a.content_type IS DISTINCT FROM o.content_type
-		           OR a.checksum_sha256::text IS DISTINCT FROM o.checksum_sha256),
+		           OR a.checksum_sha256::text IS DISTINCT FROM o.checksum_sha256
+		           OR a.storage_connection_id IS DISTINCT FROM o.storage_connection_id),
 		       o.current_asset_id IS NULL AND EXISTS (
 		           SELECT 1 FROM assets AS v WHERE v.tenant_id = o.tenant_id AND v.object_id = o.id
 		             AND v.status = 'AVAILABLE' AND v.version IS NOT NULL),
@@ -68,7 +69,7 @@ func (r *CatalogRepository) CheckObjects(ctx context.Context, tenantID string, a
 		o := &c.Object
 		err := row.Scan(&o.ID, &o.TenantID, &o.Dataset, &o.Path, &o.PathKey, &versioning, &o.Revision, &metadata,
 			&o.CurrentAssetID, &o.CurrentVersion, &o.SizeBytes, &o.ContentType, &o.ChecksumSHA256, &o.PublishedAt,
-			&o.Versions, &o.DeletedAt, &o.CreatedBy, &o.CreatedAt, &o.UpdatedAt,
+			&o.Versions, &o.DeletedAt, &o.CreatedBy, &o.CreatedAt, &o.UpdatedAt, &o.StorageConnectionID,
 			&c.CurrentStatus, &c.CurrentStale, &c.MissingCurrent, &c.Unnumbered, &c.ReplacedLive)
 		o.Versioning = model.Versioning(versioning)
 		return c, err

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
+	"github.com/sanjeev0303/object-storage-platform/internal/model"
 )
 
 type upload struct {
@@ -79,6 +80,52 @@ type ObjectStorage struct {
 	// Versioning is what Capabilities reports: a test of a versioned
 	// bucket sets it.
 	Versioning bool
+	// Caps, when set, is what ProviderCapabilities reports, for a test of
+	// a provider that cannot do something.
+	Caps *model.ProviderCapabilities
+	// WriteCalls counts streaming writes (transfers between connections).
+	WriteCalls int
+}
+
+var _ interfaces.StorageProvider = (*ObjectStorage)(nil)
+
+// WriteObject stores exactly size bytes from body.
+func (s *ObjectStorage) WriteObject(ctx context.Context, _ string, key string, body io.Reader, size int64, _ string) (interfaces.ObjectMetadata, error) {
+	data, err := io.ReadAll(io.LimitReader(body, size))
+	if err != nil {
+		return interfaces.ObjectMetadata{}, fmt.Errorf("read source: %w", err)
+	}
+	if int64(len(data)) != size {
+		return interfaces.ObjectMetadata{}, fmt.Errorf("read source: %d of %d bytes", len(data), size)
+	}
+	s.mu.Lock()
+	s.WriteCalls++
+	s.objects[key] = data
+	s.modified[key] = s.clock()
+	s.newVersion(key)
+	s.mu.Unlock()
+	return s.HeadObject(ctx, "", key)
+}
+
+// ProviderCapabilities reports Caps, or what an S3 bucket can do.
+func (s *ObjectStorage) ProviderCapabilities(ctx context.Context, _ string) (model.ProviderCapabilities, error) {
+	if err := ctx.Err(); err != nil {
+		return model.ProviderCapabilities{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Caps != nil {
+		return *s.Caps, nil
+	}
+	caps := model.ProviderCapabilities{
+		PresignedUpload: true, MaxSingleUploadBytes: 5 << 30, Multipart: true, MultipartKind: "S3", MaxParts: 10000,
+		MinPartBytes: 5 << 20, PartValidator: "CONTENT", ListIncompleteUploads: true, ServerSideCopy: true, RangeReads: true,
+		ConditionalReads: true, PresignedDownload: true, ListObjects: true, VersioningStatus: "", ChecksumAlgorithms: []string{"MD5"},
+	}
+	if s.Versioning {
+		caps.ProviderVersioning, caps.VersioningStatus, caps.VersionIDKind = true, "Enabled", "S3_VERSION_ID"
+	}
+	return caps, nil
 }
 
 // Capabilities reports the bucket as versioned when Versioning is set.

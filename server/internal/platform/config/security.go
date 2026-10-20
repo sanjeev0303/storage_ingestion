@@ -76,6 +76,11 @@ var defaultRates = map[string]string{
 	"listing":       "600/1m",
 	"admin":         "120/1m",
 	"membership":    "120/1m",
+	// Connection tests and credential rotations reach out to customer
+	// endpoints with customer credentials: kept low, so a test cannot be
+	// used to probe a network.
+	"storage_test":  "10/1m",
+	"storage_admin": "60/1m",
 }
 
 // LoadSecurity reads and validates the security settings.

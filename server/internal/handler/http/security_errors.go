@@ -62,6 +62,24 @@ func securityStatus(err error) (int, string, bool) {
 		return nethttp.StatusConflict, "path_busy", true
 	case errors.Is(err, model.ErrRevisionConflict):
 		return nethttp.StatusPreconditionFailed, "revision_conflict", true
+	case errors.Is(err, model.ErrConnectionNotFound):
+		return nethttp.StatusNotFound, "not_found", true
+	case errors.Is(err, model.ErrConnectionNotActive):
+		return nethttp.StatusConflict, "connection_not_active", true
+	case errors.Is(err, model.ErrConnectionInUse):
+		return nethttp.StatusConflict, "connection_in_use", true
+	case errors.Is(err, model.ErrConnectionExists):
+		return nethttp.StatusConflict, "conflict", true
+	case errors.Is(err, model.ErrEndpointRejected):
+		return nethttp.StatusBadRequest, "endpoint_rejected", true
+	case errors.Is(err, model.ErrInvalidConnection):
+		return nethttp.StatusBadRequest, "invalid_request", true
+	case errors.Is(err, model.ErrUnsupportedProvider):
+		return nethttp.StatusUnprocessableEntity, "unsupported", true
+	case errors.Is(err, model.ErrCredentialMissing):
+		return nethttp.StatusConflict, "credentials_missing", true
+	case errors.Is(err, model.ErrStorageNotConfigured):
+		return nethttp.StatusNotImplemented, "byos_disabled", true
 	case errors.Is(err, model.ErrQueryTimeout):
 		return nethttp.StatusUnprocessableEntity, "query_too_broad", true
 	case errors.Is(err, model.ErrObjectNotFound), errors.Is(err, model.ErrVersionNotFound):
@@ -125,4 +143,12 @@ func writeQuotaError(w nethttp.ResponseWriter, e *model.QuotaError) {
 		Error: e.Error(), Code: "quota_exceeded", Limit: e.Limit, Max: e.Max, Used: e.Used,
 		Requested: e.Requested, Remaining: &remaining,
 	})
+}
+
+// storageConnectionError tells whether err is about a storage connection,
+// for handlers that map their own errors first.
+func storageConnectionError(err error) bool {
+	return errors.Is(err, model.ErrConnectionNotFound) || errors.Is(err, model.ErrConnectionNotActive) ||
+		errors.Is(err, model.ErrUnsupportedProvider) || errors.Is(err, model.ErrStorageNotConfigured) ||
+		errors.Is(err, model.ErrCredentialMissing)
 }

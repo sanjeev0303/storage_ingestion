@@ -66,7 +66,7 @@ func catalogObjectResponse(o model.CatalogObject) response.CatalogObjectResponse
 	if o.Published() {
 		out.CurrentVersion = &response.CurrentVersionResponse{
 			Version: o.CurrentVersion, AssetID: o.CurrentAssetID, SizeBytes: o.SizeBytes, ContentType: o.ContentType,
-			ChecksumSHA256: o.ChecksumSHA256, PublishedAt: o.PublishedAt,
+			ChecksumSHA256: o.ChecksumSHA256, PublishedAt: o.PublishedAt, StorageConnectionID: o.StorageConnectionID,
 		}
 	}
 	return out
