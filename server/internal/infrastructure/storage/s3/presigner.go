@@ -41,6 +41,9 @@ func (s *ObjectStorage) PresignGet(
 	if options.ContentType != "" {
 		input.ResponseContentType = aws.String(options.ContentType)
 	}
+	if options.VersionID != "" {
+		input.VersionId = aws.String(options.VersionID)
+	}
 
 	presigned, err := s.presigner.PresignGetObject(ctx, input, func(o *s3.PresignOptions) {
 		o.Expires = ttl
@@ -52,16 +55,25 @@ func (s *ObjectStorage) PresignGet(
 }
 
 // OpenRange streams part or all of an object straight from the provider.
+// The condition is enforced by the provider (If-Match, versionId), so the
+// bytes always come from the object the caller checked.
 func (s *ObjectStorage) OpenRange(
 	ctx context.Context,
 	bucket string,
 	objectKey string,
 	first int64,
 	last int64,
+	cond interfaces.ReadCondition,
 ) (io.ReadCloser, error) {
 	input := &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(objectKey),
+	}
+	if cond.IfMatch != "" {
+		input.IfMatch = aws.String(cond.IfMatch)
+	}
+	if cond.VersionID != "" {
+		input.VersionId = aws.String(cond.VersionID)
 	}
 	if last >= 0 {
 		if first < 0 || first > last {

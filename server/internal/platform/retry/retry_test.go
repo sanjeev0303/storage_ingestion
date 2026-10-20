@@ -3,6 +3,7 @@ package retry
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -47,5 +48,20 @@ func TestPermanentSurvivesWrapping(t *testing.T) {
 	}
 	if IsPermanent(errors.New("timeout")) || Permanent(nil) != nil {
 		t.Fatal("ordinary errors are transient and Permanent(nil) is nil")
+	}
+}
+
+func TestSanitizeCutsSignedURLs(t *testing.T) {
+	err := errors.New("get object: https://bucket.s3.amazonaws.com/a/b?X-Amz-Credential=AKIA123&X-Amz-Signature=deadbeef failed;\n" +
+		"retry with X-Amz-Signature=cafe and Signature=abc")
+
+	got := Sanitize(err)
+	for _, secret := range []string{"AKIA123", "deadbeef", "cafe", "abc"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("sanitized text still holds %q: %s", secret, got)
+		}
+	}
+	if !strings.Contains(got, "https://bucket.s3.amazonaws.com/a/b?[redacted]") || strings.Contains(got, "\n") {
+		t.Fatalf("expected the URL without its query, on one line: %s", got)
 	}
 }

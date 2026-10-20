@@ -476,16 +476,104 @@ func classify(operation string, err error) error {
 	var apiErr smithy.APIError
 	if errors.As(err, &apiErr) {
 		switch code := apiErr.ErrorCode(); {
-		case code == "NoSuchKey" || code == "NotFound":
+		case code == "NoSuchKey" || code == "NotFound" || code == "NoSuchVersion":
 			return fmt.Errorf("%s: %w", operation, interfaces.ErrObjectNotFound)
 		case code == "NoSuchUpload":
 			return fmt.Errorf("%s: %w", operation, interfaces.ErrStorageUploadNotFound)
+		case code == "PreconditionFailed":
+			return fmt.Errorf("%s: %w", operation, interfaces.ErrPreconditionFailed)
+		case code == "InvalidRange":
+			return fmt.Errorf("%s: %w", operation, interfaces.ErrInvalidRange)
+		case throttlingCodes[code]:
+			return fmt.Errorf("%s: %s: %w", operation, code, interfaces.ErrStorageThrottled)
+		case code == "AccessDenied":
+			return retry.Permanent(fmt.Errorf("%s: %s: %w", operation, code, interfaces.ErrStorageAccessDenied))
 		case permanentCodes[code]:
 			return retry.Permanent(fmt.Errorf("%s: %s", operation, code))
 		default:
-			return fmt.Errorf("%s: provider error %s", operation, code)
+			return classifyStatus(operation, err, "provider error "+code)
 		}
 	}
 
-	return fmt.Errorf("%s: %w", operation, err)
+	return classifyStatus(operation, err, err.Error())
+}
+
+// throttlingCodes are the providers' "slow down" answers.
+var throttlingCodes = map[string]bool{
+	"SlowDown":                   true,
+	"Throttling":                 true,
+	"ThrottlingException":        true,
+	"RequestLimitExceeded":       true,
+	"TooManyRequests":            true,
+	"ServiceUnavailable":         true,
+	"RequestThrottled":           true,
+	"XMinioServerNotInitialized": true,
+}
+
+// classifyStatus uses the HTTP status when a provider answered without a
+// recognisable code (a HEAD response has no body, for one).
+func classifyStatus(operation string, err error, text string) error {
+	var withStatus interface{ HTTPStatusCode() int }
+	if errors.As(err, &withStatus) {
+		switch withStatus.HTTPStatusCode() {
+		case 404:
+			return fmt.Errorf("%s: %w", operation, interfaces.ErrObjectNotFound)
+		case 412:
+			return fmt.Errorf("%s: %w", operation, interfaces.ErrPreconditionFailed)
+		case 416:
+			return fmt.Errorf("%s: %w", operation, interfaces.ErrInvalidRange)
+		case 429, 503:
+			return fmt.Errorf("%s: %w", operation, interfaces.ErrStorageThrottled)
+		}
+	}
+	if text == err.Error() {
+		return fmt.Errorf("%s: %w", operation, err)
+	}
+	return fmt.Errorf("%s: %s", operation, text)
+}
+
+// ListMultipartUploadsPage lists one page of in-progress sessions. The S3
+// listing continues from a key marker and an upload ID marker; both travel
+// in the opaque cursor, joined by a NUL that cannot occur in either.
+func (s *ObjectStorage) ListMultipartUploadsPage(
+	ctx context.Context,
+	bucket string,
+	prefix string,
+	cursor string,
+	limit int,
+) (interfaces.MultipartUploadPage, error) {
+	if limit <= 0 || limit > 1000 {
+		return interfaces.MultipartUploadPage{}, errors.New("page size must be between 1 and 1000")
+	}
+
+	input := &s3.ListMultipartUploadsInput{
+		Bucket:     aws.String(bucket),
+		Prefix:     aws.String(prefix),
+		MaxUploads: aws.Int32(int32(limit)),
+	}
+	if cursor != "" {
+		keyMarker, uploadMarker, _ := strings.Cut(cursor, "\x00")
+		input.KeyMarker = aws.String(keyMarker)
+		if uploadMarker != "" {
+			input.UploadIdMarker = aws.String(uploadMarker)
+		}
+	}
+
+	out, err := s.client.ListMultipartUploads(ctx, input)
+	if err != nil {
+		return interfaces.MultipartUploadPage{}, classify("list multipart uploads", err)
+	}
+
+	page := interfaces.MultipartUploadPage{}
+	for _, upload := range out.Uploads {
+		page.Uploads = append(page.Uploads, interfaces.StoredMultipartUpload{
+			ObjectKey:       aws.ToString(upload.Key),
+			StorageUploadID: aws.ToString(upload.UploadId),
+			Initiated:       aws.ToTime(upload.Initiated),
+		})
+	}
+	if aws.ToBool(out.IsTruncated) {
+		page.Cursor = aws.ToString(out.NextKeyMarker) + "\x00" + aws.ToString(out.NextUploadIdMarker)
+	}
+	return page, nil
 }

@@ -79,22 +79,43 @@ func (s *Service) Promote(ctx context.Context, asset model.Asset, destinationKey
 		return "", retry.Permanent(errors.New("asset source is not its verified quarantine key"))
 	}
 
-	err := s.storage.CopyObject(ctx, s.cfg.SourceBucket, asset.ObjectKey, s.cfg.DestinationBucket, destinationKey)
-	if errors.Is(err, interfaces.ErrObjectNotFound) {
-		// The verified source is gone and the asset was never promoted, so
-		// there is nothing that could be delivered.
-		return s.reject(ctx, asset, model.RejectSourceMissing)
-	}
+	// A crash after an earlier copy leaves a destination object behind. A
+	// matching one is reused; anything else is overwritten by the copy.
+	stored, matches, err := s.copyMatches(ctx, asset, destinationKey)
 	if err != nil {
-		return "", fmt.Errorf("copy to delivery key: %w", err)
-	}
-
-	if err := s.verifyCopy(ctx, asset, destinationKey); err != nil {
 		return "", err
 	}
+	if !matches {
+		err := s.storage.CopyObject(ctx, s.cfg.SourceBucket, asset.ObjectKey, s.cfg.DestinationBucket, destinationKey)
+		if errors.Is(err, interfaces.ErrObjectNotFound) {
+			// The verified source is gone and the asset was never promoted, so
+			// there is nothing that could be delivered.
+			return s.reject(ctx, asset, model.RejectSourceMissing)
+		}
+		if err != nil {
+			return "", fmt.Errorf("copy to delivery key: %w", err)
+		}
 
-	err = s.assets.TransitionStatus(ctx, asset.TenantID, asset.ID,
-		[]model.AssetStatus{model.AssetStatusProcessing}, model.AssetStatusAvailable, "", destinationKey, s.now())
+		stored, matches, err = s.copyMatches(ctx, asset, destinationKey)
+		if err != nil {
+			return "", err
+		}
+		if !matches {
+			// A bad copy is never promoted.
+			if err := s.RemoveDestination(ctx, destinationKey); err != nil {
+				return "", fmt.Errorf("promoted copy failed verification and could not be removed: %w", err)
+			}
+			return "", errors.New("promoted copy failed verification; it was removed and will be copied again")
+		}
+	}
+
+	// Delivery reads only this exact stored object (If-Match / version), so
+	// a later out-of-band overwrite can never be served under this asset.
+	err = s.assets.RecordStorageVersion(ctx, asset.TenantID, asset.ID, stored.ETag, stored.VersionID, s.now())
+	if err == nil {
+		err = s.assets.TransitionStatus(ctx, asset.TenantID, asset.ID,
+			[]model.AssetStatus{model.AssetStatusProcessing}, model.AssetStatusAvailable, "", destinationKey, s.now())
+	}
 	if errors.Is(err, model.ErrInvalidAssetState) {
 		current, getErr := s.assets.GetByID(ctx, asset.TenantID, asset.ID)
 		if getErr != nil {
@@ -109,34 +130,31 @@ func (s *Service) Promote(ctx context.Context, asset model.Asset, destinationKey
 	return model.AssetStatusAvailable, nil
 }
 
-// verifyCopy checks the destination's size and streams it through SHA-256.
-// A copy that does not match is deleted, so a bad copy is never promoted.
-func (s *Service) verifyCopy(ctx context.Context, asset model.Asset, destinationKey string) error {
+// copyMatches reports whether the destination holds exactly the verified
+// bytes: same size, then the same SHA-256, streamed. A missing destination
+// does not match. It returns the destination's validators.
+func (s *Service) copyMatches(ctx context.Context, asset model.Asset, destinationKey string) (interfaces.ObjectMetadata, bool, error) {
 	metadata, err := s.storage.HeadObject(ctx, s.cfg.DestinationBucket, destinationKey)
+	if errors.Is(err, interfaces.ErrObjectNotFound) {
+		return metadata, false, nil
+	}
 	if err != nil {
-		return fmt.Errorf("inspect promoted copy: %w", err)
+		return metadata, false, fmt.Errorf("inspect promoted copy: %w", err)
+	}
+	if metadata.SizeBytes != asset.SizeBytes {
+		return metadata, false, nil
 	}
 
-	sum := ""
-	if metadata.SizeBytes == asset.SizeBytes {
-		body, err := s.storage.OpenObject(ctx, s.cfg.DestinationBucket, destinationKey)
-		if err != nil {
-			return fmt.Errorf("open promoted copy: %w", err)
-		}
-		sum, err = checksum.Sum(ctx, body)
-		body.Close()
-		if err != nil {
-			return fmt.Errorf("hash promoted copy: %w", err)
-		}
+	body, err := s.storage.OpenObject(ctx, s.cfg.DestinationBucket, destinationKey)
+	if err != nil {
+		return metadata, false, fmt.Errorf("open promoted copy: %w", err)
 	}
-
-	if metadata.SizeBytes != asset.SizeBytes || sum != asset.ChecksumSHA256 {
-		if err := s.RemoveDestination(ctx, destinationKey); err != nil {
-			return fmt.Errorf("promoted copy failed verification and could not be removed: %w", err)
-		}
-		return errors.New("promoted copy failed verification; it was removed and will be copied again")
+	defer body.Close()
+	sum, err := checksum.Sum(ctx, body)
+	if err != nil {
+		return metadata, false, fmt.Errorf("hash promoted copy: %w", err)
 	}
-	return nil
+	return metadata, sum == asset.ChecksumSHA256, nil
 }
 
 // RemoveSource deletes the quarantine object once the asset is AVAILABLE.

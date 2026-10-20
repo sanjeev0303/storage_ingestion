@@ -25,14 +25,18 @@ func Run(
 		if err != nil && ctx.Err() == nil {
 			log.Error("reconciliation cycle failed", "error", err)
 		}
-		if stats.Claimed > 0 || stats.Enqueued > 0 {
+		if stats.Claimed > 0 || stats.Enqueued > 0 || len(stats.Findings) > 0 || len(stats.Due) > 0 {
 			log.Info("reconciliation cycle",
+				"dry_run", stats.DryRun,
 				"enqueued", stats.Enqueued,
 				"claimed", stats.Claimed,
 				"succeeded", stats.Succeeded,
 				"retried", stats.Retried,
 				"exhausted", stats.Exhausted,
 				"lease_lost", stats.LeaseLost,
+				"due", len(stats.Due),
+				"findings", len(stats.Findings),
+				"duration_ms", stats.Duration.Milliseconds(),
 			)
 		}
 

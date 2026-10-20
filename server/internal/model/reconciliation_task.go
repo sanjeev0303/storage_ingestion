@@ -54,12 +54,70 @@ type ReconciliationTask struct {
 	LastAttemptAt   *time.Time
 	NextAttemptAt   time.Time
 	LastError       string
-	LeaseOwner      string
-	LeaseExpiresAt  *time.Time
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	// Outcome is the upload status the task left behind.
+	Outcome        string
+	LeaseOwner     string
+	LeaseExpiresAt *time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // ErrLeaseLost means the worker's claim expired or another worker took
 // the task over, so the worker must not write its outcome.
 var ErrLeaseLost = errors.New("reconciliation lease lost")
+
+// Discrepancies the reconciliation scans look for beyond live tasks.
+const (
+	// FindingOrphanSession: a provider multipart session no live session owns.
+	FindingOrphanSession = "ORPHAN_MULTIPART_SESSION"
+	// FindingOrphanObject: a quarantine object no live session owns.
+	FindingOrphanObject = "ORPHAN_OBJECT"
+	// FindingStaleParts: part rows left on a finished (aborted, failed or
+	// expired) session.
+	FindingStaleParts = "STALE_PARTS"
+)
+
+// Actions a finding calls for.
+const (
+	ActionAbortSession = "ABORT_SESSION"
+	ActionDeleteObject = "DELETE_OBJECT"
+	ActionDeleteParts  = "DELETE_PARTS"
+)
+
+// Finding outcomes. PLANNED (a dry run) and REPORTED (left alone because
+// ownership cannot be proven) are logged and counted but never stored, so
+// a finding repeated every cycle does not fill the table.
+const (
+	FindingDone     = "DONE"
+	FindingFailed   = "FAILED"
+	FindingPlanned  = "PLANNED"
+	FindingReported = "REPORTED"
+)
+
+// ReconciliationFinding records one discrepancy and what was done about it.
+type ReconciliationFinding struct {
+	ID              string
+	Kind            string
+	TenantID        string
+	UploadID        string
+	ObjectKey       string
+	StorageUploadID string
+	Action          string
+	Outcome         string
+	Reason          string
+	CreatedAt       time.Time
+}
+
+// UploadRef names one tenant's upload session.
+type UploadRef struct {
+	TenantID string
+	UploadID string
+}
+
+// DueReconciliation is a session that needs a reconciliation operation; a
+// dry run reports these instead of creating tasks.
+type DueReconciliation struct {
+	UploadRef
+	Operation ReconciliationOperation
+	Status    UploadStatus
+}

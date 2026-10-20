@@ -4,9 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/sanjeev0303/object-storage-platform/internal/dto/request"
 	"github.com/sanjeev0303/object-storage-platform/internal/dto/response"
@@ -16,100 +17,47 @@ import (
 
 const maxJSONRequestBytes = 1 << 20 // 1 MiB
 
+// UploadHandler starts single-request uploads and reports on uploads.
+// The tenant and owner come from the authenticated principal only.
 type UploadHandler struct {
-	service  *uploadservice.Service
-	tenantID string
-	ownerID  string
+	service *uploadservice.Service
+	log     *slog.Logger
 }
 
-// NewUploadHandler receives the service and the trusted identity context.
-// The identity arguments are temporary local-development placeholders.
-// Production code must derive them from authenticated credentials.
-func NewUploadHandler(
-	service *uploadservice.Service,
-	tenantID string,
-	ownerID string,
-) *UploadHandler {
-	return &UploadHandler{
-		service:  service,
-		tenantID: tenantID,
-		ownerID:  ownerID,
-	}
+func NewUploadHandler(service *uploadservice.Service, log *slog.Logger) *UploadHandler {
+	return &UploadHandler{service: service, log: log}
 }
 
-func (h *UploadHandler) Create(
-	w http.ResponseWriter,
-	r *http.Request,
-) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
+func (h *UploadHandler) Create(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxJSONRequestBytes)
 	defer r.Body.Close()
 
 	var req request.CreateUploadRequest
-
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
-
 	if err := decoder.Decode(&req); err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
 			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
 			return
 		}
-
 		writeError(w, http.StatusBadRequest, "invalid JSON request")
 		return
 	}
-
 	// Reject a second JSON value or unexpected trailing content.
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {
 		writeError(w, http.StatusBadRequest, "request must contain one JSON object")
 		return
 	}
-
-	if !strings.HasPrefix(
-		r.Header.Get("Content-Type"),
-		"application/json",
-	) {
+	if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
 		writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
 		return
 	}
 
-	result, err := h.service.Create(r.Context(), uploadservice.CreateInput{
-		TenantID: h.tenantID,
-		OwnerID:  h.ownerID,
-		Request:  req,
-	})
+	result, err := h.service.CreateFor(r.Context(), principalOf(r), req)
 	if err != nil {
-		switch {
-		case errors.Is(err, uploadservice.ErrInvalidRequest):
-			writeError(w, http.StatusBadRequest, err.Error())
-
-		case errors.Is(err, uploadservice.ErrUploadTooLarge):
-			writeError(w, http.StatusRequestEntityTooLarge, err.Error())
-
-		case errors.Is(err, uploadservice.ErrUnsupportedMediaType):
-			writeError(w, http.StatusUnsupportedMediaType, err.Error())
-
-		case errors.Is(err, uploadservice.ErrIdempotencyConflict),
-			errors.Is(err, model.ErrIdempotencyConflict):
-			writeError(w, http.StatusConflict, "idempotency key conflicts with another request")
-
-		case errors.Is(err, model.ErrUploadAlreadyExists):
-			writeError(w, http.StatusConflict, "upload already exists")
-
-		default:
-			// Internal database or infrastructure errors must not be
-			// exposed to the client.
-			log.Printf("create upload failed: %v", err)
-			writeError(w, http.StatusInternalServerError, "could not create upload")
-		}
+		h.fail(w, err)
 		return
 	}
 
@@ -117,22 +65,64 @@ func (h *UploadHandler) Create(
 	if result.Reused {
 		statusCode = http.StatusOK
 	}
-
-	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Location", "/api/v1/uploads/"+result.Upload.ID)
-	w.WriteHeader(statusCode)
-
-	responseBody := response.CreateUploadResponse{
+	writeJSON(w, statusCode, response.CreateUploadResponse{
 		UploadID:  result.Upload.ID,
 		Status:    string(result.Upload.Status),
 		UploadURL: result.Plan.UploadURL,
 		ExpiresAt: result.Upload.ExpiresAt,
-	}
+	})
+}
 
-	if err := json.NewEncoder(w).Encode(responseBody); err != nil {
-		// The response may already have been committed.
-		// Structured error logging will be wired in later.
+// Get reports an upload of the caller's organization.
+func (h *UploadHandler) Get(w http.ResponseWriter, r *http.Request) {
+	session, err := h.service.GetFor(r.Context(), principalOf(r), r.PathValue("id"))
+	if err != nil {
+		h.fail(w, err)
 		return
+	}
+	writeJSON(w, http.StatusOK, uploadStatus{
+		UploadID: session.ID, Status: string(session.Status), FileName: session.FileName,
+		SizeBytes: session.ExpectedSize, ExpiresAt: session.ExpiresAt, Multipart: session.StorageUploadID != "",
+	})
+}
+
+type uploadStatus struct {
+	UploadID  string    `json:"upload_id"`
+	Status    string    `json:"status"`
+	FileName  string    `json:"file_name"`
+	SizeBytes int64     `json:"size_bytes"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Multipart bool      `json:"multipart"`
+}
+
+func (h *UploadHandler) fail(w http.ResponseWriter, err error) {
+	var quotaErr *model.QuotaError
+	switch {
+	case errors.As(err, &quotaErr):
+		writeQuotaError(w, quotaErr)
+	case errors.Is(err, model.ErrForbidden), errors.Is(err, model.ErrTenantRequired), errors.Is(err, model.ErrUploadNotFound),
+		errors.Is(err, model.ErrPathExists), errors.Is(err, model.ErrPathBusy):
+		writeSecurityError(w, h.log, err)
+	case errors.Is(err, uploadservice.ErrInvalidRequest):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, uploadservice.ErrUploadTooLarge):
+		writeError(w, http.StatusRequestEntityTooLarge, err.Error())
+	case errors.Is(err, uploadservice.ErrUnsupportedMediaType):
+		writeError(w, http.StatusUnsupportedMediaType, err.Error())
+	case errors.Is(err, uploadservice.ErrIdempotencyConflict), errors.Is(err, model.ErrIdempotencyConflict):
+		writeError(w, http.StatusConflict, "idempotency key conflicts with another request")
+	case errors.Is(err, model.ErrUploadAlreadyExists):
+		writeError(w, http.StatusConflict, "upload already exists")
+	case errors.Is(err, uploadservice.ErrObjectNotUploaded):
+		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, uploadservice.ErrObjectSizeMismatch):
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+	default:
+		// Internal database or infrastructure errors must not be exposed
+		// to the client.
+		h.log.Error("upload request failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "could not process the upload request")
 	}
 }
 

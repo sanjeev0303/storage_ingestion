@@ -51,8 +51,13 @@ func openReconcileEnv(t *testing.T) *reconcileEnv {
 		tenant:  fmt.Sprintf("reconcile-test-%d", time.Now().UnixNano()),
 	}
 	t.Cleanup(func() {
-		// Tasks go with their sessions (ON DELETE CASCADE).
-		_, _ = db.Pool.Exec(context.Background(), `DELETE FROM upload_sessions WHERE tenant_id = $1`, env.tenant)
+		ctx := context.Background()
+		// Tasks go with their sessions (ON DELETE CASCADE); events, written
+		// by completions, are removed by tenant.
+		for _, table := range []string{"outbox_events", "event_inbox", "dead_letters", "event_discrepancies"} {
+			_, _ = db.Pool.Exec(ctx, `DELETE FROM `+table+` WHERE tenant_id = $1`, env.tenant)
+		}
+		_, _ = db.Pool.Exec(ctx, `DELETE FROM upload_sessions WHERE tenant_id = $1`, env.tenant)
 		db.Close()
 	})
 	return env
@@ -166,10 +171,10 @@ func TestPostgresExpiredLeaseIsRecoveredAndStaleWriteRefused(t *testing.T) {
 		t.Fatalf("worker B should recover the expired lease: %v, %+v", err, got)
 	}
 
-	if err := env.tasks.Finish(ctx, taskID, "worker-a", later, model.ReconcileSucceeded, ""); !errors.Is(err, model.ErrLeaseLost) {
+	if err := env.tasks.Finish(ctx, taskID, "worker-a", later, model.ReconcileSucceeded, "", ""); !errors.Is(err, model.ErrLeaseLost) {
 		t.Fatalf("the stale worker must not write, got %v", err)
 	}
-	if err := env.tasks.Finish(ctx, taskID, "worker-b", later, model.ReconcileSucceeded, ""); err != nil {
+	if err := env.tasks.Finish(ctx, taskID, "worker-b", later, model.ReconcileSucceeded, "", ""); err != nil {
 		t.Fatalf("the current owner must write: %v", err)
 	}
 	if state, owner, _ := env.taskState(t, taskID); state != "SUCCEEDED" || owner != "" {
@@ -260,7 +265,7 @@ func TestPostgresExhaustedTaskStaysVisibleAndIsNotReEnqueued(t *testing.T) {
 	if _, err := env.tasks.Claim(ctx, "worker-a", now, time.Minute, 50); err != nil {
 		t.Fatal(err)
 	}
-	if err := env.tasks.Finish(ctx, taskID, "worker-a", now, model.ReconcileExhausted, "AccessDenied"); err != nil {
+	if err := env.tasks.Finish(ctx, taskID, "worker-a", now, model.ReconcileExhausted, "", "AccessDenied"); err != nil {
 		t.Fatalf("finish exhausted: %v", err)
 	}
 

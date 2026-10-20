@@ -21,6 +21,36 @@ type StoredPart struct {
 	SizeBytes  int64
 }
 
+// StoredMultipartUpload is an in-progress provider multipart session.
+type StoredMultipartUpload struct {
+	ObjectKey       string
+	StorageUploadID string
+	Initiated       time.Time
+}
+
+// MultipartUploadPage is one page of a provider session listing. Cursor is
+// empty on the last page.
+type MultipartUploadPage struct {
+	Uploads []StoredMultipartUpload
+	Cursor  string
+}
+
+// StoredObject is a listed object. ETag tells two objects stored under the
+// same key apart; it is not a content checksum.
+type StoredObject struct {
+	ObjectKey    string
+	SizeBytes    int64
+	LastModified time.Time
+	ETag         string
+}
+
+// ObjectPage is one page of an object listing. Cursor is empty on the last
+// page.
+type ObjectPage struct {
+	Objects []StoredObject
+	Cursor  string
+}
+
 // MultipartStorage contains the operations required to upload
 // one large object multipart independently retryable parts.
 //
@@ -96,4 +126,25 @@ type MultipartStorage interface {
 		destinationBucket string,
 		destinationKey string,
 	) error
+
+	// ListMultipartUploadsPage returns up to limit in-progress sessions
+	// under prefix, starting after cursor ("" = from the start). Scans use
+	// it page by page and never hold the whole listing in memory.
+	ListMultipartUploadsPage(
+		ctx context.Context,
+		bucket string,
+		prefix string,
+		cursor string,
+		limit int,
+	) (MultipartUploadPage, error)
+
+	// ListObjectsPage returns up to limit objects under prefix, starting
+	// after cursor ("" = from the start).
+	ListObjectsPage(
+		ctx context.Context,
+		bucket string,
+		prefix string,
+		cursor string,
+		limit int,
+	) (ObjectPage, error)
 }

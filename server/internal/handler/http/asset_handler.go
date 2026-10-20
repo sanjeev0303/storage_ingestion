@@ -36,7 +36,8 @@ func (h *AssetHandler) Get(w nethttp.ResponseWriter, r *nethttp.Request) {
 	w.Header().Set("Cache-Control", "private, no-store")
 	writeJSON(w, nethttp.StatusOK, response.AssetResponse{
 		ID: info.ID, FileName: info.FileName, ContentType: info.ContentType, SizeBytes: info.SizeBytes,
-		ChecksumSHA256: info.ChecksumSHA256, Status: string(info.Status), RejectionReason: info.RejectionReason,
+		ChecksumSHA256: info.ChecksumSHA256, Dataset: info.Dataset, Status: string(info.Status), RejectionReason: info.RejectionReason,
+		Deliverable: info.Deliverable, ETag: info.ETag, PublishedAt: info.PublishedAt,
 		CreatedAt: info.CreatedAt, UpdatedAt: info.UpdatedAt,
 	})
 }
@@ -49,14 +50,26 @@ func writeDeliveryError(w nethttp.ResponseWriter, log *slog.Logger, err error, t
 		// The client went away; there is no one to answer.
 	case errors.Is(err, model.ErrUnauthenticated):
 		writeJSON(w, nethttp.StatusUnauthorized, map[string]string{"error": "authentication required"})
+	case errors.Is(err, model.ErrForbidden), errors.Is(err, model.ErrTenantRequired):
+		writeSecurityError(w, log, err)
+	case errors.Is(err, delivery.ErrInvalidRequest):
+		writeJSON(w, nethttp.StatusBadRequest, map[string]string{"error": err.Error()})
+	case errors.Is(err, delivery.ErrTokenInvalid):
+		writeJSON(w, nethttp.StatusForbidden, map[string]string{"error": "download link is invalid or has expired"})
 	case errors.Is(err, delivery.ErrNotFound):
 		writeJSON(w, nethttp.StatusNotFound, map[string]string{"error": "asset not found"})
 	case errors.Is(err, delivery.ErrNotAvailable):
 		writeJSON(w, nethttp.StatusConflict, map[string]string{"error": "asset is not available for delivery"})
+	case errors.Is(err, delivery.ErrPreconditionFailed):
+		writeJSON(w, nethttp.StatusPreconditionFailed, map[string]string{"error": "the asset does not match If-Match"})
 	case errors.Is(err, delivery.ErrRangeNotSatisfiable):
 		w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(totalSize, 10))
 		writeJSON(w, nethttp.StatusRequestedRangeNotSatisfiable, map[string]string{"error": "requested range not satisfiable"})
-	case errors.Is(err, delivery.ErrStorageUnavailable), errors.Is(err, delivery.ErrAuditUnavailable):
+	case errors.Is(err, delivery.ErrStorageBusy):
+		w.Header().Set("Retry-After", "2")
+		writeJSON(w, nethttp.StatusServiceUnavailable, map[string]string{"error": "delivery is temporarily unavailable"})
+	case errors.Is(err, delivery.ErrStorageUnavailable), errors.Is(err, delivery.ErrAuditUnavailable),
+		errors.Is(err, delivery.ErrVersionMismatch):
 		writeJSON(w, nethttp.StatusServiceUnavailable, map[string]string{"error": "delivery is temporarily unavailable"})
 	default:
 		log.Error("delivery request failed", "error", err)

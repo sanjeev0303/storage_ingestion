@@ -22,34 +22,43 @@ import (
 
 const tenant = "tenant-1"
 
+const retention = 24 * time.Hour
+
 var quietLog = slog.New(slog.NewTextHandler(io.Discard, nil))
 
-// fakeScanner answers with its verdict or error, after running during().
+// fakeScanner answers with the queued results, then CLEAN, after running
+// during(). An error from during() is reported as a TIMEOUT when the scan
+// deadline passed and as an ERROR otherwise, as the ClamAV adapter does.
 type fakeScanner struct {
-	verdict interfaces.ScanVerdict
-	errs    []error
+	results []interfaces.ScanResult
+	pingErr error
 	calls   int
 	during  func(ctx context.Context) error
 }
 
 func (f *fakeScanner) Name() string { return "fake" }
 
-func (f *fakeScanner) Scan(ctx context.Context, content io.Reader) (interfaces.ScanVerdict, error) {
+func (f *fakeScanner) Ping(context.Context) error { return f.pingErr }
+
+func (f *fakeScanner) Scan(ctx context.Context, content io.Reader) interfaces.ScanResult {
 	f.calls++
 	if _, err := io.Copy(io.Discard, content); err != nil {
-		return interfaces.ScanVerdict{}, err
+		return interfaces.ScanResult{Outcome: model.ScanError, Detail: "read failed"}
 	}
 	if f.during != nil {
 		if err := f.during(ctx); err != nil {
-			return interfaces.ScanVerdict{}, err
+			if errors.Is(err, context.DeadlineExceeded) {
+				return interfaces.ScanResult{Outcome: model.ScanTimeout, Detail: "timed out"}
+			}
+			return interfaces.ScanResult{Outcome: model.ScanError, Detail: "failed"}
 		}
 	}
-	if len(f.errs) > 0 {
-		err := f.errs[0]
-		f.errs = f.errs[1:]
-		return interfaces.ScanVerdict{}, err
+	if len(f.results) > 0 {
+		result := f.results[0]
+		f.results = f.results[1:]
+		return result
 	}
-	return f.verdict, nil
+	return interfaces.ScanResult{Outcome: model.ScanClean}
 }
 
 type harness struct {
@@ -60,6 +69,9 @@ type harness struct {
 	memAsset *memory.AssetRepository
 	storage  *storagememory.ObjectStorage
 	scanner  *fakeScanner
+	held     *memory.QuarantineRepository
+	events   *memory.ProcessingEventRepository
+	policies *memory.ContentPolicyRepository
 	clock    time.Time
 	policy   ScanPolicy
 	noScan   bool
@@ -75,6 +87,9 @@ func newHarness() *harness {
 		uploads: uploads, assets: assets, memAsset: assets, jobs: jobs, memJobs: jobs,
 		storage:  storagememory.NewObjectStorage(),
 		scanner:  &fakeScanner{},
+		held:     memory.NewQuarantineRepository(),
+		events:   memory.NewProcessingEventRepository(),
+		policies: memory.NewContentPolicyRepository(),
 		clock:    time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC),
 		policy:   ScanPolicyHold,
 		attempts: 3,
@@ -98,14 +113,17 @@ func (h *harness) service(t *testing.T, owner string) *Service {
 
 	deps := Dependencies{
 		Jobs: h.jobs, Assets: h.assets, Uploads: h.uploads, Verifier: multipart, Storage: h.storage,
-		Validator: ContentValidator{}, Promoter: promoter,
+		Quarantine: h.held, Events: h.events, Policies: h.policies,
+		Validators: []interfaces.FileValidator{BasicValidator{}, TypeValidator{}},
+		Promoter:   promoter,
 	}
 	if !h.noScan {
 		deps.Scanner = h.scanner
 	}
 	svc, err := NewService(deps, Config{
 		Owner: owner, Bucket: "bucket", BatchSize: 10, Concurrency: 2, Lease: h.lease,
-		MaxFileBytes: 1 << 20, ScanPolicy: h.policy,
+		Policy:     model.ContentPolicy{MaxSizeBytes: 1 << 20, UnknownTypeAction: "allow"},
+		ScanPolicy: h.policy, ScanTimeout: h.lease / 2, QuarantineRetention: retention,
 		Retry: retry.Policy{BaseDelay: time.Minute, MaxDelay: 10 * time.Minute, MaxAttempts: h.attempts},
 	}, quietLog)
 	if err != nil {
@@ -140,6 +158,9 @@ func sum(data []byte) string {
 
 var pdfBytes = []byte("%PDF-1.7\n" + strings.Repeat("x", 600))
 
+// exeBytes starts like a Windows PE file; it is never executed.
+var exeBytes = []byte("MZ" + strings.Repeat("\x00", 60))
+
 func (h *harness) goodUpload(t *testing.T, id string) {
 	h.completedUpload(t, id, pdfBytes, sum(pdfBytes), int64(len(pdfBytes)), "application/pdf")
 }
@@ -164,6 +185,29 @@ func (h *harness) onlyJob(t *testing.T) model.ProcessingJob {
 		t.Fatalf("expected one job, got %d", len(jobs))
 	}
 	return jobs[0]
+}
+
+// onlyRecord returns the asset's single quarantine record.
+func (h *harness) onlyRecord(t *testing.T, assetID string) model.QuarantineRecord {
+	t.Helper()
+	records, err := h.held.ListForAsset(context.Background(), tenant, assetID)
+	if err != nil || len(records) != 1 {
+		t.Fatalf("expected one quarantine record, got %d (%v)", len(records), err)
+	}
+	return records[0]
+}
+
+func (h *harness) eventNames(t *testing.T, assetID string) string {
+	t.Helper()
+	events, err := h.events.ListForAsset(context.Background(), tenant, assetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range events {
+		names = append(names, e.Event)
+	}
+	return strings.Join(names, ",")
 }
 
 func (h *harness) run(t *testing.T, svc *Service) CycleStats {
@@ -193,8 +237,13 @@ func TestCleanUploadIsVerifiedScannedAndPromoted(t *testing.T) {
 		t.Fatalf("expected AVAILABLE under the delivery key, got %s at %s", asset.Status, asset.ObjectKey)
 	}
 	if job.State != model.ProcessingSucceeded || job.ChecksumAlgorithm != "SHA-256" || job.ChecksumVerifiedAt == nil ||
-		job.ScanResult != model.ScanClean || job.Scanner != "fake" || job.PromotedAt == nil || job.DetectedContentType != "application/pdf" {
+		job.ScanResult != model.ScanClean || job.Scanner != "fake" || job.PromotedAt == nil || job.DetectedContentType != "application/pdf" ||
+		job.VerificationStatus != model.StagePassed || job.ChecksumSource != model.ChecksumDeclared ||
+		job.ValidationStatus != model.StagePassed || job.PromotionStatus != model.PromotionPublished {
 		t.Fatalf("stage results not recorded: %+v", job)
+	}
+	if got := h.eventNames(t, asset.ID); got != "verified,scanned,promoted" {
+		t.Fatalf("unexpected audit events %q", got)
 	}
 	if got, ok := h.storage.Object(asset.ObjectKey); !ok || string(got) != string(pdfBytes) {
 		t.Fatal("the delivery copy is missing or wrong")
@@ -242,18 +291,20 @@ func TestDuplicateEventsCreateOneAssetAndOneJob(t *testing.T) {
 
 func TestVerificationRejects(t *testing.T) {
 	cases := []struct {
-		name   string
-		stored []byte
-		sum    string
-		size   int64
-		ctype  string
-		reason string
+		name     string
+		stored   []byte
+		sum      string
+		size     int64
+		ctype    string
+		reason   string
+		category string
 	}{
-		{"checksum mismatch", pdfBytes, sum([]byte("other")), int64(len(pdfBytes)), "application/pdf", model.FailureChecksumMismatch},
-		{"wrong size", pdfBytes, sum(pdfBytes), int64(len(pdfBytes)) + 1, "application/pdf", model.FailureObjectSizeMismatch},
-		{"missing object", nil, sum(pdfBytes), int64(len(pdfBytes)), "application/pdf", model.FailureUploadMissing},
-		{"type contradicts bytes", pdfBytes, sum(pdfBytes), int64(len(pdfBytes)), "video/mp4", model.RejectContentMismatch},
-		{"html is never accepted", []byte("<!DOCTYPE html><html></html>"), sum([]byte("<!DOCTYPE html><html></html>")), 28, "text/plain", model.RejectContentType},
+		{"checksum mismatch", pdfBytes, sum([]byte("other")), int64(len(pdfBytes)), "application/pdf", model.FailureChecksumMismatch, model.QuarantineVerificationFailed},
+		{"wrong size", pdfBytes, sum(pdfBytes), int64(len(pdfBytes)) + 1, "application/pdf", model.FailureObjectSizeMismatch, model.QuarantineVerificationFailed},
+		{"missing object", nil, sum(pdfBytes), int64(len(pdfBytes)), "application/pdf", model.FailureUploadMissing, model.QuarantineVerificationFailed},
+		{"type contradicts bytes", pdfBytes, sum(pdfBytes), int64(len(pdfBytes)), "video/mp4", model.RejectContentMismatch, model.QuarantineValidationRejected},
+		{"html is never accepted", []byte("<!DOCTYPE html><html></html>"), sum([]byte("<!DOCTYPE html><html></html>")), 28, "text/plain", model.RejectContentType, model.QuarantineValidationRejected},
+		{"executable is never accepted", exeBytes, sum(exeBytes), int64(len(exeBytes)), "application/pdf", model.RejectContentType, model.QuarantineValidationRejected},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -270,6 +321,11 @@ func TestVerificationRejects(t *testing.T) {
 			}
 			if h.storage.CopyCalls != 0 {
 				t.Fatal("a rejected asset must never be copied out of quarantine")
+			}
+			record := h.onlyRecord(t, asset.ID)
+			if record.Status != model.QuarantineRejected || record.Category != c.category || record.Reason != c.reason ||
+				record.RetainUntil == nil || !record.RetainUntil.Equal(h.clock.Add(retention)) {
+				t.Fatalf("quarantine record not written: %+v", record)
 			}
 		})
 	}
@@ -290,7 +346,7 @@ func TestOversizedFileIsRejectedBeforeReading(t *testing.T) {
 func TestMalwareIsRejectedAndRecorded(t *testing.T) {
 	h := newHarness()
 	h.goodUpload(t, "up-1")
-	h.scanner.verdict = interfaces.ScanVerdict{Infected: true, Signature: "Eicar-Signature"}
+	h.scanner.results = []interfaces.ScanResult{{Outcome: model.ScanInfected, Signature: "Eicar-Signature"}}
 	h.run(t, h.service(t, "worker-a"))
 
 	asset, job := h.onlyAsset(t), h.onlyJob(t)
@@ -300,13 +356,18 @@ func TestMalwareIsRejectedAndRecorded(t *testing.T) {
 	if job.ScanResult != model.ScanInfected || job.ScanSignature != "Eicar-Signature" || job.State != model.ProcessingFailed {
 		t.Fatalf("scan result not recorded: %+v", job)
 	}
+	record := h.onlyRecord(t, asset.ID)
+	if record.Status != model.QuarantineRejected || record.Category != model.QuarantineMalwareDetected ||
+		record.ScanSignature != "Eicar-Signature" || record.ScanResult != model.ScanInfected {
+		t.Fatalf("malware quarantine record not written: %+v", record)
+	}
 }
 
 func TestScannerErrorsRetryThenExhaustWithoutPromotion(t *testing.T) {
 	h := newHarness()
 	h.goodUpload(t, "up-1")
 	h.attempts = 2
-	h.scanner.errs = []error{errors.New("clamd down"), errors.New("clamd down")}
+	h.scanner.results = []interfaces.ScanResult{{Outcome: model.ScanError}, {Outcome: model.ScanError}}
 	svc := h.service(t, "worker-a")
 
 	if stats := h.run(t, svc); stats.Retried != 1 {
@@ -320,8 +381,12 @@ func TestScannerErrorsRetryThenExhaustWithoutPromotion(t *testing.T) {
 	if stats := h.run(t, svc); stats.Exhausted != 1 {
 		t.Fatalf("expected exhaustion, got %+v", stats)
 	}
-	if asset := h.onlyAsset(t); asset.Status != model.AssetStatusProcessing {
+	asset := h.onlyAsset(t)
+	if asset.Status != model.AssetStatusProcessing {
 		t.Fatalf("an unscanned asset must stay PROCESSING, got %s", asset.Status)
+	}
+	if record := h.onlyRecord(t, asset.ID); record.Status != model.QuarantineHeld || record.Category != model.QuarantineScanIncomplete {
+		t.Fatalf("an exhausted scan must be held: %+v", record)
 	}
 	if h.scanner.calls != 2 {
 		t.Fatalf("scanner called %d times, want 2", h.scanner.calls)
@@ -563,5 +628,184 @@ func TestAssetsAreTenantScoped(t *testing.T) {
 	}
 	if !strings.HasPrefix(asset.ObjectKey, "assets/"+tenant+"/") {
 		t.Fatalf("the delivery key must be derived from the tenant, got %s", asset.ObjectKey)
+	}
+}
+
+// ─── Scan outcomes, quarantine and operators ─────────────────────────
+
+func TestIncompleteScansAreNeverClean(t *testing.T) {
+	cases := []struct {
+		outcome string
+		stats   func(CycleStats) bool
+	}{
+		// Unsupported cannot improve by retrying: held at once.
+		{model.ScanUnsupported, func(s CycleStats) bool { return s.Exhausted == 1 }},
+		{model.ScanTimeout, func(s CycleStats) bool { return s.Retried == 1 }},
+		{model.ScanError, func(s CycleStats) bool { return s.Retried == 1 }},
+	}
+	for _, c := range cases {
+		t.Run(c.outcome, func(t *testing.T) {
+			h := newHarness()
+			h.goodUpload(t, "up-1")
+			h.scanner.results = []interfaces.ScanResult{{Outcome: c.outcome, Detail: "detail"}}
+			stats := h.run(t, h.service(t, "worker-a"))
+
+			asset, job := h.onlyAsset(t), h.onlyJob(t)
+			if !c.stats(stats) || asset.Status != model.AssetStatusProcessing || h.storage.CopyCalls != 0 {
+				t.Fatalf("an incomplete scan must not promote: %+v, %s", stats, asset.Status)
+			}
+			if job.ScanResult != c.outcome || job.ScanError != "detail" || job.Stage != model.StageScan {
+				t.Fatalf("scan attempt not recorded: %+v", job)
+			}
+		})
+	}
+}
+
+func TestScannerHealthCheckFailureRetriesWithoutScanning(t *testing.T) {
+	h := newHarness()
+	h.goodUpload(t, "up-1")
+	h.scanner.pingErr = errors.New("connection refused")
+	stats := h.run(t, h.service(t, "worker-a"))
+
+	if stats.Retried != 1 || h.scanner.calls != 0 {
+		t.Fatalf("expected a retry and no scan, got %+v, %d scans", stats, h.scanner.calls)
+	}
+	if job := h.onlyJob(t); job.ScanResult != model.ScanError || job.ScanError != "scanner unavailable" {
+		t.Fatalf("scanner outage not recorded: %+v", job)
+	}
+}
+
+func TestHeldAssetIsReleasedAfterRequeue(t *testing.T) {
+	h := newHarness()
+	h.goodUpload(t, "up-1")
+	h.attempts = 1
+	h.scanner.results = []interfaces.ScanResult{{Outcome: model.ScanError}}
+	svc := h.service(t, "worker-a")
+
+	if stats := h.run(t, svc); stats.Exhausted != 1 {
+		t.Fatalf("expected exhaustion, got %+v", stats)
+	}
+	asset := h.onlyAsset(t)
+	if record := h.onlyRecord(t, asset.ID); record.Status != model.QuarantineHeld {
+		t.Fatalf("expected HELD, got %+v", record)
+	}
+
+	// Requeue refuses anything but an exhausted job, and other tenants.
+	if _, err := svc.Requeue(context.Background(), "tenant-2", asset.ID, "operator:test"); !errors.Is(err, model.ErrAssetNotFound) {
+		t.Fatalf("another tenant must not requeue, got %v", err)
+	}
+	if _, err := svc.Requeue(context.Background(), tenant, asset.ID, "operator:test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Requeue(context.Background(), tenant, asset.ID, "operator:test"); !errors.Is(err, model.ErrInvalidAssetState) {
+		t.Fatalf("a pending job must not be requeued again, got %v", err)
+	}
+
+	h.run(t, svc)
+	if got := h.onlyAsset(t); got.Status != model.AssetStatusAvailable {
+		t.Fatalf("expected AVAILABLE after requeue, got %s", got.Status)
+	}
+	if record := h.onlyRecord(t, asset.ID); record.Status != model.QuarantineReleased || record.ResolvedAt == nil {
+		t.Fatalf("the hold must be released: %+v", record)
+	}
+	if got := h.eventNames(t, asset.ID); !strings.Contains(got, "quarantine_held,requeued,") || !strings.HasSuffix(got, "quarantine_released") {
+		t.Fatalf("operator actions not audited: %q", got)
+	}
+
+	inspection, err := svc.Inspect(context.Background(), tenant, asset.ID)
+	if err != nil || inspection.Job.State != model.ProcessingSucceeded || len(inspection.Quarantine) != 1 || len(inspection.Events) == 0 {
+		t.Fatalf("inspect: %+v, %v", inspection, err)
+	}
+}
+
+func TestRejectedObjectIsPurgedAfterRetention(t *testing.T) {
+	h := newHarness()
+	h.goodUpload(t, "up-1")
+	h.scanner.results = []interfaces.ScanResult{{Outcome: model.ScanInfected, Signature: "Eicar-Signature"}}
+	svc := h.service(t, "worker-a")
+	source := "quarantine/" + tenant + "/up-1"
+
+	h.run(t, svc)
+	if _, ok := h.storage.Object(source); !ok {
+		t.Fatal("a rejected object is kept for investigation during retention")
+	}
+
+	h.clock = h.clock.Add(retention - time.Minute)
+	if stats := h.run(t, svc); stats.Purged != 0 {
+		t.Fatal("purged before retention ended")
+	}
+
+	h.clock = h.clock.Add(2 * time.Minute)
+	if stats := h.run(t, svc); stats.Purged != 1 {
+		t.Fatalf("expected one purge, got %+v", stats)
+	}
+	if _, ok := h.storage.Object(source); ok {
+		t.Fatal("the rejected object must be deleted after retention")
+	}
+	asset := h.onlyAsset(t)
+	if record := h.onlyRecord(t, asset.ID); record.Status != model.QuarantinePurged {
+		t.Fatalf("expected PURGED, got %+v", record)
+	}
+	if stats := h.run(t, svc); stats.Purged != 0 {
+		t.Fatal("a purged record must not be purged again")
+	}
+}
+
+func TestPromotionReusesOrReplacesALeftoverCopy(t *testing.T) {
+	cases := []struct {
+		name     string
+		leftover []byte
+		copies   int
+	}{
+		{"verified leftover is reused", pdfBytes, 0},
+		{"wrong leftover is replaced", []byte("partial"), 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness()
+			h.goodUpload(t, "up-1")
+			if _, err := h.jobs.EnqueueDue(context.Background(), h.clock, 3); err != nil {
+				t.Fatal(err)
+			}
+			// A worker crashed right after copying, before recording it.
+			destination := "assets/" + tenant + "/" + h.onlyJob(t).AssetID
+			h.storage.PutObject(destination, c.leftover)
+
+			h.run(t, h.service(t, "worker-a"))
+			if got := h.onlyAsset(t); got.Status != model.AssetStatusAvailable || h.storage.CopyCalls != c.copies {
+				t.Fatalf("got %s with %d copies, want AVAILABLE with %d", got.Status, h.storage.CopyCalls, c.copies)
+			}
+			if got, _ := h.storage.Object(destination); string(got) != string(pdfBytes) {
+				t.Fatal("the delivered object must be the verified bytes")
+			}
+		})
+	}
+}
+
+func TestTenantPolicyNarrowsValidation(t *testing.T) {
+	cases := []struct {
+		name   string
+		policy model.ContentPolicy
+		reason string
+	}{
+		{"denied type", model.ContentPolicy{DeniedTypes: []string{"application/pdf"}}, model.RejectContentType},
+		{"smaller size limit", model.ContentPolicy{MaxSizeBytes: 100}, model.RejectFileTooLarge},
+		{"allow list", model.ContentPolicy{AllowedTypes: []string{"image/*"}}, model.RejectContentType},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness()
+			h.goodUpload(t, "up-1")
+			h.policies.Set(tenant, c.policy)
+			h.run(t, h.service(t, "worker-a"))
+
+			asset, job := h.onlyAsset(t), h.onlyJob(t)
+			if asset.Status != model.AssetStatusRejected || asset.RejectionReason != c.reason {
+				t.Fatalf("expected REJECTED/%s, got %s/%s", c.reason, asset.Status, asset.RejectionReason)
+			}
+			if job.ValidationStatus != model.StageRejected || job.ValidationReason != c.reason || h.scanner.calls != 0 {
+				t.Fatalf("validation result not recorded or scanned anyway: %+v", job)
+			}
+		})
 	}
 }

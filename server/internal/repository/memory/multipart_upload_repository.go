@@ -70,3 +70,9 @@ func (r *MultipartUploadRepository) DeleteParts(ctx context.Context, tenantID st
 	delete(r.parts, tenantID+"\x00"+uploadID)
 	return nil
 }
+
+func (r *MultipartUploadRepository) hasParts(tenantID, uploadID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.parts[tenantID+"\x00"+uploadID]) > 0
+}

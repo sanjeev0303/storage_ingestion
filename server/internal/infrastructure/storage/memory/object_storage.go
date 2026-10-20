@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,16 +20,21 @@ import (
 )
 
 type upload struct {
-	key   string
-	parts map[int32][]byte
+	key       string
+	parts     map[int32][]byte
+	initiated time.Time
 }
 
 // ObjectStorage implements interfaces.MultipartStorage in memory.
 type ObjectStorage struct {
-	mu      sync.Mutex
-	uploads map[string]*upload
-	objects map[string][]byte
-	nextID  int
+	mu       sync.Mutex
+	uploads  map[string]*upload
+	objects  map[string][]byte
+	modified map[string]time.Time
+	// Now, when set, is the provider's clock for initiation and
+	// modification times; otherwise the real time.
+	Now    func() time.Time
+	nextID int
 
 	// Failure injection. Each is returned once and then cleared.
 	BeginErr     error // fail without creating an upload
@@ -50,10 +56,42 @@ type ObjectStorage struct {
 	CompleteCalls int
 	AbortCalls    int
 	CopyCalls     int
+	ListCalls     int
 
 	PresignErr error // fail PresignGet once
 	RangeErr   error // fail OpenRange once
 	Presigns   []Presigned
+	// WrapRange, when set, wraps every body OpenRange returns, to simulate
+	// slow, failing or watched streams. ctx is the read's context, which a
+	// real provider body honours.
+	WrapRange  func(ctx context.Context, body io.ReadCloser) io.ReadCloser
+	RangeCalls int
+
+	DeleteErr  error // fail DeleteObject once, deleting nothing
+	DeleteLost error // delete, then fail once (lost response or crash)
+	ListErr    error // fail ListObjectsPage once
+	// DeleteCalls counts DeleteObject and DeleteObjectVersion calls.
+	DeleteCalls int
+	// versions holds the current version ID of objects a test made
+	// versioned; other objects behave as in an unversioned bucket.
+	versions        map[string]string
+	DeletedVersions []string
+	// Versioning is what Capabilities reports: a test of a versioned
+	// bucket sets it.
+	Versioning bool
+}
+
+// Capabilities reports the bucket as versioned when Versioning is set.
+func (s *ObjectStorage) Capabilities(ctx context.Context, _ string) (interfaces.StorageCapabilities, error) {
+	if err := ctx.Err(); err != nil {
+		return interfaces.StorageCapabilities{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Versioning {
+		return interfaces.StorageCapabilities{ProviderVersioning: true, VersioningStatus: "Enabled"}, nil
+	}
+	return interfaces.StorageCapabilities{}, nil
 }
 
 func (s *ObjectStorage) CopyObject(ctx context.Context, _ string, sourceKey string, _ string, destinationKey string) error {
@@ -77,7 +115,22 @@ func (s *ObjectStorage) CopyObject(ctx context.Context, _ string, sourceKey stri
 		copied[0] ^= 0xff
 	}
 	s.objects[destinationKey] = copied
+	s.modified[destinationKey] = s.clock()
+	s.newVersion(destinationKey)
 	return take(&s.CopyLost)
+}
+
+// newVersion gives a written key a new version ID in a versioned bucket.
+// The caller holds the lock.
+func (s *ObjectStorage) newVersion(key string) {
+	if !s.Versioning {
+		return
+	}
+	if s.versions == nil {
+		s.versions = make(map[string]string)
+	}
+	s.nextID++
+	s.versions[key] = fmt.Sprintf("version-%d", s.nextID)
 }
 
 // PutObject stores a whole object directly, as a completed upload would.
@@ -85,14 +138,17 @@ func (s *ObjectStorage) PutObject(key string, data []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.objects[key] = data
+	s.modified[key] = s.clock()
+	s.newVersion(key)
 }
 
 var _ interfaces.MultipartStorage = (*ObjectStorage)(nil)
 
 func NewObjectStorage() *ObjectStorage {
 	return &ObjectStorage{
-		uploads: make(map[string]*upload),
-		objects: make(map[string][]byte),
+		uploads:  make(map[string]*upload),
+		objects:  make(map[string][]byte),
+		modified: make(map[string]time.Time),
 	}
 }
 
@@ -124,9 +180,10 @@ func (s *ObjectStorage) HeadObject(ctx context.Context, _ string, key string) (i
 	if s.SizeOverride != 0 {
 		size = s.SizeOverride
 	}
-	return interfaces.ObjectMetadata{SizeBytes: size, ETag: etag(data)}, nil
+	return interfaces.ObjectMetadata{SizeBytes: size, ETag: etag(data), VersionID: s.versions[key]}, nil
 }
 
+// DeleteObject removes an object. Like S3, deleting a missing key succeeds.
 func (s *ObjectStorage) DeleteObject(ctx context.Context, _ string, key string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -134,8 +191,55 @@ func (s *ObjectStorage) DeleteObject(ctx context.Context, _ string, key string) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.DeleteCalls++
+	if err := take(&s.DeleteErr); err != nil {
+		return err
+	}
 	delete(s.objects, key)
-	return nil
+	return take(&s.DeleteLost)
+}
+
+// SetVersion makes key versioned with the given current version ID.
+func (s *ObjectStorage) SetVersion(key, versionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.versions == nil {
+		s.versions = make(map[string]string)
+	}
+	s.versions[key] = versionID
+}
+
+// HeadObjectVersion finds key only at its current version.
+func (s *ObjectStorage) HeadObjectVersion(ctx context.Context, bucket, key, versionID string) (interfaces.ObjectMetadata, error) {
+	s.mu.Lock()
+	current, ok := s.versions[key]
+	s.mu.Unlock()
+	if !ok || current != versionID {
+		return interfaces.ObjectMetadata{}, fmt.Errorf("head object version: %w", interfaces.ErrObjectNotFound)
+	}
+	meta, err := s.HeadObject(ctx, bucket, key)
+	meta.VersionID = versionID
+	return meta, err
+}
+
+// DeleteObjectVersion removes key when versionID is its current version.
+func (s *ObjectStorage) DeleteObjectVersion(ctx context.Context, _ string, key, versionID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.DeleteCalls++
+	if err := take(&s.DeleteErr); err != nil {
+		return err
+	}
+	s.DeletedVersions = append(s.DeletedVersions, versionID)
+	if s.versions[key] == versionID {
+		delete(s.objects, key)
+		delete(s.versions, key)
+	}
+	return take(&s.DeleteLost)
 }
 
 func (s *ObjectStorage) BeginMultipart(ctx context.Context, _ string, key string, _ string) (string, error) {
@@ -167,7 +271,7 @@ func (s *ObjectStorage) AddUpload(key string) string {
 func (s *ObjectStorage) addUpload(key string) string {
 	s.nextID++
 	id := fmt.Sprintf("provider-upload-%d", s.nextID)
-	s.uploads[id] = &upload{key: key, parts: make(map[int32][]byte)}
+	s.uploads[id] = &upload{key: key, parts: make(map[int32][]byte), initiated: s.clock()}
 	return id
 }
 
@@ -210,6 +314,7 @@ func (s *ObjectStorage) CompleteMultipart(ctx context.Context, _ string, key str
 		object.Write(data)
 	}
 	s.objects[key] = object.Bytes()
+	s.modified[key] = s.clock()
 	delete(s.uploads, uploadID)
 
 	return take(&s.CompleteLost)
@@ -333,14 +438,17 @@ func (s *ObjectStorage) PresignGet(ctx context.Context, bucket, key string, ttl 
 	return fmt.Sprintf("https://storage.test/%s/%s?X-Amz-Expires=%d&X-Amz-Signature=fake", bucket, key, int(ttl.Seconds())), nil
 }
 
-// OpenRange returns bytes first..last of an object, or all of it when last < 0.
-func (s *ObjectStorage) OpenRange(ctx context.Context, _ string, key string, first, last int64) (io.ReadCloser, error) {
+// OpenRange returns bytes first..last of an object, or all of it when
+// last < 0, if the object still has the ETag in cond.IfMatch. Version IDs
+// are not modelled: a set VersionID is refused, as by an unversioned bucket.
+func (s *ObjectStorage) OpenRange(ctx context.Context, _ string, key string, first, last int64, cond interfaces.ReadCondition) (io.ReadCloser, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.RangeCalls++
 	if err := take(&s.RangeErr); err != nil {
 		return nil, err
 	}
@@ -348,11 +456,105 @@ func (s *ObjectStorage) OpenRange(ctx context.Context, _ string, key string, fir
 	if !ok {
 		return nil, fmt.Errorf("get object range: %w", interfaces.ErrObjectNotFound)
 	}
-	if last < 0 {
-		return io.NopCloser(bytes.NewReader(data)), nil
+	if cond.VersionID != "" {
+		return nil, fmt.Errorf("get object range: %w", interfaces.ErrObjectNotFound)
 	}
-	if first < 0 || first > last || last >= int64(len(data)) {
-		return nil, fmt.Errorf("invalid byte range %d-%d", first, last)
+	if cond.IfMatch != "" && cond.IfMatch != etag(data) {
+		return nil, fmt.Errorf("get object range: %w", interfaces.ErrPreconditionFailed)
 	}
-	return io.NopCloser(bytes.NewReader(data[first : last+1])), nil
+
+	var body io.ReadCloser
+	switch {
+	case last < 0:
+		body = io.NopCloser(bytes.NewReader(data))
+	case first < 0 || first > last || last >= int64(len(data)):
+		return nil, fmt.Errorf("get object range: %w", interfaces.ErrInvalidRange)
+	default:
+		body = io.NopCloser(bytes.NewReader(data[first : last+1]))
+	}
+	if s.WrapRange != nil {
+		body = s.WrapRange(ctx, body)
+	}
+	return body, nil
+}
+
+// ETag returns the provider ETag of a stored object, as HeadObject would.
+func (s *ObjectStorage) ETag(key string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return etag(s.objects[key])
+}
+
+func (s *ObjectStorage) clock() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now().UTC()
+}
+
+// ListMultipartUploadsPage pages through sessions in key, then ID, order.
+func (s *ObjectStorage) ListMultipartUploadsPage(ctx context.Context, _ string, prefix string, cursor string, limit int) (interfaces.MultipartUploadPage, error) {
+	if err := ctx.Err(); err != nil {
+		return interfaces.MultipartUploadPage{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ListCalls++
+
+	var all []interfaces.StoredMultipartUpload
+	for id, u := range s.uploads {
+		if strings.HasPrefix(u.key, prefix) {
+			all = append(all, interfaces.StoredMultipartUpload{ObjectKey: u.key, StorageUploadID: id, Initiated: u.initiated})
+		}
+	}
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].ObjectKey+"\x00"+all[i].StorageUploadID < all[j].ObjectKey+"\x00"+all[j].StorageUploadID
+	})
+
+	page := interfaces.MultipartUploadPage{}
+	for _, u := range all {
+		if cursor != "" && u.ObjectKey+"\x00"+u.StorageUploadID <= cursor {
+			continue
+		}
+		if len(page.Uploads) == limit {
+			last := page.Uploads[len(page.Uploads)-1]
+			page.Cursor = last.ObjectKey + "\x00" + last.StorageUploadID
+			break
+		}
+		page.Uploads = append(page.Uploads, u)
+	}
+	return page, nil
+}
+
+// ListObjectsPage pages through objects in key order.
+func (s *ObjectStorage) ListObjectsPage(ctx context.Context, _ string, prefix string, cursor string, limit int) (interfaces.ObjectPage, error) {
+	if err := ctx.Err(); err != nil {
+		return interfaces.ObjectPage{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ListCalls++
+	if err := take(&s.ListErr); err != nil {
+		return interfaces.ObjectPage{}, err
+	}
+
+	var keys []string
+	for key := range s.objects {
+		if strings.HasPrefix(key, prefix) && key > cursor {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+
+	page := interfaces.ObjectPage{}
+	for _, key := range keys {
+		if len(page.Objects) == limit {
+			page.Cursor = page.Objects[len(page.Objects)-1].ObjectKey
+			break
+		}
+		page.Objects = append(page.Objects, interfaces.StoredObject{
+			ObjectKey: key, SizeBytes: int64(len(s.objects[key])), LastModified: s.modified[key], ETag: etag(s.objects[key]),
+		})
+	}
+	return page, nil
 }

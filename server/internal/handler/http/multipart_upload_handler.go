@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	nethttp "net/http"
 	"strings"
 
@@ -14,24 +15,34 @@ import (
 )
 
 // MultipartUploadHandler handles the multipart upload lifecycle endpoints.
+// The tenant and owner always come from the authenticated principal.
 type MultipartUploadHandler struct {
 	service *uploadservice.MultipartService
+	// single completes uploads sent in one request, which share the
+	// completion route.
+	single *uploadservice.Service
+	log    *slog.Logger
 }
 
-// NewMultipartUploadHandler creates a handler backed by the given service.
+// NewMultipartUploadHandler creates a handler backed by the given services.
 func NewMultipartUploadHandler(
 	service *uploadservice.MultipartService,
+	single *uploadservice.Service,
+	log *slog.Logger,
 ) *MultipartUploadHandler {
-	return &MultipartUploadHandler{service: service}
+	return &MultipartUploadHandler{service: service, single: single, log: log}
 }
 
-// Register mounts all multipart routes on the provided mux.
-func (h *MultipartUploadHandler) Register(mux *nethttp.ServeMux) {
-	mux.HandleFunc("POST /api/v1/uploads/multipart", h.start)
-	mux.HandleFunc("POST /api/v1/uploads/{id}/parts/urls", h.presignParts)
-	mux.HandleFunc("POST /api/v1/uploads/{id}/parts/confirm", h.recordParts)
-	mux.HandleFunc("POST /api/v1/uploads/{id}/complete", h.complete)
-	mux.HandleFunc("POST /api/v1/uploads/{id}/abort", h.abort)
+// Routes are the multipart routes, for the router to wrap in
+// authentication.
+func (h *MultipartUploadHandler) Routes() map[string]nethttp.HandlerFunc {
+	return map[string]nethttp.HandlerFunc{
+		"POST /api/v1/uploads/multipart":          h.start,
+		"POST /api/v1/uploads/{id}/parts/urls":    h.presignParts,
+		"POST /api/v1/uploads/{id}/parts/confirm": h.recordParts,
+		"POST /api/v1/uploads/{id}/complete":      h.complete,
+		"POST /api/v1/uploads/{id}/abort":         h.abort,
+	}
 }
 
 func (h *MultipartUploadHandler) start(
@@ -43,18 +54,19 @@ func (h *MultipartUploadHandler) start(
 		return
 	}
 
-	// Prototype identity only. Replace with authenticated identity.
-	result, err := h.service.Start(r.Context(), uploadservice.StartMultipartInput{
-		TenantID:       "local-tenant",
-		OwnerID:        "local-user",
+	result, err := h.service.StartFor(r.Context(), principalOf(r), uploadservice.StartMultipartInput{
 		FileName:       body.FileName,
 		ContentType:    body.ContentType,
 		SizeBytes:      body.SizeBytes,
 		ChecksumSHA256: body.ChecksumSHA256,
 		IdempotencyKey: body.IdempotencyKey,
+		Dataset:        body.Dataset,
+		Path:           body.Path,
+		Metadata:       body.Metadata,
+		CreateOnly:     body.CreateOnly,
 	})
 	if err != nil {
-		writeMultipartError(w, err)
+		h.fail(w, err)
 		return
 	}
 
@@ -75,15 +87,9 @@ func (h *MultipartUploadHandler) presignParts(
 		return
 	}
 
-	urls, err := h.service.PresignParts(
-		r.Context(),
-		"local-tenant",
-		"local-user",
-		r.PathValue("id"),
-		body.PartNumbers,
-	)
+	urls, err := h.service.PresignPartsFor(r.Context(), principalOf(r), r.PathValue("id"), body.PartNumbers)
 	if err != nil {
-		writeMultipartError(w, err)
+		h.fail(w, err)
 		return
 	}
 
@@ -121,27 +127,32 @@ func (h *MultipartUploadHandler) recordParts(
 		})
 	}
 
-	err := h.service.RecordParts(
-		r.Context(),
-		"local-tenant",
-		"local-user",
-		r.PathValue("id"),
-		parts,
-	)
-	if err != nil {
-		writeMultipartError(w, err)
+	if err := h.service.RecordPartsFor(r.Context(), principalOf(r), r.PathValue("id"), parts); err != nil {
+		h.fail(w, err)
 		return
 	}
 
 	writeJSON(w, nethttp.StatusOK, map[string]string{"status": "parts_recorded"})
 }
 
+// complete finishes an upload: a multipart one from the parts listed, or,
+// with no parts, a single-request one whose object must now exist.
 func (h *MultipartUploadHandler) complete(
 	w nethttp.ResponseWriter,
 	r *nethttp.Request,
 ) {
 	var body request.CompleteMultipartUploadRequest
-	if !decodeJSON(w, r, &body) {
+	if r.ContentLength != 0 && !decodeJSON(w, r, &body) {
+		return
+	}
+
+	if len(body.Parts) == 0 && h.single != nil {
+		status, err := h.single.CompleteFor(r.Context(), principalOf(r), r.PathValue("id"))
+		if err != nil {
+			h.fail(w, err)
+			return
+		}
+		writeJSON(w, nethttp.StatusOK, map[string]string{"upload_id": r.PathValue("id"), "status": string(status)})
 		return
 	}
 
@@ -153,15 +164,10 @@ func (h *MultipartUploadHandler) complete(
 		})
 	}
 
-	session, err := h.service.Complete(
-		r.Context(),
-		"local-tenant",
-		"local-user",
-		r.PathValue("id"),
-		uploadservice.CompleteMultipartInput{Parts: parts},
-	)
+	session, err := h.service.CompleteFor(r.Context(), principalOf(r), r.PathValue("id"),
+		uploadservice.CompleteMultipartInput{Parts: parts})
 	if err != nil {
-		writeMultipartError(w, err)
+		h.fail(w, err)
 		return
 	}
 
@@ -176,14 +182,9 @@ func (h *MultipartUploadHandler) abort(
 	w nethttp.ResponseWriter,
 	r *nethttp.Request,
 ) {
-	session, err := h.service.Abort(
-		r.Context(),
-		"local-tenant",
-		"local-user",
-		r.PathValue("id"),
-	)
+	session, err := h.service.AbortFor(r.Context(), principalOf(r), r.PathValue("id"))
 	if err != nil {
-		writeMultipartError(w, err)
+		h.fail(w, err)
 		return
 	}
 
@@ -192,6 +193,28 @@ func (h *MultipartUploadHandler) abort(
 		Status:    string(session.Status),
 		ExpiresAt: session.ExpiresAt,
 	})
+}
+
+// fail answers quota and authorization errors like the other secured
+// endpoints, and everything else as the multipart API always has.
+func (h *MultipartUploadHandler) fail(w nethttp.ResponseWriter, err error) {
+	var quotaErr *model.QuotaError
+	switch {
+	case errors.As(err, &quotaErr):
+		writeQuotaError(w, quotaErr)
+	case errors.Is(err, model.ErrForbidden), errors.Is(err, model.ErrTenantRequired),
+		errors.Is(err, model.ErrPathExists), errors.Is(err, model.ErrPathBusy):
+		writeSecurityError(w, h.log, err)
+	case errors.Is(err, model.ErrUploadNotFound), errors.Is(err, uploadservice.ErrObjectNotUploaded),
+		errors.Is(err, uploadservice.ErrObjectSizeMismatch):
+		uploadFail(w, h.log, err)
+	default:
+		writeMultipartError(w, err)
+	}
+}
+
+func uploadFail(w nethttp.ResponseWriter, log *slog.Logger, err error) {
+	(&UploadHandler{log: log}).fail(w, err)
 }
 
 // decodeJSON reads and decodes a JSON request body.

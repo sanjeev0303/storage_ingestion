@@ -8,20 +8,60 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
+	httpapi "github.com/sanjeev0303/object-storage-platform/internal/handler/http"
 	"github.com/sanjeev0303/object-storage-platform/internal/infrastructure/cdn/cloudfront"
 	"github.com/sanjeev0303/object-storage-platform/internal/infrastructure/database/postgres"
 	s3storage "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/s3"
+	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
+	"github.com/sanjeev0303/object-storage-platform/internal/model"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/config"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/logger"
+	"github.com/sanjeev0303/object-storage-platform/internal/platform/metrics"
+	"github.com/sanjeev0303/object-storage-platform/internal/platform/ratelimit"
+	"github.com/sanjeev0303/object-storage-platform/internal/platform/retry"
 	"github.com/sanjeev0303/object-storage-platform/internal/server"
 	"github.com/sanjeev0303/object-storage-platform/internal/server/middleware"
+	assetservice "github.com/sanjeev0303/object-storage-platform/internal/service/asset"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/audit"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/catalog"
+	datasetservice "github.com/sanjeev0303/object-storage-platform/internal/service/dataset"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/delivery"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/events"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/identity"
+	ingestionservice "github.com/sanjeev0303/object-storage-platform/internal/service/ingestion"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/processing"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/quota"
 	uploadservice "github.com/sanjeev0303/object-storage-platform/internal/service/upload"
 )
+
+// newIngestion builds the bulk-ingestion service behind the dataset and
+// ingestion routes. Requeueing held processing is left to the upload
+// worker, which runs processing.
+func newIngestion(
+	db *postgres.DB,
+	uploads *postgres.UploadRepository,
+	single *uploadservice.Service,
+	multipart *uploadservice.MultipartService,
+	storage *s3storage.ObjectStorage,
+	bucket string,
+	recorder interfaces.AuditRecorder,
+	log *slog.Logger,
+) (*ingestionservice.Service, error) {
+	cfg, err := config.LoadIngestion()
+	if err != nil {
+		return nil, err
+	}
+	registry := metrics.New()
+	registry.Publish("ingestion")
+	return ingestionservice.NewService(ingestionservice.Dependencies{
+		Repo: postgres.NewIngestionRepository(db), Uploads: single, Multipart: multipart, Sessions: uploads,
+		Assets: postgres.NewAssetRepository(db), Jobs: postgres.NewProcessingJobRepository(db),
+		Manifests: storage, Bucket: bucket, Log: log, Metrics: registry, Audit: recorder,
+	}, cfg)
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -34,6 +74,13 @@ func run() error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load configuration: %w", err)
+	}
+
+	// Invalid security settings stop the API here: there is no weaker
+	// fallback and no development identity.
+	sec, err := config.LoadSecurity()
+	if err != nil {
+		return fmt.Errorf("load security configuration: %w", err)
 	}
 
 	log := logger.New(cfg.AppEnv)
@@ -67,14 +114,26 @@ func run() error {
 		return fmt.Errorf("S3_BUCKET is required")
 	}
 
+	securityMetrics := metrics.New()
+	auditService := audit.NewService(postgres.NewAuditRepository(db), log, securityMetrics, sec.Audit.Retention)
+	limiter := ratelimit.New()
+	identityService, err := identity.NewService(identity.Dependencies{
+		Users: postgres.NewIdentityRepository(db), Tenancy: postgres.NewTenancyRepository(db),
+		Audit: auditService, Limiter: limiter, Log: log,
+	}, sec)
+	if err != nil {
+		return fmt.Errorf("configure identity: %w", err)
+	}
+	quotaService := quota.NewService(postgres.NewQuotaRepository(db), sec.Quotas, auditService, log)
+
 	uploadRepository := postgres.NewUploadRepository(db)
 	uploadService := uploadservice.NewService(
 		uploadRepository,
 		objectStorage,
 		bucket,
-		5*1024*1024*1024, // 5 GiB
-		30*time.Minute,
-	)
+		cfg.UploadMaxSize,
+		cfg.UploadSessionTTL,
+	).Guard(quotaService, auditService)
 
 	multipartRepository := postgres.NewMultipartUploadRepository(db)
 
@@ -84,24 +143,97 @@ func run() error {
 		objectStorage,
 		uploadservice.MultipartServiceConfig{
 			Bucket:     bucket,
-			MaxSize:    5 * 1024 * 1024 * 1024, // 5 GiB application limit
-			SessionTTL: 30 * time.Minute,
-			PartURLTTL: 15 * time.Minute,
+			MaxSize:    cfg.UploadMaxSize,
+			SessionTTL: cfg.UploadSessionTTL,
+			PartURLTTL: cfg.UploadURLTTL,
 		},
 	)
 	if err != nil {
 		log.Error("create multipart service", "error", err)
 		return fmt.Errorf("create multipart service: %w", err)
 	}
+	multipartService.Guard(quotaService, auditService)
 
-	routes, err := deliveryRoutes(cfg, db, objectStorage, bucket, log)
+	routes, err := deliveryRoutes(db, objectStorage, bucket, log)
 	if err != nil {
 		return fmt.Errorf("configure delivery: %w", err)
 	}
+	routes.Delivery.Guard(identityService.PrincipalFor, auditService)
+	routes.Lifecycle.Guard(auditService)
+	routes.Ingestion, err = newIngestion(db, uploadRepository, uploadService, multipartService, objectStorage, bucket, auditService, log)
+	if err != nil {
+		return fmt.Errorf("configure ingestion: %w", err)
+	}
+
+	catalogConfig, err := config.LoadCatalog()
+	if err != nil {
+		return fmt.Errorf("load catalog configuration: %w", err)
+	}
+	catalogMetrics := metrics.New()
+	lifecycle := routes.Lifecycle
+	routes.Catalog, err = catalog.NewService(catalog.Dependencies{
+		Repo: postgres.NewCatalogRepository(db),
+		Delete: func(ctx context.Context, p model.Principal, assetID string) (bool, error) {
+			result, err := lifecycle.RequestDeletion(ctx, p, assetID)
+			return result.Created, err
+		},
+		Audit: auditService, Metrics: catalogMetrics, Log: log,
+	}, catalog.Config(catalogConfig))
+	if err != nil {
+		return fmt.Errorf("configure catalog: %w", err)
+	}
+	deliveryBucket := bucket
+	if dc, err := config.LoadDelivery(); err == nil && dc.Bucket != "" {
+		deliveryBucket = dc.Bucket
+	}
+	routes.StorageCapabilities = func(r *http.Request) (interfaces.StorageCapabilities, error) {
+		return objectStorage.Capabilities(r.Context(), deliveryBucket)
+	}
+
+	// Managed datasets. The API records imports and validations; the
+	// dataset worker runs them, so this service reads no object content.
+	datasetConfig, err := config.LoadDatasets()
+	if err != nil {
+		return fmt.Errorf("load dataset configuration: %w", err)
+	}
+	datasetMetrics := metrics.New()
+	datasetRepo := postgres.NewDatasetRepository(db)
+	routes.Datasets, err = datasetservice.NewService(datasetservice.Dependencies{
+		Repo: datasetRepo, Manifests: objectStorage, ManifestBucket: bucket, Quotas: quotaService,
+		Audit: auditService, Metrics: datasetMetrics, Log: log,
+	}, datasetConfig)
+	if err != nil {
+		return fmt.Errorf("configure datasets: %w", err)
+	}
+
+	dead := postgres.NewDeadLetterRepository(db)
+	eventAdmin := events.NewAdmin(postgres.NewOutboxRepository(db), postgres.NewInboxRepository(db), dead, events.Checks{
+		Uploads: uploadRepository, Assets: postgres.NewAssetRepository(db),
+		Jobs: postgres.NewProcessingJobRepository(db), Deletions: postgres.NewDeletionRepository(db),
+		Holds: postgres.NewLegalHoldRepository(db), Ingestion: postgres.NewIngestionRepository(db),
+		Datasets: datasetRepo,
+	})
+
+	rates := make(map[string]ratelimit.Rule, len(sec.Rates))
+	for name, rule := range sec.Rates {
+		rates[name] = ratelimit.Rule{Requests: rule.Requests, Window: rule.Window}
+	}
+	routes.Resolver = middleware.BearerResolver[identity.Identity](identityService)
+	routes.Identity, routes.Quotas, routes.Audit = identityService, quotaService, auditService
+	routes.DeadLetters = events.NewGuardedAdmin(eventAdmin, dead, auditService)
+	routes.Uploads, routes.Multipart = uploadService, multipartService
+	routes.Quarantine = processing.NewQuarantine(postgres.NewAssetRepository(db), postgres.NewProcessingJobRepository(db),
+		postgres.NewQuarantineRepository(db), postgres.NewProcessingEventRepository(db), auditService)
+	routes.Limiter, routes.Rates, routes.TrustProxyHeaders = limiter, rates, sec.Auth.TrustProxyHeaders
+	// The security and catalog counters join the expvar listener delivery
+	// starts.
+	securityMetrics.Publish("security")
+	catalogMetrics.Publish("catalog")
+	datasetMetrics.Publish("datasets")
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.HTTPPort,
-		Handler:           server.NewRouter(uploadService, multipartService, routes),
+		Handler:           server.NewRouter(routes),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
@@ -159,67 +291,127 @@ func run() error {
 	return nil
 }
 
-// deliveryRoutes builds the delivery service and decides how delivery
-// requests are authenticated.
+// lifecycleService builds the asset lifecycle the owner routes use
+// (delete, restore, lifecycle view). The API only records requests; the
+// cleanup worker carries them out.
+func lifecycleService(db *postgres.DB, storage *s3storage.ObjectStorage, quarantineBucket, deliveryBucket, prefix string, log *slog.Logger) (*assetservice.Service, error) {
+	lc, err := config.LoadLifecycle()
+	if err != nil {
+		return nil, fmt.Errorf("load lifecycle configuration: %w", err)
+	}
+	return assetservice.NewService(assetservice.Dependencies{
+		Assets: postgres.NewAssetRepository(db), Uploads: postgres.NewUploadRepository(db),
+		Jobs: postgres.NewProcessingJobRepository(db), Quarantine: postgres.NewQuarantineRepository(db),
+		Policies: postgres.NewRetentionPolicyRepository(db), Holds: postgres.NewLegalHoldRepository(db),
+		Deletions: postgres.NewDeletionRepository(db), Events: postgres.NewLifecycleEventRepository(db),
+		Cursors: postgres.NewCursorRepository(db), Storage: storage,
+	}, assetservice.Config{
+		Owner: "api", QuarantineBucket: quarantineBucket, DeliveryBucket: deliveryBucket, DeliveryPrefix: prefix,
+		Platform: assetservice.PlatformRetention{
+			DefaultMinRetention:        lc.DefaultMinRetention,
+			DefaultMaxAge:              lc.DefaultMaxAge,
+			DefaultDeletionGrace:       lc.DefaultDeletionGrace,
+			DefaultQuarantineRetention: lc.QuarantineRetention,
+			MinRetentionFloor:          lc.MinRetentionFloor,
+			DeletionGraceFloor:         lc.DeletionGraceFloor,
+			QuarantineRetentionFloor:   lc.QuarantineRetention,
+		},
+		BatchSize: lc.BatchSize, Concurrency: lc.Concurrency, Lease: lc.LeaseDuration,
+		Retry:           retry.Policy{BaseDelay: lc.BackoffBase, MaxDelay: lc.BackoffMax, MaxAttempts: lc.MaxAttempts},
+		RecheckInterval: lc.RecheckInterval, MaxDeletionsPerRun: lc.MaxDeletionsPerRun,
+	}, log)
+}
+
+// deliveryRoutes builds the delivery and lifecycle services. Requests are
+// authenticated by the router's bearer resolver.
 func deliveryRoutes(
-	cfg config.Config,
 	db *postgres.DB,
 	storage *s3storage.ObjectStorage,
 	quarantineBucket string,
 	log *slog.Logger,
-) (server.DeliveryRoutes, error) {
+) (server.Routes, error) {
 	deliveryCfg, err := config.LoadDelivery()
 	if err != nil {
-		return server.DeliveryRoutes{}, err
+		return server.Routes{}, err
 	}
 
 	bucket := deliveryCfg.Bucket
 	if bucket == "" {
 		bucket = quarantineBucket
 	}
+	registry := metrics.New()
 	serviceCfg := delivery.Config{
 		Bucket:     bucket,
 		Prefix:     deliveryCfg.Prefix,
 		DefaultTTL: deliveryCfg.DefaultTTL,
 		MaxTTL:     deliveryCfg.MaxTTL,
+		URLMode:    deliveryCfg.URLMode,
+		Metrics:    registry,
 	}
 	if deliveryCfg.CDNEnabled {
 		keyPEM, err := os.ReadFile(deliveryCfg.CDNPrivateKeyFile)
 		if err != nil {
-			return server.DeliveryRoutes{}, fmt.Errorf("read CDN private key file: %w", err)
+			return server.Routes{}, fmt.Errorf("read CDN private key file: %w", err)
 		}
 		signer, err := cloudfront.NewSigner(deliveryCfg.CDNKeyPairID, keyPEM)
 		if err != nil {
-			return server.DeliveryRoutes{}, err
+			return server.Routes{}, err
 		}
 		serviceCfg.CDN = &delivery.CDNConfig{BaseURL: deliveryCfg.CDNBaseURL, Signer: signer}
+	}
+
+	// Token links stream through the proxy routes; without them a token
+	// request is refused rather than answered with a dead link.
+	var tokens interfaces.DownloadTokenRepository
+	if deliveryCfg.ProxyEnabled {
+		tokens = postgres.NewDownloadTokenRepository(db)
 	}
 
 	service, err := delivery.NewService(
 		postgres.NewAssetRepository(db),
 		storage,
 		postgres.NewDeliveryAuditRepository(db),
+		tokens,
 		serviceCfg,
 		log,
 	)
 	if err != nil {
-		return server.DeliveryRoutes{}, err
+		return server.Routes{}, err
 	}
 
-	// No real authentication exists yet. The placeholder identity is used
-	// only in development; anywhere else delivery answers 401.
-	var identity middleware.Resolver
-	if strings.EqualFold(cfg.AppEnv, "development") {
-		identity = middleware.DevelopmentIdentity("local-tenant", "local-user")
-		log.Warn("delivery uses the development placeholder identity; not production authentication")
-	} else {
-		log.Warn("no authentication is configured; delivery endpoints will answer 401")
+	// Signing is local, so this proves the credentials and signer are
+	// usable before the first request needs them. The URL is discarded.
+	checkCtx, cancelCheck := context.WithTimeout(context.Background(), 5*time.Second)
+	_, err = storage.PresignGet(checkCtx, bucket, deliveryCfg.Prefix+"/startup-check", time.Minute, interfaces.DownloadOptions{})
+	cancelCheck()
+	if err != nil {
+		return server.Routes{}, fmt.Errorf("download URL signing is not usable: %w", err)
 	}
 
-	return server.DeliveryRoutes{
-		Service:      service,
-		Identity:     identity,
+	if deliveryCfg.MetricsAddr != "" {
+		registry.Publish("delivery")
+		// expvar serves /debug/vars on the default mux.
+		go func() {
+			if err := http.ListenAndServe(deliveryCfg.MetricsAddr, nil); err != nil {
+				log.Error("metrics listener stopped", "error", err)
+			}
+		}()
+	}
+
+	lifecycle, err := lifecycleService(db, storage, quarantineBucket, bucket, deliveryCfg.Prefix, log)
+	if err != nil {
+		return server.Routes{}, err
+	}
+
+	return server.Routes{
+		Delivery:     service,
 		ProxyEnabled: deliveryCfg.ProxyEnabled,
-		Log:          log,
+		Lifecycle:    lifecycle,
+		Stream: httpapi.StreamConfig{
+			StallTimeout: deliveryCfg.StallTimeout,
+			MaxStreams:   deliveryCfg.MaxStreams,
+			Metrics:      registry,
+		},
+		Log: log,
 	}, nil
 }

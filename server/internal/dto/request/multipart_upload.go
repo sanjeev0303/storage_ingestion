@@ -6,6 +6,12 @@ type StartMultipartUploadRequest struct {
 	SizeBytes      int64  `json:"size_bytes"`
 	ChecksumSHA256 string `json:"checksum_sha256"`
 	IdempotencyKey string `json:"idempotency_key"`
+	// Dataset optionally groups the upload for retention policies.
+	Dataset string `json:"dataset,omitempty"`
+	// The catalog, as in CreateUploadRequest.
+	Path       string            `json:"path,omitempty"`
+	Metadata   map[string]string `json:"metadata,omitempty"`
+	CreateOnly bool              `json:"create_only,omitempty"`
 }
 
 type PresignPartsRequest struct {

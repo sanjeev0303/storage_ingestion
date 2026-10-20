@@ -18,6 +18,8 @@ type UploadRepository struct {
 	uploads map[string]model.UploadSession
 	// tenant, ownner and idempotency key identify a retry.
 	idempotency map[string]string
+	// outbox keeps the events written with transitions, for tests.
+	outbox []model.OutboxEvent
 }
 
 var _ interfaces.UploadRepository = (*UploadRepository)(nil)
@@ -180,6 +182,7 @@ func (r *UploadRepository) TransitionStatus(
 	to model.UploadStatus,
 	failureReason string,
 	at time.Time,
+	events ...model.OutboxEvent,
 ) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -200,9 +203,24 @@ func (r *UploadRepository) TransitionStatus(
 	if failureReason != "" {
 		current.FailureReason = failureReason
 	}
+	stamp := at
+	switch to {
+	case model.UploadStatusCompleted:
+		current.CompletedAt = &stamp
+	case model.UploadStatusAborted, model.UploadStatusExpired:
+		current.AbortedAt = &stamp
+	}
 	current.UpdatedAt = at
 	r.uploads[uploadID] = current
+	r.outbox = append(r.outbox, events...)
 	return nil
+}
+
+// Outbox returns the events written with transitions so far.
+func (r *UploadRepository) Outbox() []model.OutboxEvent {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return slices.Clone(r.outbox)
 }
 
 // SetStorageUploadID mirrors the PostgreSQL set-once update.

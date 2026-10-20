@@ -1,12 +1,20 @@
 package model
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// ErrDownloadTokenNotFound: no token has this hash.
+var ErrDownloadTokenNotFound = errors.New("download token not found")
 
 // Delivery operations recorded in the audit log.
 const (
 	DeliveryOpMetadata    = "METADATA"
 	DeliveryOpDownloadURL = "DOWNLOAD_URL"
 	DeliveryOpProxy       = "PROXY_DOWNLOAD"
+	DeliveryOpToken       = "TOKEN_DOWNLOAD"
+	DeliveryOpTokenRevoke = "TOKEN_REVOKE"
 )
 
 // Delivery outcomes recorded in the audit log.
@@ -26,6 +34,26 @@ type DeliveryAuditEvent struct {
 	Operation   string
 	Outcome     string
 	// Reason is a sanitized code for denials and failures.
-	Reason    string
+	Reason string
+	// RequestID correlates the event with the request's logs.
+	RequestID string
+	// ByteRange is "first-last/size" for partial downloads.
+	ByteRange string
+	// BytesSent is set on transfer failures.
+	BytesSent int64
 	CreatedAt time.Time
+}
+
+// DownloadToken is a revocable download link. Only the SHA-256 of the
+// token is stored; the token itself is shown once, to its issuer.
+type DownloadToken struct {
+	ID          string
+	TokenHash   string
+	TenantID    string
+	AssetID     string
+	PrincipalID string
+	Filename    string
+	CreatedAt   time.Time
+	ExpiresAt   time.Time
+	RevokedAt   *time.Time
 }

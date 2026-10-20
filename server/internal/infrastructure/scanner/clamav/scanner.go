@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
+	"github.com/sanjeev0303/object-storage-platform/internal/model"
 )
 
 const chunkSize = 64 * 1024
@@ -32,33 +33,45 @@ func New(address string, timeout time.Duration) *Scanner {
 
 func (s *Scanner) Name() string { return "clamav" }
 
-// Scan sends content to clamd and reads its single-line verdict:
-//
-//	stream: OK                     -> clean
-//	stream: <signature> FOUND      -> infected
-//	anything else (ERROR, limits)  -> error, never clean
-//
-// clamd rejects streams above its StreamMaxLength (25 MiB by default);
-// that answer is an error here, so oversized files are never passed as clean.
-func (s *Scanner) Scan(ctx context.Context, content io.Reader) (interfaces.ScanVerdict, error) {
-	dialer := net.Dialer{Timeout: s.timeout}
-	conn, err := dialer.DialContext(ctx, "tcp", s.address)
+// Ping sends PING and expects PONG.
+func (s *Scanner) Ping(ctx context.Context) error {
+	conn, err := s.dial(ctx)
 	if err != nil {
-		return interfaces.ScanVerdict{}, fmt.Errorf("connect to clamd: %w", err)
+		return err
 	}
 	defer conn.Close()
 
-	// One deadline for the whole exchange; cancellation closes the socket.
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
-	} else {
-		_ = conn.SetDeadline(time.Now().Add(s.timeout))
+	if _, err := conn.Write([]byte("zPING\x00")); err != nil {
+		return fmt.Errorf("clamd ping: %w", err)
 	}
-	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
-	defer stop()
+	reply, err := bufio.NewReader(conn).ReadString(0)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("clamd ping: %w", err)
+	}
+	if strings.TrimRight(reply, "\x00\n") != "PONG" {
+		return errors.New("clamd did not answer PONG")
+	}
+	return nil
+}
+
+// Scan streams content to clamd and maps its single-line answer:
+//
+//	stream: OK                  -> CLEAN
+//	stream: <signature> FOUND   -> INFECTED
+//	... size limit exceeded ... -> UNSUPPORTED (clamd's StreamMaxLength)
+//	deadline or socket timeout  -> TIMEOUT
+//	anything else               -> ERROR
+//
+// None but CLEAN is ever a clean result.
+func (s *Scanner) Scan(ctx context.Context, content io.Reader) interfaces.ScanResult {
+	conn, err := s.dial(ctx)
+	if err != nil {
+		return s.failure(ctx, "connect", err)
+	}
+	defer conn.Close()
 
 	if _, err := conn.Write([]byte("zINSTREAM\x00")); err != nil {
-		return interfaces.ScanVerdict{}, scanError(ctx, "start scan", err)
+		return s.failure(ctx, "start scan", err)
 	}
 
 	buf := make([]byte, chunkSize)
@@ -68,55 +81,80 @@ func (s *Scanner) Scan(ctx context.Context, content io.Reader) (interfaces.ScanV
 		if n > 0 {
 			binary.BigEndian.PutUint32(size, uint32(n))
 			if _, err := conn.Write(size); err != nil {
-				return interfaces.ScanVerdict{}, scanError(ctx, "send chunk", err)
+				return s.failure(ctx, "send chunk", err)
 			}
 			if _, err := conn.Write(buf[:n]); err != nil {
-				return interfaces.ScanVerdict{}, scanError(ctx, "send chunk", err)
+				return s.failure(ctx, "send chunk", err)
 			}
 		}
 		if readErr == io.EOF {
 			break
 		}
 		if readErr != nil {
-			return interfaces.ScanVerdict{}, fmt.Errorf("read content to scan: %w", readErr)
+			return interfaces.ScanResult{Outcome: model.ScanError, Detail: "could not read the content to scan"}
 		}
 	}
 
 	// A zero-length chunk ends the stream.
 	if _, err := conn.Write([]byte{0, 0, 0, 0}); err != nil {
-		return interfaces.ScanVerdict{}, scanError(ctx, "end stream", err)
+		return s.failure(ctx, "end stream", err)
 	}
 
 	reply, err := bufio.NewReader(conn).ReadString(0)
 	if err != nil && !errors.Is(err, io.EOF) {
-		return interfaces.ScanVerdict{}, scanError(ctx, "read verdict", err)
+		return s.failure(ctx, "read verdict", err)
 	}
 	return parseReply(strings.TrimRight(reply, "\x00\n"))
 }
 
-func parseReply(reply string) (interfaces.ScanVerdict, error) {
+// dial connects with one deadline for the whole exchange; cancelling ctx
+// closes the socket.
+func (s *Scanner) dial(ctx context.Context) (net.Conn, error) {
+	dialer := net.Dialer{Timeout: s.timeout}
+	conn, err := dialer.DialContext(ctx, "tcp", s.address)
+	if err != nil {
+		return nil, fmt.Errorf("connect to clamd: %w", err)
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	} else {
+		_ = conn.SetDeadline(time.Now().Add(s.timeout))
+	}
+	context.AfterFunc(ctx, func() { _ = conn.Close() })
+	return conn, nil
+}
+
+func parseReply(reply string) interfaces.ScanResult {
 	reply = strings.TrimSpace(strings.TrimPrefix(reply, "stream:"))
 
 	switch {
 	case reply == "OK":
-		return interfaces.ScanVerdict{}, nil
+		return interfaces.ScanResult{Outcome: model.ScanClean}
 	case strings.HasSuffix(reply, " FOUND"):
-		return interfaces.ScanVerdict{Infected: true, Signature: strings.TrimSuffix(reply, " FOUND")}, nil
+		return interfaces.ScanResult{Outcome: model.ScanInfected, Signature: strings.TrimSuffix(reply, " FOUND")}
+	case strings.Contains(reply, "size limit exceeded"):
+		return interfaces.ScanResult{Outcome: model.ScanUnsupported, Detail: "object exceeds the scanner's stream size limit"}
 	case reply == "":
-		return interfaces.ScanVerdict{}, errors.New("clamd sent no verdict")
+		return interfaces.ScanResult{Outcome: model.ScanError, Detail: "scanner sent no verdict"}
 	default:
-		return interfaces.ScanVerdict{}, fmt.Errorf("clamd could not scan the stream: %s", reply)
+		return interfaces.ScanResult{Outcome: model.ScanError, Detail: "scanner reported an error"}
 	}
 }
 
-func scanError(ctx context.Context, step string, err error) error {
-	if ctx.Err() != nil {
-		return ctx.Err()
+// failure classifies a transport error as TIMEOUT or ERROR. The socket
+// deadline is the context's deadline and can fire a moment before the
+// context notices, so a passed deadline counts as a timeout too.
+func (s *Scanner) failure(ctx context.Context, step string, err error) interfaces.ScanResult {
+	var netErr net.Error
+	deadline, hasDeadline := ctx.Deadline()
+	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded) ||
+		(errors.As(err, &netErr) && netErr.Timeout()) ||
+		(hasDeadline && !time.Now().Before(deadline))
+	if timedOut {
+		return interfaces.ScanResult{Outcome: model.ScanTimeout, Detail: "scan timed out at " + step}
 	}
-	// The socket deadline is the context's deadline, and it can fire a
-	// moment before the context notices; report it as the same timeout.
-	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
-		return context.DeadlineExceeded
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return interfaces.ScanResult{Outcome: model.ScanError, Detail: "scan cancelled at " + step}
 	}
-	return fmt.Errorf("clamd %s: %w", step, err)
+	return interfaces.ScanResult{Outcome: model.ScanError, Detail: "scanner unreachable or failed at " + step}
 }

@@ -52,6 +52,7 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("new multipart service: %v", err)
 	}
 	svc.now = func() time.Time { return h.clock }
+	h.storage.Now = func() time.Time { return h.clock }
 	svc.newID = func() (string, error) {
 		h.nextID++
 		return fmt.Sprintf("upload-%d", h.nextID), nil
@@ -200,7 +201,7 @@ func (r *failOnceSetStorageID) SetStorageUploadID(ctx context.Context, tenantID,
 	return r.UploadRepository.SetStorageUploadID(ctx, tenantID, uploadID, storageID, at)
 }
 
-func TestProviderIDSaveFailureIsRecoveredByAdoption(t *testing.T) {
+func TestProviderIDSaveFailureCleansUpTheProviderSession(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
 	h.svc.uploads = &failOnceSetStorageID{UploadRepository: h.uploads}
@@ -209,15 +210,37 @@ func TestProviderIDSaveFailureIsRecoveredByAdoption(t *testing.T) {
 	if _, err := h.svc.Start(ctx, h.startInput("start-3", 10*1024*1024, sum)); !errors.Is(err, ErrMultipartStartPending) {
 		t.Fatalf("expected pending start, got %v", err)
 	}
-	if h.storage.UploadCount() != 1 || h.storage.AbortCalls != 0 {
-		t.Fatalf("the provider upload must be kept for adoption: uploads %d, aborts %d", h.storage.UploadCount(), h.storage.AbortCalls)
+	if h.storage.UploadCount() != 0 || h.storage.AbortCalls != 1 {
+		t.Fatalf("the unusable provider session must be aborted: uploads %d, aborts %d", h.storage.UploadCount(), h.storage.AbortCalls)
 	}
 
+	// Reconciliation then finds nothing at the provider and closes the session.
+	status, err := h.svc.ResolveInitiation(ctx, testTenant, "upload-1")
+	if err != nil || status != model.UploadStatusFailed {
+		t.Fatalf("resolve initiation: %s, %v", status, err)
+	}
+}
+
+func TestProviderIDSaveAndCleanupFailureIsRecoveredLater(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.svc.uploads = &failOnceSetStorageID{UploadRepository: h.uploads}
+	h.storage.AbortErr = errTimeout
+	_, _, sum := twoParts()
+
+	if _, err := h.svc.Start(ctx, h.startInput("start-5", 10*1024*1024, sum)); !errors.Is(err, ErrMultipartStartPending) {
+		t.Fatalf("expected pending start, got %v", err)
+	}
+	if h.storage.UploadCount() != 1 {
+		t.Fatal("a failed cleanup must leave the provider session for reconciliation")
+	}
+
+	// The PENDING session (tenant, key) is enough to find and adopt it.
 	if _, err := h.svc.ResolveInitiation(ctx, testTenant, "upload-1"); err != nil {
 		t.Fatalf("resolve initiation: %v", err)
 	}
 	if h.session(t, "upload-1").StorageUploadID != "provider-upload-1" {
-		t.Fatal("expected the existing provider upload to be adopted")
+		t.Fatal("expected the leftover provider session to be adopted")
 	}
 }
 
@@ -416,12 +439,12 @@ type failOnceTransitionTo struct {
 	failed bool
 }
 
-func (r *failOnceTransitionTo) TransitionStatus(ctx context.Context, tenantID, uploadID string, from []model.UploadStatus, to model.UploadStatus, reason string, at time.Time) error {
+func (r *failOnceTransitionTo) TransitionStatus(ctx context.Context, tenantID, uploadID string, from []model.UploadStatus, to model.UploadStatus, reason string, at time.Time, events ...model.OutboxEvent) error {
 	if to == r.to && !r.failed {
 		r.failed = true
 		return errors.New("database unavailable")
 	}
-	return r.UploadRepository.TransitionStatus(ctx, tenantID, uploadID, from, to, reason, at)
+	return r.UploadRepository.TransitionStatus(ctx, tenantID, uploadID, from, to, reason, at, events...)
 }
 
 func TestDatabaseFailureAfterProviderCompletionIsReconciled(t *testing.T) {
@@ -447,7 +470,7 @@ func TestDatabaseFailureAfterProviderAbortIsReconciled(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
 	session, _, _ := h.uploadedSession(t, "abort-2")
-	h.svc.uploads = &failOnceTransitionTo{UploadRepository: h.uploads, to: model.UploadStatusFailed}
+	h.svc.uploads = &failOnceTransitionTo{UploadRepository: h.uploads, to: model.UploadStatusAborted}
 
 	if _, err := h.svc.Abort(ctx, testTenant, testOwner, session.ID); !errors.Is(err, ErrOperationPending) {
 		t.Fatalf("expected pending, got %v", err)
@@ -457,8 +480,11 @@ func TestDatabaseFailureAfterProviderAbortIsReconciled(t *testing.T) {
 	}
 
 	status, err := h.svc.ResolveAbort(ctx, testTenant, session.ID)
-	if err != nil || status != model.UploadStatusFailed {
+	if err != nil || status != model.UploadStatusAborted {
 		t.Fatalf("resolve abort: %s, %v", status, err)
+	}
+	if h.session(t, session.ID).AbortedAt == nil {
+		t.Fatal("the abort confirmation time must be recorded")
 	}
 }
 
@@ -560,8 +586,8 @@ func TestAbortIsRetryableAndToleratesAnAlreadyAbsentUpload(t *testing.T) {
 		t.Fatalf("direct abort: %v", err)
 	}
 	got, err := h.svc.Abort(ctx, testTenant, testOwner, session.ID)
-	if err != nil || got.Status != model.UploadStatusFailed || got.FailureReason != model.FailureAbortedByClient {
-		t.Fatalf("expected FAILED/aborted_by_client, got %s/%s, %v", got.Status, got.FailureReason, err)
+	if err != nil || got.Status != model.UploadStatusAborted || got.FailureReason != model.FailureAbortedByClient {
+		t.Fatalf("expected ABORTED/aborted_by_client, got %s/%s, %v", got.Status, got.FailureReason, err)
 	}
 	if recorded, _ := h.parts.ListParts(ctx, testTenant, session.ID); len(recorded) != 0 {
 		t.Fatal("aborted part metadata must be removed")
@@ -592,7 +618,7 @@ func TestConcurrentCompleteAndAbortFinalizeOnce(t *testing.T) {
 			t.Fatalf("run %d: both complete and abort succeeded (final %s)", i, final)
 		case completeErr == nil && final != model.UploadStatusCompleted:
 			t.Fatalf("run %d: completion won but final status is %s", i, final)
-		case abortErr == nil && final != model.UploadStatusFailed:
+		case abortErr == nil && final != model.UploadStatusAborted:
 			t.Fatalf("run %d: abort won but final status is %s", i, final)
 		}
 	}
