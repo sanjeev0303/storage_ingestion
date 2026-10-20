@@ -89,6 +89,8 @@ func (s *MultipartService) orphanSession(ctx context.Context, upload interfaces.
 	}
 
 	switch {
+	case !model.IsPlatformConnection(session.StagingConnectionID):
+		return ref, "", nil // not this bucket's upload; never touched
 	case session.Status == model.UploadStatusPending && session.StorageUploadID == "":
 		return ref, "", nil // ResolveInitiation adopts or cleans it up
 	case session.Status == model.UploadStatusAborting:
@@ -127,6 +129,8 @@ func (s *MultipartService) ScanOrphanObjects(ctx context.Context, cursor string,
 			reason = reasonUnrecorded + "object"
 		case err != nil:
 			return findings, cursor, fmt.Errorf("look up session: %w", err)
+		case !model.IsPlatformConnection(session.StagingConnectionID):
+			// The session stages elsewhere: this object is not its.
 		case session.Status == model.UploadStatusAborted || session.Status == model.UploadStatusExpired:
 			reason = "upload session is " + string(session.Status)
 		}
@@ -217,7 +221,12 @@ func (s *MultipartService) AbortLeftoverSessions(ctx context.Context, sessions [
 		if !session.Status.IsTerminal() {
 			continue
 		}
-		ids, err := s.storage.ListMultipartUploads(ctx, s.bucket, session.ObjectKey)
+		at, err := s.staging(ctx, session)
+		if err != nil {
+			// The connection is unreachable now; the next scan asks again.
+			continue
+		}
+		ids, err := at.storage.ListMultipartUploads(ctx, at.bucket, session.ObjectKey)
 		if err != nil {
 			return findings, fmt.Errorf("list provider sessions for a finished upload: %w", err)
 		}
@@ -228,7 +237,7 @@ func (s *MultipartService) AbortLeftoverSessions(ctx context.Context, sessions [
 			finding := s.newFinding(model.FindingOrphanSession, model.ActionAbortSession, ref, session.ObjectKey, reason)
 			finding.StorageUploadID = id
 			if !dryRun {
-				err := s.storage.AbortMultipart(ctx, s.bucket, session.ObjectKey, id)
+				err := at.storage.AbortMultipart(ctx, at.bucket, session.ObjectKey, id)
 				finding.Outcome, finding.Reason = outcome(err, interfaces.ErrStorageUploadNotFound, reason)
 			}
 			findings = append(findings, finding)

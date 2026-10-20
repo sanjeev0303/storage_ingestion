@@ -7,6 +7,8 @@ type StartMultipartUploadResponse struct {
 	Status    string    `json:"status"`
 	ExpiresAt time.Time `json:"expires_at"`
 	Reused    bool      `json:"reused"`
+	// StorageConnectionID is the connection the upload is bound to.
+	StorageConnectionID string `json:"storage_connection_id"`
 }
 
 type PresignedPartURL struct {

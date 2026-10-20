@@ -37,6 +37,9 @@ type Dependencies struct {
 	Storage    interfaces.LifecycleStorage
 	// Metrics is optional.
 	Metrics *metrics.Registry
+	// Router reaches assets on tenants' storage connections; without it
+	// only the platform's buckets are reachable.
+	Router interfaces.StorageRouter
 }
 
 type Config struct {
@@ -83,6 +86,12 @@ type Service struct {
 
 // Guard records principal-facing deletions, restores and retention
 // changes in the security audit log.
+// Route lets lifecycle work reach assets on tenants' storage connections.
+func (s *Service) Route(router interfaces.StorageRouter) *Service {
+	s.deps.Router = router
+	return s
+}
+
 func (s *Service) Guard(security interfaces.AuditRecorder) *Service {
 	s.security = security
 	return s

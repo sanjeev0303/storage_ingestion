@@ -286,11 +286,11 @@ func TestPostgresInventoryObservations(t *testing.T) {
 	prefix := "assets/" + env.tenant + "/"
 	now := time.Now().UTC().Truncate(time.Microsecond)
 
-	scan1, ok, err := repo.OpenScan(ctx, "it-bucket", prefix, "worker-a", env.tenant+"-s1", now, time.Minute)
+	scan1, ok, err := repo.OpenScan(ctx, "", "it-bucket", prefix, "worker-a", env.tenant+"-s1", now, time.Minute)
 	if err != nil || !ok {
 		t.Fatalf("open: %v %v", ok, err)
 	}
-	if _, ok, _ := repo.OpenScan(ctx, "it-bucket", prefix, "worker-b", env.tenant+"-s1b", now, time.Minute); ok {
+	if _, ok, _ := repo.OpenScan(ctx, "", "it-bucket", prefix, "worker-b", env.tenant+"-s1b", now, time.Minute); ok {
 		t.Fatal("a second worker must not open a leased scan")
 	}
 
@@ -308,28 +308,28 @@ func TestPostgresInventoryObservations(t *testing.T) {
 	if err := repo.FinishScan(ctx, scan1, "worker-a", now, model.ScanCompleted); err != nil {
 		t.Fatal(err)
 	}
-	if last, ok, _ := repo.LastCompleted(ctx, "it-bucket", prefix); !ok || last.ObjectsSeen != 1 {
+	if last, ok, _ := repo.LastCompleted(ctx, "", "it-bucket", prefix); !ok || last.ObjectsSeen != 1 {
 		t.Fatalf("last completed scan %+v", last)
 	}
 
-	scan2, _, _ := repo.OpenScan(ctx, "it-bucket", prefix, "worker-a", env.tenant+"-s2", now.Add(time.Hour), time.Minute)
+	scan2, _, _ := repo.OpenScan(ctx, "", "it-bucket", prefix, "worker-a", env.tenant+"-s2", now.Add(time.Hour), time.Minute)
 	marked, _ := repo.Mark(ctx, candidate, scan2.ID, now.Add(time.Hour))
 	if marked.Observations != 2 || !marked.FirstSeenAt.Equal(now) {
 		t.Fatalf("second sighting: %+v", marked)
 	}
 	// Still running: not due yet.
-	if due, _ := repo.DueCandidates(ctx, "it-bucket", prefix, now.Add(time.Hour), 2, 3, 10); len(due) != 0 {
+	if due, _ := repo.DueCandidates(ctx, "", "it-bucket", prefix, now.Add(time.Hour), 2, 3, 10); len(due) != 0 {
 		t.Fatal("a candidate last seen in an unfinished scan must not be due")
 	}
 	if err := repo.FinishScan(ctx, scan2, "worker-a", now.Add(time.Hour), model.ScanCompleted); err != nil {
 		t.Fatal(err)
 	}
-	if due, _ := repo.DueCandidates(ctx, "it-bucket", prefix, now.Add(time.Hour), 2, 3, 10); len(due) != 1 {
+	if due, _ := repo.DueCandidates(ctx, "", "it-bucket", prefix, now.Add(time.Hour), 2, 3, 10); len(due) != 1 {
 		t.Fatal("seen twice, last in a completed scan: due")
 	}
 
 	// A different ETag is a different object: the count starts over.
-	scan3, _, _ := repo.OpenScan(ctx, "it-bucket", prefix, "worker-a", env.tenant+"-s3", now.Add(2*time.Hour), time.Minute)
+	scan3, _, _ := repo.OpenScan(ctx, "", "it-bucket", prefix, "worker-a", env.tenant+"-s3", now.Add(2*time.Hour), time.Minute)
 	candidate.ETag = `"e2"`
 	if replaced, _ := repo.Mark(ctx, candidate, scan3.ID, now.Add(2*time.Hour)); replaced.Observations != 1 || !replaced.FirstSeenAt.Equal(now.Add(2*time.Hour)) {
 		t.Fatalf("replaced object: %+v", replaced)

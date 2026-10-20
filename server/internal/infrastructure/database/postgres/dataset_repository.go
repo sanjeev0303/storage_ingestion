@@ -233,16 +233,19 @@ func (r *DatasetRepository) UpdateDataset(ctx context.Context, tenantID, dataset
 		    metadata = COALESCE($7::jsonb, metadata),
 		    profile_id = CASE WHEN $8::text IS NULL THEN profile_id ELSE NULLIF($8, '') END,
 		    profile_version = COALESCE($9, profile_version),
+		    storage_connection_id = CASE WHEN $12::text IS NULL THEN storage_connection_id ELSE NULLIF($12, '') END,
 		    revision = revision + 1, updated_by = $10, updated_at = $11
 		WHERE tenant_id = $1 AND id = $2 AND revision = $3 AND lifecycle_status <> 'ARCHIVED'
 		RETURNING `+datasetColumns,
 		tenantID, datasetID, revision, patch.Description, patch.Tags != nil, tags, metadata,
-		patch.ProfileID, patch.ProfileVersion, actor, now))
+		patch.ProfileID, patch.ProfileVersion, actor, now, patch.StorageConnectionID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return r.whyNot(ctx, tenantID, datasetID, model.ErrRevisionConflict)
 	}
 	if err != nil {
-		return model.Dataset{}, fmt.Errorf("update dataset: %w", err)
+		// The binding trigger refuses another tenant's or an inactive
+		// connection.
+		return model.Dataset{}, bindingError(err)
 	}
 	return d, nil
 }

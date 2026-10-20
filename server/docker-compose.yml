@@ -60,6 +60,25 @@ services:
       - "127.0.0.1:9324:9324"
       - "127.0.0.1:9325:9325"
 
+  # Storage emulators for the bring-your-own-storage adapter tests
+  # (Phase 11). Opt-in: `docker compose --profile emulators up -d`. They
+  # hold nothing worth keeping and are never part of the default stack.
+  fake-gcs:
+    image: fsouza/fake-gcs-server:1.52.2
+    container_name: object-storage-fake-gcs
+    profiles: ["emulators"]
+    command: ["-scheme", "http", "-port", "4443", "-public-host", "127.0.0.1:4443", "-external-url", "http://127.0.0.1:4443"]
+    ports:
+      - "127.0.0.1:4443:4443"
+
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:3.34.0
+    container_name: object-storage-azurite
+    profiles: ["emulators"]
+    command: ["azurite-blob", "--blobHost", "0.0.0.0", "--blobPort", "10000", "--skipApiVersionCheck", "--loose"]
+    ports:
+      - "127.0.0.1:10000:10000"
+
 volumes:
   postgres_data:
   minio_data:

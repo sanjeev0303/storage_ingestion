@@ -447,7 +447,11 @@ func (s *Service) blockers(ctx context.Context, asset model.Asset) ([]string, ti
 		reasons = append(reasons, "upload is "+string(upload.Status))
 	}
 
-	refs, err := s.deps.Deletions.References(ctx, asset, s.objectKeys(asset, job))
+	keys, err := s.objectKeys(ctx, asset, job)
+	if err != nil {
+		return nil, until, err
+	}
+	refs, err := s.deps.Deletions.References(ctx, asset, keys)
 	if err != nil {
 		return nil, until, fmt.Errorf("check references: %w", err)
 	}
@@ -455,39 +459,73 @@ func (s *Service) blockers(ctx context.Context, asset model.Asset) ([]string, ti
 	return reasons, until, nil
 }
 
-// target is one physical object an asset owns.
+// target is one physical object an asset owns, on the connection that
+// holds it.
 type target struct {
+	storage   interfaces.LifecycleStorage
 	bucket    string
 	key       string
 	versionID string
 }
 
+// place resolves one of an asset's connections.
+func (s *Service) place(ctx context.Context, tenantID, connectionID string) (interfaces.LifecycleStorage, interfaces.StoragePlace, error) {
+	if model.IsPlatformConnection(connectionID) {
+		return s.deps.Storage, interfaces.StoragePlace{
+			ConnectionID:  model.PlatformConnectionID,
+			StagingBucket: s.cfg.QuarantineBucket, StagingPrefix: "quarantine",
+			ReadyBucket: s.cfg.DeliveryBucket, ReadyPrefix: s.cfg.DeliveryPrefix,
+		}, nil
+	}
+	if s.deps.Router == nil {
+		return nil, interfaces.StoragePlace{}, model.ErrStorageNotConfigured
+	}
+	loc, err := s.deps.Router.Locate(ctx, tenantID, connectionID)
+	if err != nil {
+		return nil, interfaces.StoragePlace{}, fmt.Errorf("resolve storage connection: %w", err)
+	}
+	return loc.Storage, loc.StoragePlace, nil
+}
+
 // targets are the exact objects an asset owns, derived from its own
-// tenant and IDs, never from a client or a listing: its delivery copy (at
-// the recorded version, where the bucket is versioned), its quarantine
-// source, and any other promotion copy its job recorded.
-func (s *Service) targets(asset model.Asset, job model.ProcessingJob) []target {
-	delivery := s.deliveryKey(asset)
+// tenant, IDs and storage binding, never from a client or a listing: its
+// delivery copy (at the recorded version, where the bucket is versioned)
+// on its storage connection, its quarantine source on its staging
+// connection, and any other promotion copy its job recorded.
+func (s *Service) targets(ctx context.Context, asset model.Asset, job model.ProcessingJob) ([]target, error) {
+	ready, readyPlace, err := s.place(ctx, asset.TenantID, asset.StorageConnectionID)
+	if err != nil {
+		return nil, err
+	}
+	staging, stagingPlace, err := s.place(ctx, asset.TenantID, asset.StagingConnectionID)
+	if err != nil {
+		return nil, err
+	}
+	delivery := fmt.Sprintf("%s/%s/%s", readyPlace.ReadyPrefix, asset.TenantID, asset.ID)
 	version := ""
 	if asset.ObjectKey == delivery {
 		version = asset.StorageVersionID
 	}
 	targets := []target{
-		{bucket: s.cfg.DeliveryBucket, key: delivery, versionID: version},
-		{bucket: s.cfg.QuarantineBucket, key: quarantineKey(asset.TenantID, asset.UploadID)},
+		{storage: ready, bucket: readyPlace.ReadyBucket, key: delivery, versionID: version},
+		{storage: staging, bucket: stagingPlace.StagingBucket, key: stagingPlace.StagingKey(asset.TenantID, asset.UploadID)},
 	}
 	if job.PromotionKey != "" && job.PromotionKey != delivery {
-		targets = append(targets, target{bucket: s.cfg.DeliveryBucket, key: job.PromotionKey})
+		targets = append(targets, target{storage: ready, bucket: readyPlace.ReadyBucket, key: job.PromotionKey})
 	}
-	return targets
+	return targets, nil
 }
 
-func (s *Service) objectKeys(asset model.Asset, job model.ProcessingJob) []string {
+func (s *Service) objectKeys(ctx context.Context, asset model.Asset, job model.ProcessingJob) ([]string, error) {
+	targets, err := s.targets(ctx, asset, job)
+	if err != nil {
+		return nil, err
+	}
 	var keys []string
-	for _, t := range s.targets(asset, job) {
+	for _, t := range targets {
 		keys = append(keys, t.key)
 	}
-	return keys
+	return keys, nil
 }
 
 // removeObjects deletes each of the asset's objects and confirms it is
@@ -498,7 +536,11 @@ func (s *Service) removeObjects(ctx context.Context, asset model.Asset) error {
 	if err != nil && !errors.Is(err, model.ErrAssetNotFound) {
 		return fmt.Errorf("load processing job: %w", err)
 	}
-	for _, t := range s.targets(asset, job) {
+	targets, err := s.targets(ctx, asset, job)
+	if err != nil {
+		return err
+	}
+	for _, t := range targets {
 		if err := s.removeExact(ctx, t); err != nil {
 			return err
 		}
@@ -510,9 +552,9 @@ func (s *Service) removeExact(ctx context.Context, t target) error {
 	exists := func() (bool, error) {
 		var err error
 		if t.versionID != "" {
-			_, err = s.deps.Storage.HeadObjectVersion(ctx, t.bucket, t.key, t.versionID)
+			_, err = t.storage.HeadObjectVersion(ctx, t.bucket, t.key, t.versionID)
 		} else {
-			_, err = s.deps.Storage.HeadObject(ctx, t.bucket, t.key)
+			_, err = t.storage.HeadObject(ctx, t.bucket, t.key)
 		}
 		if errors.Is(err, interfaces.ErrObjectNotFound) {
 			return false, nil
@@ -529,9 +571,9 @@ func (s *Service) removeExact(ctx context.Context, t target) error {
 	}
 
 	if t.versionID != "" {
-		err = s.deps.Storage.DeleteObjectVersion(ctx, t.bucket, t.key, t.versionID)
+		err = t.storage.DeleteObjectVersion(ctx, t.bucket, t.key, t.versionID)
 	} else {
-		err = s.deps.Storage.DeleteObject(ctx, t.bucket, t.key)
+		err = t.storage.DeleteObject(ctx, t.bucket, t.key)
 	}
 	if err != nil {
 		return fmt.Errorf("delete object: %w", err)
@@ -584,10 +626,6 @@ func (s *Service) reportDeletions(ctx context.Context, limit int, stats *CycleSt
 	return nil
 }
 
-func (s *Service) deliveryKey(asset model.Asset) string {
-	return fmt.Sprintf("%s/%s/%s", s.cfg.DeliveryPrefix, asset.TenantID, asset.ID)
-}
-
 func (s *Service) scopeName() string {
 	if s.cfg.TenantID == "" {
 		return "*"
@@ -597,11 +635,6 @@ func (s *Service) scopeName() string {
 
 func (s *Service) actor() string {
 	return "worker:" + s.cfg.Owner
-}
-
-// quarantineKey matches the key the upload service gives every session.
-func quarantineKey(tenantID, uploadID string) string {
-	return fmt.Sprintf("quarantine/%s/%s", tenantID, uploadID)
 }
 
 func uploadActive(status model.UploadStatus) bool {

@@ -22,6 +22,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/dto/event"
 	"github.com/sanjeev0303/object-storage-platform/internal/infrastructure/database/postgres"
 	sqsqueue "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/queue/sqs"
+	storageregistry "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/registry"
 	s3storage "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/s3"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/config"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/logger"
@@ -95,10 +96,21 @@ func run() error {
 	}
 
 	registry := metrics.New()
+	// Records bound to tenants' storage connections are reached through
+	// those connections (Phase 11); without BYOS they do not resolve.
+	storageCfg, err := config.LoadStorage()
+	if err != nil {
+		return fmt.Errorf("load storage connection configuration: %w", err)
+	}
+	router, err := storageregistry.ForProcess(storageCfg, storage, bucket, contentBucket, "assets",
+		postgres.NewStorageConnectionRepository(db), registry)
+	if err != nil {
+		return fmt.Errorf("configure storage connections: %w", err)
+	}
 	auditService := audit.NewService(postgres.NewAuditRepository(db), log, registry, sec.Audit.Retention)
 	svc, err := datasetservice.NewService(datasetservice.Dependencies{
 		Repo: postgres.NewDatasetRepository(db), Manifests: storage, ManifestBucket: bucket,
-		Content: storage, ContentBucket: contentBucket,
+		Content: storage, ContentBucket: contentBucket, Router: router,
 		Quotas: quota.NewService(postgres.NewQuotaRepository(db), sec.Quotas, auditService, log),
 		Audit:  auditService, Metrics: registry, Log: log,
 	}, dc)

@@ -22,6 +22,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/dto/event"
 	"github.com/sanjeev0303/object-storage-platform/internal/infrastructure/database/postgres"
 	sqsqueue "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/queue/sqs"
+	storageregistry "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/registry"
 	s3storage "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/s3"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/config"
@@ -108,11 +109,24 @@ func run() error {
 	}
 
 	registry := metrics.New()
+	// Records bound to tenants' storage connections are reached through
+	// those connections (Phase 11); without BYOS they do not resolve.
+	storageCfg, err := config.LoadStorage()
+	if err != nil {
+		return fmt.Errorf("load storage connection configuration: %w", err)
+	}
+	router, err := storageregistry.ForProcess(storageCfg, storage, bucket, bucket, "assets",
+		postgres.NewStorageConnectionRepository(db), registry)
+	if err != nil {
+		return fmt.Errorf("configure storage connections: %w", err)
+	}
+	multipart.Route(router, router)
+
 	auditService := audit.NewService(postgres.NewAuditRepository(db), log, registry, sec.Audit.Retention)
 	quotas := quota.NewService(postgres.NewQuotaRepository(db), sec.Quotas, auditService, log)
 	svc, err := ingestion.NewService(ingestion.Dependencies{
 		Repo:      postgres.NewIngestionRepository(db),
-		Uploads:   uploadservice.NewService(uploads, storage, bucket, cfg.UploadMaxSize, cfg.UploadSessionTTL),
+		Uploads:   uploadservice.NewService(uploads, storage, bucket, cfg.UploadMaxSize, cfg.UploadSessionTTL).Route(router, router),
 		Multipart: multipart, Sessions: uploads, Assets: assets, Jobs: jobs,
 		Requeue: func(ctx context.Context, tenantID, assetID, actor string) error {
 			return requeue(ctx, assets, jobs, processingEvents, tenantID, assetID, actor)

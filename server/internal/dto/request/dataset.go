@@ -12,6 +12,9 @@ type UpdateDatasetRequest struct {
 	Metadata       map[string]*string `json:"metadata,omitempty"`
 	ProfileID      *string            `json:"profile_id,omitempty"`
 	ProfileVersion *int               `json:"profile_version,omitempty"`
+	// StorageConnectionID sends the dataset's new uploads to a storage
+	// connection; "" returns them to the organization's default.
+	StorageConnectionID *string `json:"storage_connection_id,omitempty"`
 }
 
 // MemberRequest names a catalog object by ID, or by namespace and path,

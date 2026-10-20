@@ -55,7 +55,11 @@ func (s *Service) Complete(ctx context.Context, tenantID, uploadID string) (mode
 		return session.Status, fmt.Errorf("%w: a multipart upload completes with its parts", ErrInvalidRequest)
 	}
 
-	meta, err := s.storage.HeadObject(ctx, s.bucket, session.ObjectKey)
+	storage, bucket, err := s.staging(ctx, session)
+	if err != nil {
+		return "", err
+	}
+	meta, err := storage.HeadObject(ctx, bucket, session.ObjectKey)
 	if errors.Is(err, interfaces.ErrObjectNotFound) {
 		return session.Status, ErrObjectNotUploaded
 	}
@@ -71,7 +75,7 @@ func (s *Service) Complete(ctx context.Context, tenantID, uploadID string) (mode
 			// Bytes that are not what was declared are not left in
 			// quarantine. Failing to delete them leaves an orphan for the
 			// orphan sweep, never an asset.
-			_ = s.storage.DeleteObject(ctx, s.bucket, session.ObjectKey)
+			_ = storage.DeleteObject(ctx, bucket, session.ObjectKey)
 			return model.UploadStatusFailed, ErrObjectSizeMismatch
 		}
 		if !errors.Is(err, model.ErrInvalidUploadState) {

@@ -31,6 +31,9 @@ type UploadTarget struct {
 type UploadPlan struct {
 	UploadURL string
 	ExpiresAt time.Time
+	// Headers the client must send with the upload, beyond Content-Type
+	// (Azure needs x-ms-blob-type). Empty for S3 and GCS.
+	Headers map[string]string
 }
 
 // ObjectStorage describes the storage operations needed by

@@ -43,13 +43,22 @@ func (s *Service) classify(ctx context.Context, a area, object interfaces.Stored
 		return skipped("young", "newer than the safety grace period"), nil
 	}
 	if a.kind == kindQuarantine {
-		return s.classifyQuarantine(ctx, object.ObjectKey)
+		return s.classifyQuarantine(ctx, a, object.ObjectKey)
 	}
-	return s.classifyDelivery(ctx, object.ObjectKey)
+	return s.classifyDelivery(ctx, a, object.ObjectKey)
 }
 
-func (s *Service) classifyQuarantine(ctx context.Context, key string) (verdict, error) {
-	tenantID, uploadID, ok := splitKey(key, "quarantine/")
+// boundTo tells whether a record's connection binding is the area's. A
+// record bound elsewhere does not own an object here, nor disown it.
+func boundTo(a area, connectionID string) bool {
+	if connectionID == "" {
+		connectionID = model.PlatformConnectionID
+	}
+	return connectionID == a.connectionID
+}
+
+func (s *Service) classifyQuarantine(ctx context.Context, a area, key string) (verdict, error) {
+	tenantID, uploadID, ok := splitKey(key, a.base)
 	if !ok {
 		return skipped("not_managed", "not an upload object key"), nil
 	}
@@ -60,6 +69,9 @@ func (s *Service) classifyQuarantine(ctx context.Context, key string) (verdict, 
 	}
 	if err != nil {
 		return verdict{}, err
+	}
+	if !boundTo(a, session.StagingConnectionID) {
+		return skipped("other_connection", "the upload session stages on another storage connection"), nil
 	}
 
 	switch session.Status {
@@ -110,8 +122,8 @@ func (s *Service) classifyQuarantine(ctx context.Context, key string) (verdict, 
 	return skipped("promotion_cleanup", "promotion has not finished its cleanup"), nil
 }
 
-func (s *Service) classifyDelivery(ctx context.Context, key string) (verdict, error) {
-	tenantID, assetID, ok := splitKey(key, s.cfg.DeliveryPrefix+"/")
+func (s *Service) classifyDelivery(ctx context.Context, a area, key string) (verdict, error) {
+	tenantID, assetID, ok := splitKey(key, a.base)
 	if !ok {
 		return skipped("not_managed", "not a delivery object key"), nil
 	}
@@ -122,6 +134,9 @@ func (s *Service) classifyDelivery(ctx context.Context, key string) (verdict, er
 	}
 	if err != nil {
 		return verdict{}, err
+	}
+	if !boundTo(a, asset.StorageConnectionID) {
+		return skipped("other_connection", "the asset is stored on another storage connection"), nil
 	}
 
 	owned := verdict{tenantID: tenantID, assetID: asset.ID, dataset: asset.Dataset}

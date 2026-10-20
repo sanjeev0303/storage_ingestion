@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sanjeev0303/object-storage-platform/internal/infrastructure/database/postgres"
+	storageregistry "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/registry"
 	s3storage "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/s3"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/config"
@@ -272,13 +273,25 @@ func lifecycleService(ctx context.Context, db *postgres.DB) (*assetservice.Servi
 	if deliveryBucket == "" {
 		deliveryBucket = bucket
 	}
+	platformStorage := s3storage.NewObjectStorage(client)
+	// Records bound to tenants' storage connections are reached through
+	// those connections (Phase 11); without BYOS they do not resolve.
+	storageCfg, err := config.LoadStorage()
+	if err != nil {
+		return nil, fmt.Errorf("load storage connection configuration: %w", err)
+	}
+	router, err := storageregistry.ForProcess(storageCfg, platformStorage, bucket, deliveryBucket, lc.PromotionPrefix,
+		postgres.NewStorageConnectionRepository(db), nil)
+	if err != nil {
+		return nil, fmt.Errorf("configure storage connections: %w", err)
+	}
 
 	return assetservice.NewService(assetservice.Dependencies{
 		Assets: postgres.NewAssetRepository(db), Uploads: postgres.NewUploadRepository(db),
 		Jobs: postgres.NewProcessingJobRepository(db), Quarantine: postgres.NewQuarantineRepository(db),
 		Policies: postgres.NewRetentionPolicyRepository(db), Holds: postgres.NewLegalHoldRepository(db),
 		Deletions: postgres.NewDeletionRepository(db), Events: postgres.NewLifecycleEventRepository(db),
-		Cursors: postgres.NewCursorRepository(db), Storage: s3storage.NewObjectStorage(client),
+		Cursors: postgres.NewCursorRepository(db), Storage: platformStorage, Router: router,
 	}, assetservice.Config{
 		Owner: "lifecycle-admin", QuarantineBucket: bucket, DeliveryBucket: deliveryBucket, DeliveryPrefix: lc.PromotionPrefix,
 		Platform: assetservice.PlatformRetention{

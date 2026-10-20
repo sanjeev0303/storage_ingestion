@@ -25,25 +25,34 @@ func NewInventoryRepository(db *DB) *InventoryRepository {
 
 const scanColumns = `
 	id, bucket, prefix, status, COALESCE(cursor, ''), pages, objects_seen, candidates_marked,
-	errors, COALESCE(last_error, ''), started_at, updated_at, completed_at
+	errors, COALESCE(last_error, ''), started_at, updated_at, completed_at, storage_connection_id
 `
 
 func scanInventoryScan(row pgx.Row) (model.InventoryScan, error) {
 	var s model.InventoryScan
 	err := row.Scan(&s.ID, &s.Bucket, &s.Prefix, &s.Status, &s.Cursor, &s.Pages, &s.ObjectsSeen, &s.CandidatesMarked,
-		&s.Errors, &s.LastError, &s.StartedAt, &s.UpdatedAt, &s.CompletedAt)
+		&s.Errors, &s.LastError, &s.StartedAt, &s.UpdatedAt, &s.CompletedAt, &s.ConnectionID)
 	return s, err
 }
 
-func (r *InventoryRepository) OpenScan(ctx context.Context, bucket, prefix, owner, newID string, now time.Time, lease time.Duration) (model.InventoryScan, bool, error) {
+// connectionOrPlatform stores "" as the platform connection.
+func connectionOrPlatform(id string) string {
+	if id == "" {
+		return model.PlatformConnectionID
+	}
+	return id
+}
+
+func (r *InventoryRepository) OpenScan(ctx context.Context, connectionID, bucket, prefix, owner, newID string, now time.Time, lease time.Duration) (model.InventoryScan, bool, error) {
+	connectionID = connectionOrPlatform(connectionID)
 	// Resume the running scan when its lease is free, expired or ours.
 	scan, err := scanInventoryScan(r.db.Pool.QueryRow(ctx, `
 		UPDATE inventory_scans
 		SET lease_owner = $3, lease_expires_at = $4::timestamptz + make_interval(secs => $5), updated_at = $4
-		WHERE bucket = $1 AND prefix = $2 AND status = 'RUNNING'
+		WHERE bucket = $1 AND prefix = $2 AND status = 'RUNNING' AND storage_connection_id = $6
 		  AND (lease_expires_at IS NULL OR lease_expires_at <= $4 OR lease_owner = $3)
 		RETURNING `+scanColumns,
-		bucket, prefix, owner, now, lease.Seconds()))
+		bucket, prefix, owner, now, lease.Seconds(), connectionID))
 	if err == nil {
 		return scan, true, nil
 	}
@@ -54,11 +63,12 @@ func (r *InventoryRepository) OpenScan(ctx context.Context, bucket, prefix, owne
 	// No resumable scan: start one, unless another worker holds the
 	// running one (the partial unique index decides).
 	scan, err = scanInventoryScan(r.db.Pool.QueryRow(ctx, `
-		INSERT INTO inventory_scans (id, bucket, prefix, status, lease_owner, lease_expires_at, started_at, updated_at)
-		VALUES ($1, $2, $3, 'RUNNING', $4, $5::timestamptz + make_interval(secs => $6), $5, $5)
-		ON CONFLICT (bucket, prefix) WHERE status = 'RUNNING' DO NOTHING
+		INSERT INTO inventory_scans (id, bucket, prefix, status, lease_owner, lease_expires_at, started_at, updated_at,
+		                             storage_connection_id)
+		VALUES ($1, $2, $3, 'RUNNING', $4, $5::timestamptz + make_interval(secs => $6), $5, $5, $7)
+		ON CONFLICT (storage_connection_id, bucket, prefix) WHERE status = 'RUNNING' DO NOTHING
 		RETURNING `+scanColumns,
-		newID, bucket, prefix, owner, now, lease.Seconds()))
+		newID, bucket, prefix, owner, now, lease.Seconds(), connectionID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.InventoryScan{}, false, nil
 	}
@@ -104,14 +114,14 @@ func (r *InventoryRepository) FinishScan(ctx context.Context, scan model.Invento
 	return nil
 }
 
-func (r *InventoryRepository) LastCompleted(ctx context.Context, bucket, prefix string) (model.InventoryScan, bool, error) {
+func (r *InventoryRepository) LastCompleted(ctx context.Context, connectionID, bucket, prefix string) (model.InventoryScan, bool, error) {
 	scan, err := scanInventoryScan(r.db.Pool.QueryRow(ctx, `
 		SELECT `+scanColumns+`
 		FROM inventory_scans
-		WHERE bucket = $1 AND prefix = $2 AND status = 'COMPLETED'
+		WHERE bucket = $1 AND prefix = $2 AND status = 'COMPLETED' AND storage_connection_id = $3
 		ORDER BY completed_at DESC
 		LIMIT 1
-	`, bucket, prefix))
+	`, bucket, prefix, connectionOrPlatform(connectionID)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.InventoryScan{}, false, nil
 	}
@@ -144,14 +154,14 @@ func (r *InventoryRepository) RecentScans(ctx context.Context, limit int) ([]mod
 const candidateColumns = `
 	id, bucket, object_key, etag, size_bytes, category, tenant_id, reason, status, observations,
 	first_seen_at, last_seen_at, last_scan_id, attempt_count, COALESCE(last_error, ''), resolved_at,
-	created_at, updated_at
+	created_at, updated_at, storage_connection_id
 `
 
 func scanCandidate(row pgx.Row) (model.OrphanCandidate, error) {
 	var c model.OrphanCandidate
 	err := row.Scan(&c.ID, &c.Bucket, &c.ObjectKey, &c.ETag, &c.SizeBytes, &c.Category, &c.TenantID, &c.Reason, &c.Status,
 		&c.Observations, &c.FirstSeenAt, &c.LastSeenAt, &c.LastScanID, &c.AttemptCount, &c.LastError, &c.ResolvedAt,
-		&c.CreatedAt, &c.UpdatedAt)
+		&c.CreatedAt, &c.UpdatedAt, &c.ConnectionID)
 	return c, err
 }
 
@@ -162,10 +172,10 @@ func (r *InventoryRepository) Mark(ctx context.Context, c model.OrphanCandidate,
 	stored, err := scanCandidate(r.db.Pool.QueryRow(ctx, `
 		INSERT INTO orphan_candidates (
 			id, bucket, object_key, etag, size_bytes, category, tenant_id, reason, status, observations,
-			first_seen_at, last_seen_at, last_scan_id, created_at, updated_at
+			first_seen_at, last_seen_at, last_scan_id, created_at, updated_at, storage_connection_id
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'MARKED', 1, $9, $9, $10, $9, $9)
-		ON CONFLICT (bucket, object_key) WHERE status IN ('MARKED', 'FAILED')
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'MARKED', 1, $9, $9, $10, $9, $9, $11)
+		ON CONFLICT (storage_connection_id, bucket, object_key) WHERE status IN ('MARKED', 'FAILED')
 		DO UPDATE SET
 			observations = CASE
 				WHEN orphan_candidates.etag <> EXCLUDED.etag THEN 1
@@ -185,21 +195,22 @@ func (r *InventoryRepository) Mark(ctx context.Context, c model.OrphanCandidate,
 			last_scan_id = EXCLUDED.last_scan_id,
 			updated_at = EXCLUDED.updated_at
 		RETURNING `+candidateColumns,
-		c.ID, c.Bucket, c.ObjectKey, c.ETag, c.SizeBytes, c.Category, c.TenantID, c.Reason, now, scanID))
+		c.ID, c.Bucket, c.ObjectKey, c.ETag, c.SizeBytes, c.Category, c.TenantID, c.Reason, now, scanID,
+		connectionOrPlatform(c.ConnectionID)))
 	if err != nil {
 		return model.OrphanCandidate{}, fmt.Errorf("mark orphan candidate: %w", err)
 	}
 	return stored, nil
 }
 
-func (r *InventoryRepository) DueCandidates(ctx context.Context, bucket, keyPrefix string, seenBefore time.Time, minObservations, maxAttempts, limit int) ([]model.OrphanCandidate, error) {
+func (r *InventoryRepository) DueCandidates(ctx context.Context, connectionID, bucket, keyPrefix string, seenBefore time.Time, minObservations, maxAttempts, limit int) ([]model.OrphanCandidate, error) {
 	return r.candidates(ctx, `
 		SELECT c.id, c.bucket, c.object_key, c.etag, c.size_bytes, c.category, c.tenant_id, c.reason, c.status,
 		       c.observations, c.first_seen_at, c.last_seen_at, c.last_scan_id, c.attempt_count,
-		       COALESCE(c.last_error, ''), c.resolved_at, c.created_at, c.updated_at
+		       COALESCE(c.last_error, ''), c.resolved_at, c.created_at, c.updated_at, c.storage_connection_id
 		FROM orphan_candidates AS c
 		JOIN inventory_scans AS s ON s.id = c.last_scan_id AND s.status = 'COMPLETED'
-		WHERE c.bucket = $1
+		WHERE c.bucket = $1 AND c.storage_connection_id = $7
 		  AND left(c.object_key, length($2)) = $2
 		  AND c.status IN ('MARKED', 'FAILED')
 		  AND c.observations >= $4
@@ -207,7 +218,7 @@ func (r *InventoryRepository) DueCandidates(ctx context.Context, bucket, keyPref
 		  AND c.attempt_count < $5
 		ORDER BY c.first_seen_at, c.id
 		LIMIT $6
-	`, bucket, keyPrefix, seenBefore, minObservations, maxAttempts, limit)
+	`, bucket, keyPrefix, seenBefore, minObservations, maxAttempts, limit, connectionOrPlatform(connectionID))
 }
 
 func (r *InventoryRepository) Resolve(ctx context.Context, candidateID, status, reason string, now time.Time) error {

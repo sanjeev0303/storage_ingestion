@@ -24,29 +24,32 @@ type LifecycleStorage interface {
 
 // InventoryRepository stores inventory scans and orphan candidates.
 type InventoryRepository interface {
-	// OpenScan leases the bucket prefix's RUNNING scan to owner, or starts
-	// a new one with newID. ok is false while another worker holds a live
-	// lease on the running scan.
-	OpenScan(ctx context.Context, bucket, prefix, owner, newID string, now time.Time, lease time.Duration) (scan model.InventoryScan, ok bool, err error)
+	// OpenScan leases the RUNNING scan of the connection's bucket prefix to
+	// owner, or starts a new one with newID. ok is false while another
+	// worker holds a live lease on the running scan.
+	OpenScan(ctx context.Context, connectionID, bucket, prefix, owner, newID string, now time.Time, lease time.Duration) (scan model.InventoryScan, ok bool, err error)
 	// SaveProgress records the scan's cursor and counters and extends the
 	// lease. model.ErrLeaseLost when owner no longer holds it.
 	SaveProgress(ctx context.Context, scan model.InventoryScan, owner string, now time.Time, lease time.Duration) error
 	// FinishScan records the scan's final counters, ends it as COMPLETED
 	// or FAILED and releases it.
 	FinishScan(ctx context.Context, scan model.InventoryScan, owner string, now time.Time, status string) error
-	// LastCompleted returns the latest completed scan of the bucket prefix.
-	LastCompleted(ctx context.Context, bucket, prefix string) (model.InventoryScan, bool, error)
+	// LastCompleted returns the latest completed scan of the connection's
+	// bucket prefix.
+	LastCompleted(ctx context.Context, connectionID, bucket, prefix string) (model.InventoryScan, bool, error)
 	RecentScans(ctx context.Context, limit int) ([]model.InventoryScan, error)
 
-	// Mark records a sighting of an unowned object in scanID. A second
+	// Mark records a sighting of an unowned object (on the candidate's
+	// connection) in scanID. A second
 	// sighting in the same scan does not count again; a changed ETag means
 	// a different object and starts the count over.
 	Mark(ctx context.Context, candidate model.OrphanCandidate, scanID string, now time.Time) (model.OrphanCandidate, error)
-	// DueCandidates returns open candidates under keyPrefix ready to sweep:
+	// DueCandidates returns the connection's open candidates under
+	// keyPrefix ready to sweep:
 	// seen in at least minObservations scans, first seen before seenBefore,
 	// last seen in a completed scan, and with fewer than maxAttempts
 	// failed deletions.
-	DueCandidates(ctx context.Context, bucket, keyPrefix string, seenBefore time.Time, minObservations, maxAttempts, limit int) ([]model.OrphanCandidate, error)
+	DueCandidates(ctx context.Context, connectionID, bucket, keyPrefix string, seenBefore time.Time, minObservations, maxAttempts, limit int) ([]model.OrphanCandidate, error)
 	// Resolve closes a candidate as DELETED or CLEARED.
 	Resolve(ctx context.Context, candidateID, status, reason string, now time.Time) error
 	// FailCandidate records a failed deletion; it is retried next sweep.

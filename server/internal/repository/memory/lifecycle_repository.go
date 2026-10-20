@@ -710,7 +710,16 @@ func NewInventoryRepository() *InventoryRepository {
 	}
 }
 
-func (r *InventoryRepository) OpenScan(ctx context.Context, bucket, prefix, owner, newID string, now time.Time, lease time.Duration) (model.InventoryScan, bool, error) {
+// connectionOrPlatform reads "" as the platform connection.
+func connectionOrPlatform(id string) string {
+	if id == "" {
+		return model.PlatformConnectionID
+	}
+	return id
+}
+
+func (r *InventoryRepository) OpenScan(ctx context.Context, connectionID, bucket, prefix, owner, newID string, now time.Time, lease time.Duration) (model.InventoryScan, bool, error) {
+	connectionID = connectionOrPlatform(connectionID)
 	if err := ctx.Err(); err != nil {
 		return model.InventoryScan{}, false, err
 	}
@@ -718,7 +727,7 @@ func (r *InventoryRepository) OpenScan(ctx context.Context, bucket, prefix, owne
 	defer r.mu.Unlock()
 
 	for id, scan := range r.scans {
-		if scan.Bucket != bucket || scan.Prefix != prefix || scan.Status != model.ScanRunning {
+		if scan.ConnectionID != connectionID || scan.Bucket != bucket || scan.Prefix != prefix || scan.Status != model.ScanRunning {
 			continue
 		}
 		held := r.leases[id]
@@ -729,7 +738,7 @@ func (r *InventoryRepository) OpenScan(ctx context.Context, bucket, prefix, owne
 		return scan, true, nil
 	}
 
-	scan := model.InventoryScan{ID: newID, Bucket: bucket, Prefix: prefix, Status: model.ScanRunning, StartedAt: now, UpdatedAt: now}
+	scan := model.InventoryScan{ID: newID, ConnectionID: connectionID, Bucket: bucket, Prefix: prefix, Status: model.ScanRunning, StartedAt: now, UpdatedAt: now}
 	r.scans[newID] = scan
 	r.leases[newID] = scanLease{owner: owner, expires: now.Add(lease)}
 	return scan, true, nil
@@ -771,7 +780,8 @@ func (r *InventoryRepository) FinishScan(ctx context.Context, scan model.Invento
 	return nil
 }
 
-func (r *InventoryRepository) LastCompleted(ctx context.Context, bucket, prefix string) (model.InventoryScan, bool, error) {
+func (r *InventoryRepository) LastCompleted(ctx context.Context, connectionID, bucket, prefix string) (model.InventoryScan, bool, error) {
+	connectionID = connectionOrPlatform(connectionID)
 	if err := ctx.Err(); err != nil {
 		return model.InventoryScan{}, false, err
 	}
@@ -780,7 +790,7 @@ func (r *InventoryRepository) LastCompleted(ctx context.Context, bucket, prefix 
 	var last model.InventoryScan
 	found := false
 	for _, scan := range r.scans {
-		if scan.Bucket == bucket && scan.Prefix == prefix && scan.Status == model.ScanCompleted &&
+		if scan.ConnectionID == connectionID && scan.Bucket == bucket && scan.Prefix == prefix && scan.Status == model.ScanCompleted &&
 			(!found || scan.CompletedAt.After(*last.CompletedAt)) {
 			last, found = scan, true
 		}
@@ -816,8 +826,9 @@ func (r *InventoryRepository) Mark(ctx context.Context, c model.OrphanCandidate,
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	c.ConnectionID = connectionOrPlatform(c.ConnectionID)
 	for id, existing := range r.candidates {
-		if existing.Bucket != c.Bucket || existing.ObjectKey != c.ObjectKey || !open(existing.Status) {
+		if existing.ConnectionID != c.ConnectionID || existing.Bucket != c.Bucket || existing.ObjectKey != c.ObjectKey || !open(existing.Status) {
 			continue
 		}
 		switch {
@@ -838,7 +849,8 @@ func (r *InventoryRepository) Mark(ctx context.Context, c model.OrphanCandidate,
 	return c, nil
 }
 
-func (r *InventoryRepository) DueCandidates(ctx context.Context, bucket, keyPrefix string, seenBefore time.Time, minObservations, maxAttempts, limit int) ([]model.OrphanCandidate, error) {
+func (r *InventoryRepository) DueCandidates(ctx context.Context, connectionID, bucket, keyPrefix string, seenBefore time.Time, minObservations, maxAttempts, limit int) ([]model.OrphanCandidate, error) {
+	connectionID = connectionOrPlatform(connectionID)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -848,7 +860,7 @@ func (r *InventoryRepository) DueCandidates(ctx context.Context, bucket, keyPref
 	var due []model.OrphanCandidate
 	for _, c := range r.candidates {
 		scan, ok := r.scans[c.LastScanID]
-		if c.Bucket == bucket && strings.HasPrefix(c.ObjectKey, keyPrefix) && open(c.Status) &&
+		if c.ConnectionID == connectionID && c.Bucket == bucket && strings.HasPrefix(c.ObjectKey, keyPrefix) && open(c.Status) &&
 			c.Observations >= minObservations && !c.FirstSeenAt.After(seenBefore) && c.AttemptCount < maxAttempts &&
 			ok && scan.Status == model.ScanCompleted {
 			due = append(due, c)

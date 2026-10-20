@@ -309,6 +309,17 @@ func cleanTenantData(ctx context.Context, db *postgres.DB, tenants []string) err
 	if _, err := db.Pool.Exec(ctx, `DELETE FROM catalog_objects WHERE tenant_id = ANY($1)`, tenants); err != nil {
 		return fmt.Errorf("clean catalog_objects: %w", err)
 	}
+	// Storage connections last: everything above may be bound to them, and
+	// an organization's default points at one.
+	if _, err := db.Pool.Exec(ctx, `UPDATE organizations SET default_storage_connection_id = 'platform' WHERE id = ANY($1)`, tenants); err != nil {
+		return fmt.Errorf("reset default connections: %w", err)
+	}
+	if _, err := db.Pool.Exec(ctx, `DELETE FROM inventory_scans WHERE storage_connection_id IN (SELECT id FROM storage_connections WHERE tenant_id = ANY($1))`, tenants); err != nil {
+		return fmt.Errorf("clean inventory scans: %w", err)
+	}
+	if _, err := db.Pool.Exec(ctx, `DELETE FROM storage_connections WHERE tenant_id = ANY($1)`, tenants); err != nil {
+		return fmt.Errorf("clean storage_connections: %w", err)
+	}
 	return nil
 }
 

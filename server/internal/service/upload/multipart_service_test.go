@@ -84,7 +84,7 @@ func TestValidateCompletion(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := validateCompletion(session, recorded, tt.input)
+			got, err := validateCompletion(session, recorded, tt.input, s3PartRules)
 
 			if tt.wantErr {
 				if err == nil {

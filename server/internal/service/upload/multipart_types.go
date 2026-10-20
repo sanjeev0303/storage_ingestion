@@ -23,6 +23,10 @@ type StartMultipartInput struct {
 	Path       string
 	Metadata   map[string]string
 	CreateOnly bool
+	// StorageConnectionID asks for a storage connection other than the
+	// default; Principal is who asked (see CreateInput).
+	StorageConnectionID string
+	Principal           model.Principal
 }
 
 // MultipartResult contains application-level session information.

@@ -89,6 +89,13 @@ type UploadSession struct {
 	ObjectID   string
 	CreateOnly bool
 	Metadata   map[string]string
+
+	// The storage binding: the connection that holds the published bytes
+	// and the one the upload lands on (the same, unless the connection
+	// stages uploads on the platform). Fixed when the upload is created;
+	// "" reads as the platform connection.
+	StorageConnectionID string
+	StagingConnectionID string
 }
 
 // Validate checks the basic invariants of an upload session.

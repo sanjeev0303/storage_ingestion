@@ -35,6 +35,10 @@ type Dependencies struct {
 	Events    interfaces.LifecycleEventRepository
 	// Metrics is optional.
 	Metrics *metrics.Registry
+	// Router and Connections reach tenants' own storage connections.
+	// Without them only the platform's buckets are cleaned.
+	Router      interfaces.StorageRouter
+	Connections interfaces.ConnectionLister
 }
 
 type Config struct {
@@ -135,22 +139,58 @@ func (st *CycleStats) note(line string) {
 	}
 }
 
-// area is one bucket prefix the platform writes to.
+// area is one bucket prefix the platform writes to, on one connection.
+// Keys under it are base + {tenant}/{id}.
 type area struct {
-	bucket string
-	prefix string
-	kind   string
+	connectionID string
+	storage      interfaces.LifecycleStorage
+	bucket       string
+	base         string
+	prefix       string
+	kind         string
+	// customer: a tenant's own storage. An object there that no record
+	// claims may be the customer's own, so it is reported, never deleted.
+	customer bool
 }
 
-func (s *Service) areas() []area {
+// areas are the platform's two prefixes and, for every tenant connection
+// that still holds data, its staging and ready prefixes. A connection
+// that cannot be reached now is skipped this cycle; the others go on.
+func (s *Service) areas(ctx context.Context) ([]area, error) {
 	scope := ""
 	if s.cfg.TenantID != "" {
 		scope = s.cfg.TenantID + "/"
 	}
-	return []area{
-		{bucket: s.cfg.QuarantineBucket, prefix: "quarantine/" + scope, kind: kindQuarantine},
-		{bucket: s.cfg.DeliveryBucket, prefix: s.cfg.DeliveryPrefix + "/" + scope, kind: kindDelivery},
+	areas := []area{
+		{connectionID: model.PlatformConnectionID, storage: s.deps.Storage, bucket: s.cfg.QuarantineBucket,
+			base: "quarantine/", prefix: "quarantine/" + scope, kind: kindQuarantine},
+		{connectionID: model.PlatformConnectionID, storage: s.deps.Storage, bucket: s.cfg.DeliveryBucket,
+			base: s.cfg.DeliveryPrefix + "/", prefix: s.cfg.DeliveryPrefix + "/" + scope, kind: kindDelivery},
 	}
+	if s.deps.Router == nil || s.deps.Connections == nil {
+		return areas, nil
+	}
+	connections, err := s.deps.Connections.ConnectionsHoldingWork(ctx, s.cfg.TenantID)
+	if err != nil {
+		return areas, fmt.Errorf("list storage connections: %w", err)
+	}
+	var errs []error
+	for _, c := range connections {
+		loc, err := s.deps.Router.Locate(ctx, c.TenantID, c.ID)
+		if err != nil {
+			s.deps.Metrics.Add("cleanup_connection_errors", 1)
+			errs = append(errs, fmt.Errorf("storage connection %s: %w", c.ID, err))
+			continue
+		}
+		own := c.TenantID + "/"
+		if c.StagingMode == model.StagingInPlace {
+			areas = append(areas, area{connectionID: c.ID, storage: loc.Storage, bucket: loc.StagingBucket,
+				base: loc.StagingPrefix + "/", prefix: loc.StagingPrefix + "/" + own, kind: kindQuarantine, customer: true})
+		}
+		areas = append(areas, area{connectionID: c.ID, storage: loc.Storage, bucket: loc.ReadyBucket,
+			base: loc.ReadyPrefix + "/", prefix: loc.ReadyPrefix + "/" + own, kind: kindDelivery, customer: true})
+	}
+	return areas, errors.Join(errs...)
 }
 
 // RunOnce scans, sweeps and checks for missing objects. A failing step is
@@ -171,8 +211,9 @@ func (s *Service) RunOnce(ctx context.Context) (CycleStats, error) {
 // Scan continues each area's inventory scan for up to PagesPerRun pages,
 // marking unowned objects. The scan's cursor is saved after every page.
 func (s *Service) Scan(ctx context.Context, stats *CycleStats) error {
-	var errs []error
-	for _, a := range s.areas() {
+	areas, err := s.areas(ctx)
+	errs := []error{err}
+	for _, a := range areas {
 		if ctx.Err() != nil {
 			break
 		}
@@ -186,7 +227,7 @@ func (s *Service) Scan(ctx context.Context, stats *CycleStats) error {
 }
 
 func (s *Service) scanArea(ctx context.Context, a area, stats *CycleStats) error {
-	scan, ok, err := s.deps.Inventory.OpenScan(ctx, a.bucket, a.prefix, s.cfg.Owner, newID(), s.now(), s.cfg.Lease)
+	scan, ok, err := s.deps.Inventory.OpenScan(ctx, a.connectionID, a.bucket, a.prefix, s.cfg.Owner, newID(), s.now(), s.cfg.Lease)
 	if err != nil {
 		return fmt.Errorf("open inventory scan: %w", err)
 	}
@@ -198,7 +239,7 @@ func (s *Service) scanArea(ctx context.Context, a area, stats *CycleStats) error
 		if ctx.Err() != nil {
 			return nil // the saved cursor resumes it
 		}
-		listing, err := s.deps.Storage.ListObjectsPage(ctx, a.bucket, a.prefix, scan.Cursor, s.cfg.PageSize)
+		listing, err := a.storage.ListObjectsPage(ctx, a.bucket, a.prefix, scan.Cursor, s.cfg.PageSize)
 		if err != nil {
 			return s.scanError(ctx, scan, a, stats, err)
 		}
@@ -221,7 +262,7 @@ func (s *Service) scanArea(ctx context.Context, a area, stats *CycleStats) error
 			}
 			stats.ScansCompleted++
 			s.deps.Metrics.Add("inventory_scans_completed", 1)
-			s.log.Info("inventory scan completed", "bucket", a.bucket, "prefix", a.prefix, "pages", scan.Pages,
+			s.log.Info("inventory scan completed", "connection", a.connectionID, "bucket", a.bucket, "prefix", a.prefix, "pages", scan.Pages,
 				"objects", scan.ObjectsSeen, "candidates", scan.CandidatesMarked)
 			return nil
 		}
@@ -270,7 +311,7 @@ func (s *Service) inspectObject(ctx context.Context, a area, scan *model.Invento
 
 	now := s.now()
 	marked, err := s.deps.Inventory.Mark(ctx, model.OrphanCandidate{
-		ID: newID(), Bucket: a.bucket, ObjectKey: object.ObjectKey, ETag: object.ETag, SizeBytes: object.SizeBytes,
+		ID: newID(), ConnectionID: a.connectionID, Bucket: a.bucket, ObjectKey: object.ObjectKey, ETag: object.ETag, SizeBytes: object.SizeBytes,
 		Category: v.category, TenantID: v.tenantID, Reason: v.reason, Status: model.CandidateMarked,
 		Observations: 1, FirstSeenAt: now, LastSeenAt: now, LastScanID: scan.ID, CreatedAt: now, UpdatedAt: now,
 	}, scan.ID, now)
@@ -291,7 +332,7 @@ func (s *Service) inspectObject(ctx context.Context, a area, scan *model.Invento
 func (s *Service) preview(ctx context.Context, a area, stats *CycleStats) error {
 	cursor := ""
 	for page := 0; page < s.cfg.PagesPerRun; page++ {
-		listing, err := s.deps.Storage.ListObjectsPage(ctx, a.bucket, a.prefix, cursor, s.cfg.PageSize)
+		listing, err := a.storage.ListObjectsPage(ctx, a.bucket, a.prefix, cursor, s.cfg.PageSize)
 		if err != nil {
 			stats.ScanErrors++
 			return fmt.Errorf("list %s: %w", a.prefix, err)
@@ -326,17 +367,18 @@ func (s *Service) Sweep(ctx context.Context, stats *CycleStats) error {
 	budget := s.cfg.MaxDeletionsPerRun
 	seenBefore := s.now().Add(-s.cfg.SafetyInterval)
 
-	for _, a := range s.areas() {
+	areas, areasErr := s.areas(ctx)
+	for _, a := range areas {
 		if ctx.Err() != nil || budget == 0 {
-			return nil
+			return areasErr
 		}
-		candidates, err := s.deps.Inventory.DueCandidates(ctx, a.bucket, a.prefix, seenBefore, s.cfg.MinObservations, s.cfg.MaxAttempts, budget)
+		candidates, err := s.deps.Inventory.DueCandidates(ctx, a.connectionID, a.bucket, a.prefix, seenBefore, s.cfg.MinObservations, s.cfg.MaxAttempts, budget)
 		if err != nil {
 			return fmt.Errorf("list due orphan candidates: %w", err)
 		}
 		for _, candidate := range candidates {
 			if ctx.Err() != nil || budget == 0 {
-				return nil
+				return areasErr
 			}
 			deleted, err := s.sweepOne(ctx, a, candidate, stats)
 			if err != nil {
@@ -347,19 +389,19 @@ func (s *Service) Sweep(ctx context.Context, stats *CycleStats) error {
 			}
 		}
 	}
-	return nil
+	return areasErr
 }
 
 func (s *Service) sweepOne(ctx context.Context, a area, c model.OrphanCandidate, stats *CycleStats) (bool, error) {
 	line := fmt.Sprintf("%s/%s (%s)", c.Bucket, c.ObjectKey, c.Category)
-	if !s.cfg.DeleteOrphans || (model.Unrecorded(c.Category) && !s.cfg.DeleteUnrecorded) {
+	if !s.cfg.DeleteOrphans || (model.Unrecorded(c.Category) && (!s.cfg.DeleteUnrecorded || a.customer)) {
 		stats.Kept++
 		stats.note("report only, kept " + line)
 		s.deps.Metrics.Add("orphan_candidates_reported", 1)
 		return false, nil
 	}
 
-	meta, err := s.deps.Storage.HeadObject(ctx, c.Bucket, c.ObjectKey)
+	meta, err := a.storage.HeadObject(ctx, c.Bucket, c.ObjectKey)
 	if errors.Is(err, interfaces.ErrObjectNotFound) {
 		return false, s.clear(ctx, c, "already gone", stats)
 	}
@@ -395,10 +437,10 @@ func (s *Service) sweepOne(ctx context.Context, a area, c model.OrphanCandidate,
 		return true, nil
 	}
 
-	if err := s.deps.Storage.DeleteObject(ctx, c.Bucket, c.ObjectKey); err != nil {
+	if err := a.storage.DeleteObject(ctx, c.Bucket, c.ObjectKey); err != nil {
 		return false, s.failCandidate(ctx, c, err, stats)
 	}
-	if _, err := s.deps.Storage.HeadObject(ctx, c.Bucket, c.ObjectKey); !errors.Is(err, interfaces.ErrObjectNotFound) {
+	if _, err := a.storage.HeadObject(ctx, c.Bucket, c.ObjectKey); !errors.Is(err, interfaces.ErrObjectNotFound) {
 		if err == nil {
 			err = errors.New("object still present after delete")
 		}
@@ -411,7 +453,7 @@ func (s *Service) sweepOne(ctx context.Context, a area, c model.OrphanCandidate,
 	stats.Deleted++
 	s.deps.Metrics.Add("orphan_objects_deleted", 1)
 	s.record(ctx, c.TenantID, v.assetID, "orphan_deleted", model.CandidateDeleted, c.Category+": "+v.reason+" ("+c.ObjectKey+")")
-	s.log.Info("orphan object deleted", "bucket", c.Bucket, "key", c.ObjectKey, "category", c.Category,
+	s.log.Info("orphan object deleted", "connection", a.connectionID, "bucket", c.Bucket, "key", c.ObjectKey, "category", c.Category,
 		"observations", c.Observations, "first_seen_at", c.FirstSeenAt)
 	return true, nil
 }
@@ -481,12 +523,23 @@ func (s *Service) CheckMissing(ctx context.Context, stats *CycleStats) error {
 
 func (s *Service) checkAsset(ctx context.Context, asset model.Asset, stats *CycleStats) error {
 	stats.MissingChecked++
-	bucket, key := s.cfg.QuarantineBucket, "quarantine/"+asset.TenantID+"/"+asset.UploadID
+	// The object is where the asset's binding says: the published copy on
+	// its storage connection, or the upload on its staging connection.
+	connectionID := asset.StagingConnectionID
 	if asset.Status == model.AssetStatusAvailable {
-		bucket, key = s.cfg.DeliveryBucket, asset.ObjectKey
+		connectionID = asset.StorageConnectionID
+	}
+	storage, place, err := s.locate(ctx, asset.TenantID, connectionID)
+	if err != nil {
+		s.deps.Metrics.Add("missing_check_errors", 1)
+		return nil // the connection is unreachable now; checked next pass
+	}
+	bucket, key := place.StagingBucket, place.StagingKey(asset.TenantID, asset.UploadID)
+	if asset.Status == model.AssetStatusAvailable {
+		bucket, key = place.ReadyBucket, asset.ObjectKey
 	}
 
-	_, err := s.deps.Storage.HeadObject(ctx, bucket, key)
+	_, err = storage.HeadObject(ctx, bucket, key)
 	if err == nil {
 		return nil
 	}
@@ -525,6 +578,26 @@ func (s *Service) checkAsset(ctx context.Context, asset model.Asset, stats *Cycl
 		"status", string(asset.Status), "classification", class)
 	s.record(ctx, asset.TenantID, asset.ID, "object_missing", "REPORTED", class)
 	return nil
+}
+
+// locate resolves an asset's bound connection: the platform's own buckets,
+// or a tenant connection through the router.
+func (s *Service) locate(ctx context.Context, tenantID, connectionID string) (interfaces.LifecycleStorage, interfaces.StoragePlace, error) {
+	if connectionID == "" || connectionID == model.PlatformConnectionID {
+		return s.deps.Storage, interfaces.StoragePlace{
+			ConnectionID:  model.PlatformConnectionID,
+			StagingBucket: s.cfg.QuarantineBucket, StagingPrefix: "quarantine",
+			ReadyBucket: s.cfg.DeliveryBucket, ReadyPrefix: s.cfg.DeliveryPrefix,
+		}, nil
+	}
+	if s.deps.Router == nil {
+		return nil, interfaces.StoragePlace{}, model.ErrStorageNotConfigured
+	}
+	loc, err := s.deps.Router.Locate(ctx, tenantID, connectionID)
+	if err != nil {
+		return nil, interfaces.StoragePlace{}, err
+	}
+	return loc.Storage, loc.StoragePlace, nil
 }
 
 func (s *Service) countSkip(stats *CycleStats, counter string) {

@@ -20,7 +20,7 @@ func (s *Service) CreateFor(ctx context.Context, p model.Principal, req request.
 	if err := audit.Require(ctx, s.audit, p, model.PermUploadsWrite, "upload.create", "upload", ""); err != nil {
 		return CreateResult{}, err
 	}
-	result, err := s.Create(ctx, CreateInput{TenantID: p.TenantID, OwnerID: p.UserID, Request: req})
+	result, err := s.Create(ctx, CreateInput{TenantID: p.TenantID, OwnerID: p.UserID, Request: req, Principal: p})
 	if err == nil && !result.Reused {
 		s.record(ctx, p, "upload.create", result.Upload, map[string]any{"multipart": false})
 	}
@@ -72,7 +72,7 @@ func (s *MultipartService) StartFor(ctx context.Context, p model.Principal, inpu
 	if err := audit.Require(ctx, s.audit, p, model.PermUploadsWrite, "upload.create", "upload", ""); err != nil {
 		return MultipartResult{}, err
 	}
-	input.TenantID, input.OwnerID = p.TenantID, p.UserID
+	input.TenantID, input.OwnerID, input.Principal = p.TenantID, p.UserID, p
 	result, err := s.Start(ctx, input)
 	if (err == nil || errors.Is(err, ErrMultipartStartPending)) && !result.Reused && result.Session.ID != "" {
 		s.record(ctx, p, "upload.create", result.Session.ID, map[string]any{"multipart": true, "size_bytes": input.SizeBytes})

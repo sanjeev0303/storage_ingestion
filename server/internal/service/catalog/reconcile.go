@@ -30,6 +30,9 @@ type Reconciler struct {
 	storage interfaces.LifecycleStorage
 	bucket  string
 	prefix  string
+	// router checks versions stored on tenants' connections; without it
+	// they are skipped.
+	router  interfaces.StorageRouter
 	audit   interfaces.AuditRecorder
 	metrics *metrics.Registry
 	log     *slog.Logger
@@ -281,11 +284,17 @@ func (r *Reconciler) published(ctx context.Context, tenant string, opts Reconcil
 		for _, v := range versions {
 			checked++
 			report.VersionsChecked++
+			storage, bucket, err := r.versionStorage(ctx, v)
+			if err != nil {
+				report.StorageErrors++
+				r.log.Warn("catalog storage check skipped", "tenant_id", tenant, "asset_id", v.ID, "error", err)
+				continue
+			}
 			var meta interfaces.ObjectMetadata
 			if v.StorageVersionID != "" {
-				meta, err = r.storage.HeadObjectVersion(ctx, r.bucket, v.ObjectKey, v.StorageVersionID)
+				meta, err = storage.HeadObjectVersion(ctx, bucket, v.ObjectKey, v.StorageVersionID)
 			} else {
-				meta, err = r.storage.HeadObject(ctx, r.bucket, v.ObjectKey)
+				meta, err = storage.HeadObject(ctx, bucket, v.ObjectKey)
 			}
 			switch {
 			case errors.Is(err, interfaces.ErrObjectNotFound):
@@ -310,8 +319,32 @@ func (r *Reconciler) published(ctx context.Context, tenant string, opts Reconcil
 	return nil
 }
 
-// unreferenced lists the tenant's published prefix and reports stored
-// objects no asset refers to. Nothing is deleted.
+// Route lets the reconciler check versions stored on tenants' storage
+// connections.
+func (r *Reconciler) Route(router interfaces.StorageRouter) *Reconciler {
+	r.router = router
+	return r
+}
+
+// versionStorage is where a published version's bytes are: the
+// platform's bucket or the version's own storage connection.
+func (r *Reconciler) versionStorage(ctx context.Context, v model.Asset) (interfaces.LifecycleStorage, string, error) {
+	if model.IsPlatformConnection(v.StorageConnectionID) {
+		return r.storage, r.bucket, nil
+	}
+	if r.router == nil {
+		return nil, "", model.ErrStorageNotConfigured
+	}
+	loc, err := r.router.Locate(ctx, v.TenantID, v.StorageConnectionID)
+	if err != nil {
+		return nil, "", err
+	}
+	return loc.Storage, loc.ReadyBucket, nil
+}
+
+// unreferenced lists the tenant's published prefix on the platform's
+// bucket and reports stored objects no asset refers to. Nothing is
+// deleted. Tenants' own connections are swept by the cleanup worker.
 func (r *Reconciler) unreferenced(ctx context.Context, tenant string, opts ReconcileOptions, report *ReconcileReport) error {
 	prefix := r.prefix + "/" + tenant + "/"
 	cursor := ""

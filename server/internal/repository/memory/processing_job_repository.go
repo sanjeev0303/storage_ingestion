@@ -87,6 +87,7 @@ func (r *ProcessingJobRepository) enqueue(ctx context.Context, now time.Time, ma
 				ID: fmt.Sprintf("asset-%d", r.nextID), TenantID: s.TenantID, OwnerID: s.OwnerID, UploadID: s.ID,
 				ObjectKey: s.ObjectKey, FileName: s.FileName, ContentType: s.ContentType, SizeBytes: s.ExpectedSize,
 				ChecksumSHA256: s.ChecksumSHA256, Dataset: s.Dataset, Status: model.AssetStatusQuarantined, CreatedAt: now, UpdatedAt: now,
+				StorageConnectionID: s.StorageConnectionID, StagingConnectionID: s.StagingConnectionID,
 			}
 			if err := r.assets.Create(ctx, &asset); err != nil {
 				return created, err

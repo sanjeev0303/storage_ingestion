@@ -69,6 +69,13 @@ type Asset struct {
 	ObjectID string
 	Version  int
 	Metadata map[string]string
+
+	// The storage binding: the connection that holds the published bytes
+	// and the one its upload landed on (the same, unless the connection
+	// stages uploads on the platform). Copied from the upload, never changed;
+	// "" reads as the platform connection.
+	StorageConnectionID string
+	StagingConnectionID string
 }
 
 // CanTransitionAsset reports whether the asset lifecycle allows from -> to:

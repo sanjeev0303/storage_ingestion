@@ -20,6 +20,7 @@ import (
 	ingestionservice "github.com/sanjeev0303/object-storage-platform/internal/service/ingestion"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/processing"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/quota"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/storageconn"
 	uploadservice "github.com/sanjeev0303/object-storage-platform/internal/service/upload"
 )
 
@@ -47,6 +48,9 @@ type Routes struct {
 	// Datasets serves managed datasets (Phase 10). When set, it also owns
 	// POST /api/v1/datasets and GET /api/v1/datasets/{id}.
 	Datasets *datasetservice.Service
+	// StorageConnections manages organizations' storage connections
+	// (Phase 11).
+	StorageConnections *storageconn.Service
 	// StorageCapabilities reports the delivery bucket's provider
 	// capabilities (GET /api/v1/catalog/capabilities); optional.
 	StorageCapabilities func(*http.Request) (interfaces.StorageCapabilities, error)
@@ -167,6 +171,13 @@ func NewRouter(rt Routes) http.Handler {
 		}
 	}
 
+	if rt.StorageConnections != nil {
+		connections := httpapi.NewStorageConnectionHandler(rt.StorageConnections, rt.Log)
+		for pattern, h := range connections.Routes() {
+			mux.Handle(pattern, byTenant(storageOperation(pattern), h))
+		}
+	}
+
 	if rt.Identity != nil && rt.Quotas != nil && rt.Audit != nil {
 		ids := httpapi.NewIdentityHandler(rt.Identity, rt.Quotas, rt.Audit, rt.Resolver, rt.Log)
 		routes := ids.Routes()
@@ -226,6 +237,19 @@ func datasetOperation(pattern string) string {
 		return "admin"
 	}
 	return "upload_finish"
+}
+
+// storageOperation names the rate limit a storage connection route counts
+// against: reads are listings; tests and credential rotations, which
+// reach customer endpoints, have their own tight limit.
+func storageOperation(pattern string) string {
+	switch {
+	case strings.HasPrefix(pattern, "GET "):
+		return "listing"
+	case strings.HasSuffix(pattern, "/test"), strings.HasSuffix(pattern, "/rotate-credentials"), strings.HasSuffix(pattern, "/enable"):
+		return "storage_test"
+	}
+	return "storage_admin"
 }
 
 func (rt Routes) requestsPerMinute(ctx context.Context, tenantID string) (int, error) {

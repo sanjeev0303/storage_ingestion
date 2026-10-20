@@ -30,6 +30,10 @@ type Service struct {
 	// tenant's quota; audit records uploads started and completed.
 	quotas Reserver
 	audit  interfaces.AuditRecorder
+	// chooser and router place uploads on tenants' storage connections
+	// (routing.go); nil keeps every upload on the platform's bucket.
+	chooser interfaces.StorageChooser
+	router  interfaces.StorageRouter
 }
 
 // Reserver stores an upload session with its quota reservation.
@@ -81,6 +85,9 @@ type CreateInput struct {
 	// trusted caller (bulk ingestion), never from the request body.
 	Dataset string
 	Request request.CreateUploadRequest
+	// Principal, when set, is who asked: choosing a storage connection
+	// other than the default needs its storage.use permission.
+	Principal model.Principal
 }
 
 // CreateResult tessl the caller wheterh this is a newly created session.
@@ -101,10 +108,14 @@ func (s *Service) createResult(
 		urlExpiresAt = session.ExpiresAt
 	}
 
-	plan, err := s.storage.CreateUploadPlan(
+	storage, bucket, err := s.staging(ctx, session)
+	if err != nil {
+		return CreateResult{}, err
+	}
+	plan, err := storage.CreateUploadPlan(
 		ctx,
 		interfaces.UploadTarget{
-			Bucket:      s.bucket,
+			Bucket:      bucket,
 			ObjectKey:   session.ObjectKey,
 			ContentType: session.ContentType,
 			SizeBytes:   session.ExpectedSize,
@@ -208,13 +219,31 @@ func (s *Service) Create(
 		return CreateResult{}, fmt.Errorf("generate upload ID: %w", err)
 	}
 
+	principal := input.Principal
+	if principal.TenantID == "" {
+		principal = model.Principal{TenantID: input.TenantID, UserID: input.OwnerID}
+	}
+	bound, err := chooseBinding(ctx, s.chooser, principal, req.StorageConnectionID, input.Dataset, id)
+	if err != nil {
+		return CreateResult{}, err
+	}
+	if bound.staging != nil {
+		caps := bound.staging.Capabilities
+		if !caps.PresignedUpload {
+			return CreateResult{}, fmt.Errorf("%w: the storage connection cannot take direct uploads", model.ErrUnsupportedProvider)
+		}
+		if caps.MaxSingleUploadBytes > 0 && req.SizeBytes > caps.MaxSingleUploadBytes {
+			return CreateResult{}, fmt.Errorf("%w: use a multipart upload on this storage connection", ErrUploadTooLarge)
+		}
+	}
+
 	now := s.now()
 
 	session := &model.UploadSession{
 		ID:             id,
 		TenantID:       input.TenantID,
 		OwnerID:        input.OwnerID,
-		ObjectKey:      "quarantine/" + input.TenantID + "/" + id,
+		ObjectKey:      bound.key,
 		FileName:       strings.TrimSpace(req.FileName),
 		ContentType:    strings.TrimSpace(req.ContentType),
 		ExpectedSize:   req.SizeBytes,
@@ -227,6 +256,9 @@ func (s *Service) Create(
 		Path:           path,
 		Metadata:       req.Metadata,
 		CreateOnly:     req.CreateOnly,
+
+		StorageConnectionID: bound.finalID,
+		StagingConnectionID: bound.stagingID,
 	}
 
 	if err := session.Validate(); err != nil {
@@ -235,7 +267,8 @@ func (s *Service) Create(
 
 	if err := s.save(ctx, session, req.IdempotencyKey); err != nil {
 		var quotaErr *model.QuotaError
-		if errors.As(err, &quotaErr) || errors.Is(err, model.ErrPathExists) || errors.Is(err, model.ErrPathBusy) {
+		if errors.As(err, &quotaErr) || errors.Is(err, model.ErrPathExists) || errors.Is(err, model.ErrPathBusy) ||
+			errors.Is(err, model.ErrConnectionNotActive) || errors.Is(err, model.ErrConnectionNotFound) {
 			return CreateResult{}, err
 		}
 		// Another request may have insterted that same idempotency key
@@ -287,7 +320,8 @@ func sameUploadRequest(
 		existing.Dataset == input.Dataset &&
 		existing.Path == path &&
 		existing.CreateOnly == req.CreateOnly &&
-		maps.Equal(existing.Metadata, req.Metadata)
+		maps.Equal(existing.Metadata, req.Metadata) &&
+		requestedMatches(req.StorageConnectionID, existing.StorageConnectionID)
 }
 
 // catalogPath validates the catalog part of an upload: its logical path

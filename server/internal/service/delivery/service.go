@@ -103,6 +103,43 @@ type Service struct {
 	// URL issuance in the security audit log.
 	access   func(ctx context.Context, tenantID, userID string) (model.Principal, error)
 	security interfaces.AuditRecorder
+	// router reaches assets published on tenants' storage connections;
+	// nil serves only the platform's bucket.
+	router interfaces.StorageRouter
+}
+
+// Route lets delivery serve assets published on tenants' storage
+// connections. An asset is always read through its own connection, never
+// the organization's current default.
+func (s *Service) Route(router interfaces.StorageRouter) *Service {
+	s.router = router
+	return s
+}
+
+// readyStorage is where an asset's published bytes are.
+type readyStorage struct {
+	storage interfaces.ObjectDelivery
+	bucket  string
+	prefix  string
+	// platform: the platform's bucket, the only one behind the CDN.
+	platform bool
+	// presign: the connection can sign a download URL itself.
+	presign bool
+}
+
+func (s *Service) ready(ctx context.Context, asset model.Asset) (readyStorage, error) {
+	if model.IsPlatformConnection(asset.StorageConnectionID) {
+		return readyStorage{storage: s.storage, bucket: s.cfg.Bucket, prefix: s.cfg.Prefix, platform: true, presign: true}, nil
+	}
+	if s.router == nil {
+		return readyStorage{}, model.ErrStorageNotConfigured
+	}
+	loc, err := s.router.Locate(ctx, asset.TenantID, asset.StorageConnectionID)
+	if err != nil {
+		return readyStorage{}, err
+	}
+	return readyStorage{storage: loc.Storage, bucket: loc.ReadyBucket, prefix: loc.ReadyPrefix,
+		presign: loc.Capabilities.PresignedDownload}, nil
 }
 
 // Guard makes token links check their issuer's current access, and
@@ -252,7 +289,8 @@ func (s *Service) Metadata(ctx context.Context, principal model.Principal, asset
 		RejectionReason: asset.RejectionReason, PublishedAt: asset.PublishedAt,
 		CreatedAt: asset.CreatedAt, UpdatedAt: asset.UpdatedAt,
 	}
-	if asset.Status == model.AssetStatusAvailable && asset.ObjectKey == s.promotedKey(asset) {
+	r, err := s.ready(ctx, asset)
+	if err == nil && asset.Status == model.AssetStatusAvailable && asset.ObjectKey == promotedKey(r.prefix, asset) {
 		info.Deliverable = true
 		info.ETag = entityTag(asset)
 	}
@@ -275,9 +313,17 @@ func (s *Service) CreateDownloadURL(ctx context.Context, principal model.Princip
 		return DownloadURL{}, fmt.Errorf("%w: token links are not enabled", ErrInvalidRequest)
 	}
 
-	asset, err := s.deliverable(ctx, principal, assetID, model.DeliveryOpDownloadURL, req.RequestID)
+	asset, r, err := s.deliverable(ctx, principal, assetID, model.DeliveryOpDownloadURL, req.RequestID)
 	if err != nil {
 		return DownloadURL{}, err
+	}
+	if mode == ModeStorage && !r.presign {
+		// The connection cannot sign a URL (an Azure SAS-token connection):
+		// a token link streams through the API instead.
+		if s.tokens == nil {
+			return DownloadURL{}, fmt.Errorf("%w: this asset's storage cannot sign download URLs", ErrInvalidRequest)
+		}
+		mode = ModeToken
 	}
 
 	ttl := req.TTL
@@ -301,14 +347,14 @@ func (s *Service) CreateDownloadURL(ctx context.Context, principal model.Princip
 			return fail("token_issue_failed", err)
 		}
 		result = DownloadURL{URL: TokenPathPrefix + raw, ExpiresAt: expiresAt, Via: ModeToken, Revocable: true}
-	case s.cfg.CDN != nil:
+	case s.cfg.CDN != nil && r.platform:
 		signed, err := s.cfg.CDN.Signer.SignURL(s.cdnURL(asset.ObjectKey), expiresAt)
 		if err != nil {
 			return fail("cdn_signing_failed", err)
 		}
 		result = DownloadURL{URL: signed, ExpiresAt: expiresAt, Via: "cdn"}
 	default:
-		presigned, err := s.storage.PresignGet(ctx, s.cfg.Bucket, asset.ObjectKey, ttl, interfaces.DownloadOptions{
+		presigned, err := r.storage.PresignGet(ctx, r.bucket, asset.ObjectKey, ttl, interfaces.DownloadOptions{
 			ContentDisposition: attachment(req.Filename, asset.FileName),
 			ContentType:        SafeContentType(asset.ContentType),
 			VersionID:          asset.StorageVersionID,
@@ -337,11 +383,11 @@ func (s *Service) CreateDownloadURL(ctx context.Context, principal model.Princip
 // Open authorizes a proxied download and opens the requested byte range.
 // Authorization runs on every request, unlike a presigned URL.
 func (s *Service) Open(ctx context.Context, principal model.Principal, assetID string, req DownloadRequest) (Download, error) {
-	asset, err := s.deliverable(ctx, principal, assetID, model.DeliveryOpProxy, req.RequestID)
+	asset, r, err := s.deliverable(ctx, principal, assetID, model.DeliveryOpProxy, req.RequestID)
 	if err != nil {
 		return Download{}, err
 	}
-	return s.open(ctx, principal, asset, model.DeliveryOpProxy, req)
+	return s.open(ctx, principal, asset, r, model.DeliveryOpProxy, req)
 }
 
 // OpenToken serves a token link. The token's issuer must still be allowed
@@ -384,14 +430,14 @@ func (s *Service) OpenToken(ctx context.Context, rawToken string, req DownloadRe
 		return Download{}, ErrTokenInvalid
 	}
 
-	asset, err := s.deliverable(ctx, principal, token.AssetID, model.DeliveryOpToken, req.RequestID)
+	asset, r, err := s.deliverable(ctx, principal, token.AssetID, model.DeliveryOpToken, req.RequestID)
 	if err != nil {
 		return Download{}, err
 	}
 	if req.Filename == "" {
 		req.Filename = token.Filename
 	}
-	return s.open(ctx, principal, asset, model.DeliveryOpToken, req)
+	return s.open(ctx, principal, asset, r, model.DeliveryOpToken, req)
 }
 
 // RevokeLinks revokes every token link the caller's asset has. Presigned
@@ -439,7 +485,7 @@ func (s *Service) TransferDone(d Download, bytesSent int64) {
 // open applies the conditional headers, validates the range against the
 // published size, pins the read to the published object version, audits
 // the decision and only then opens the stream.
-func (s *Service) open(ctx context.Context, principal model.Principal, asset model.Asset, operation string, req DownloadRequest) (Download, error) {
+func (s *Service) open(ctx context.Context, principal model.Principal, asset model.Asset, r readyStorage, operation string, req DownloadRequest) (Download, error) {
 	d := Download{
 		ContentType:        SafeContentType(asset.ContentType),
 		ContentDisposition: attachment(req.Filename, asset.FileName),
@@ -491,7 +537,7 @@ func (s *Service) open(ctx context.Context, principal model.Principal, asset mod
 	}
 	d.First, d.Last, d.Partial = first, last, partial
 
-	cond, err := s.readCondition(ctx, principal, asset, operation, req)
+	cond, err := s.readCondition(ctx, principal, asset, r, operation, req)
 	if err != nil {
 		return d, err
 	}
@@ -509,7 +555,7 @@ func (s *Service) open(ctx context.Context, principal model.Principal, asset mod
 	if !partial {
 		requestLast = -1
 	}
-	body, err := s.storage.OpenRange(ctx, s.cfg.Bucket, asset.ObjectKey, first, requestLast, cond)
+	body, err := r.storage.OpenRange(ctx, r.bucket, asset.ObjectKey, first, requestLast, cond)
 	if err != nil {
 		return Download{}, s.storageError(ctx, principal, asset, operation, req.RequestID, err)
 	}
@@ -528,13 +574,13 @@ func (s *Service) open(ctx context.Context, principal model.Principal, asset mod
 // against a fresh HEAD (size must match), and that ETag is used for the
 // read, so one response never mixes versions. A HEAD request also checks
 // the stored object, so it answers like the GET would.
-func (s *Service) readCondition(ctx context.Context, principal model.Principal, asset model.Asset, operation string, req DownloadRequest) (interfaces.ReadCondition, error) {
+func (s *Service) readCondition(ctx context.Context, principal model.Principal, asset model.Asset, r readyStorage, operation string, req DownloadRequest) (interfaces.ReadCondition, error) {
 	cond := interfaces.ReadCondition{IfMatch: asset.StorageETag, VersionID: asset.StorageVersionID}
 	if cond.IfMatch != "" && !req.HeadOnly {
 		return cond, nil
 	}
 
-	stored, err := s.storage.HeadObject(ctx, s.cfg.Bucket, asset.ObjectKey)
+	stored, err := r.storage.HeadObject(ctx, r.bucket, asset.ObjectKey)
 	if err != nil {
 		return cond, s.storageError(ctx, principal, asset, operation, req.RequestID, err)
 	}
@@ -615,30 +661,35 @@ func (s *Service) owned(ctx context.Context, principal model.Principal, assetID 
 // deliverable is owned plus the delivery rules: AVAILABLE (so verified,
 // validated, scanned and promoted), and stored at the promoted key derived
 // from its tenant and ID.
-func (s *Service) deliverable(ctx context.Context, principal model.Principal, assetID, operation, requestID string) (model.Asset, error) {
+func (s *Service) deliverable(ctx context.Context, principal model.Principal, assetID, operation, requestID string) (model.Asset, readyStorage, error) {
 	asset, err := s.owned(ctx, principal, assetID, model.PermAssetsDownload)
 	switch {
 	case errors.Is(err, model.ErrUnauthenticated), errors.Is(err, model.ErrForbidden), errors.Is(err, model.ErrTenantRequired):
 		s.deny(ctx, principal, assetID, operation, requestID, "forbidden")
-		return model.Asset{}, err
+		return model.Asset{}, readyStorage{}, err
 	case errors.Is(err, ErrNotFound):
 		s.deny(ctx, principal, assetID, operation, requestID, "not_found")
-		return model.Asset{}, err
+		return model.Asset{}, readyStorage{}, err
 	case err != nil:
-		return model.Asset{}, err
+		return model.Asset{}, readyStorage{}, err
 	}
 
 	if asset.Status != model.AssetStatusAvailable {
 		s.deny(ctx, principal, assetID, operation, requestID, strings.ToLower(string(asset.Status)))
-		return model.Asset{}, ErrNotAvailable
+		return model.Asset{}, readyStorage{}, ErrNotAvailable
 	}
-	if asset.ObjectKey != s.promotedKey(asset) {
+	r, err := s.ready(ctx, asset)
+	if err != nil {
+		s.fail(ctx, principal, assetID, operation, requestID, "storage_connection", err)
+		return model.Asset{}, readyStorage{}, ErrStorageUnavailable
+	}
+	if asset.ObjectKey != promotedKey(r.prefix, asset) {
 		s.log.Error("available asset is not at its promoted key; refusing delivery",
 			"asset_id", asset.ID, "tenant_id", asset.TenantID)
 		s.deny(ctx, principal, assetID, operation, requestID, "key_mismatch")
-		return model.Asset{}, ErrNotAvailable
+		return model.Asset{}, readyStorage{}, ErrNotAvailable
 	}
-	return asset, nil
+	return asset, r, nil
 }
 
 func (s *Service) issueToken(ctx context.Context, principal model.Principal, asset model.Asset, filename string, expiresAt time.Time) (string, error) {
@@ -657,8 +708,10 @@ func (s *Service) issueToken(ctx context.Context, principal model.Principal, ass
 	return raw, nil
 }
 
-func (s *Service) promotedKey(asset model.Asset) string {
-	return fmt.Sprintf("%s/%s/%s", s.cfg.Prefix, asset.TenantID, asset.ID)
+// promotedKey is where promotion puts an asset under its connection's
+// ready prefix.
+func promotedKey(prefix string, asset model.Asset) string {
+	return fmt.Sprintf("%s/%s/%s", prefix, asset.TenantID, asset.ID)
 }
 
 // cdnURL is the CDN URL for an object key, each segment escaped.

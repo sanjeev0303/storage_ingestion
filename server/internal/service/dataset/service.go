@@ -70,6 +70,9 @@ type Dependencies struct {
 	// them, content checks are reported as not assessed.
 	Content       ContentReader
 	ContentBucket string
+	// Router reads members stored on tenants' storage connections; without
+	// it they are not examined.
+	Router interfaces.StorageRouter
 	// Quotas, when set, lowers the manifest limits for tenants with
 	// smaller quotas.
 	Quotas  Quotas
@@ -328,6 +331,9 @@ type UpdateInput struct {
 	Metadata       map[string]*string
 	ProfileID      *string
 	ProfileVersion *int
+	// StorageConnectionID sends the dataset's new uploads to a storage
+	// connection ("" returns them to the default). Needs storage.use.
+	StorageConnectionID *string
 }
 
 // Update changes a dataset if it is still at revision.
@@ -342,7 +348,13 @@ func (s *Service) Update(ctx context.Context, p model.Principal, datasetID strin
 	if err != nil {
 		return model.Dataset{}, err
 	}
-	patch := interfaces.DatasetPatch{Description: in.Description, Tags: in.Tags, ProfileID: in.ProfileID, ProfileVersion: in.ProfileVersion}
+	if in.StorageConnectionID != nil {
+		if err := s.authorize(ctx, p, model.PermStorageUse, "dataset.update", "dataset", datasetID); err != nil {
+			return model.Dataset{}, err
+		}
+	}
+	patch := interfaces.DatasetPatch{Description: in.Description, Tags: in.Tags, ProfileID: in.ProfileID, ProfileVersion: in.ProfileVersion,
+		StorageConnectionID: in.StorageConnectionID}
 	description, tags := current.Description, current.Tags
 	if in.Description != nil {
 		description = *in.Description

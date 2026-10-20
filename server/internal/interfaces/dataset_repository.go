@@ -104,6 +104,8 @@ type DatasetPatch struct {
 	Metadata       *map[string]string
 	ProfileID      *string
 	ProfileVersion *int
+	// StorageConnectionID chooses the dataset's connection; "" clears it.
+	StorageConnectionID *string
 }
 
 // ObjectRef names a catalog object by ID or by namespace and path key, and

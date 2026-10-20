@@ -144,7 +144,8 @@ func TestClassification(t *testing.T) {
 	e.jobs.Put(model.ProcessingJob{ID: "job-held", TenantID: "t1", AssetID: "held", State: model.ProcessingExhausted})
 	e.asset("soft", model.AssetStatusSoftDeleted, "assets/t1/soft")
 	svc := e.service()
-	delivery, quarantine := svc.areas()[1], svc.areas()[0]
+	areas, _ := svc.areas(context.Background())
+	delivery, quarantine := areas[1], areas[0]
 	old := e.clock.Add(-2 * time.Hour)
 
 	cases := []struct {
@@ -361,7 +362,7 @@ func TestScanResumesFromItsCheckpoint(t *testing.T) {
 	if !slices.Equal(seen, []int{2, 2, 1}) {
 		t.Fatalf("objects per run %v; the scan must resume, not restart", seen)
 	}
-	last, ok, _ := e.inventory.LastCompleted(context.Background(), "bucket", "assets/t1/")
+	last, ok, _ := e.inventory.LastCompleted(context.Background(), "", "bucket", "assets/t1/")
 	if !ok || last.ObjectsSeen != 5 || last.Pages != 3 {
 		t.Fatalf("the completed scan must cover every object once: %+v", last)
 	}

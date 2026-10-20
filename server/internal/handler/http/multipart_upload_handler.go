@@ -64,6 +64,8 @@ func (h *MultipartUploadHandler) start(
 		Path:           body.Path,
 		Metadata:       body.Metadata,
 		CreateOnly:     body.CreateOnly,
+
+		StorageConnectionID: body.StorageConnectionID,
 	})
 	if err != nil {
 		h.fail(w, err)
@@ -75,6 +77,8 @@ func (h *MultipartUploadHandler) start(
 		Status:    string(result.Session.Status),
 		ExpiresAt: result.Session.ExpiresAt,
 		Reused:    result.Reused,
+
+		StorageConnectionID: boundConnection(result.Session.StorageConnectionID),
 	})
 }
 
@@ -208,6 +212,10 @@ func (h *MultipartUploadHandler) fail(w nethttp.ResponseWriter, err error) {
 	case errors.Is(err, model.ErrUploadNotFound), errors.Is(err, uploadservice.ErrObjectNotUploaded),
 		errors.Is(err, uploadservice.ErrObjectSizeMismatch):
 		uploadFail(w, h.log, err)
+	case errors.Is(err, uploadservice.ErrMultipartStartPending), errors.Is(err, uploadservice.ErrOperationPending):
+		writeMultipartError(w, err)
+	case storageConnectionError(err):
+		writeSecurityError(w, h.log, err)
 	default:
 		writeMultipartError(w, err)
 	}

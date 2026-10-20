@@ -21,6 +21,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/infrastructure/database/postgres"
 	sqsqueue "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/queue/sqs"
 	"github.com/sanjeev0303/object-storage-platform/internal/infrastructure/scanner/clamav"
+	storageregistry "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/registry"
 	s3storage "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/s3"
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
@@ -136,6 +137,20 @@ func run() error {
 	}
 
 	registry := metrics.New()
+	// Records bound to tenants' storage connections are reached through
+	// those connections (Phase 11); without BYOS they do not resolve.
+	storageCfg, err := config.LoadStorage()
+	if err != nil {
+		return fmt.Errorf("load storage connection configuration: %w", err)
+	}
+	router, err := storageregistry.ForProcess(storageCfg, storage, bucket, destinationBucket, workerCfg.PromotionPrefix,
+		postgres.NewStorageConnectionRepository(db), registry)
+	if err != nil {
+		return fmt.Errorf("configure storage connections: %w", err)
+	}
+	multipartService.Route(nil, router)
+	promoter.Route(router)
+
 	deps := processingservice.Dependencies{
 		Jobs:       postgres.NewProcessingJobRepository(db),
 		Assets:     assets,
@@ -155,6 +170,7 @@ func run() error {
 		Validators: validators,
 		Promoter:   promoter,
 		Metrics:    registry,
+		Router:     router,
 	}
 	if workerCfg.Scanner == "clamav" {
 		deps.Scanner = clamav.New(workerCfg.ClamAVAddress, workerCfg.ClamAVTimeout)

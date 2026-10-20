@@ -69,6 +69,9 @@ type CatalogObject struct {
 	ContentType    string
 	ChecksumSHA256 string
 	PublishedAt    *time.Time
+	// StorageConnectionID is the connection holding the current version's
+	// bytes ("" with no current version).
+	StorageConnectionID string
 	// Versions counts the versions ever published.
 	Versions int
 	// DeletedAt is set by a logical deletion, until a new version is

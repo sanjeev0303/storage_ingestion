@@ -14,6 +14,7 @@ import (
 	httpapi "github.com/sanjeev0303/object-storage-platform/internal/handler/http"
 	"github.com/sanjeev0303/object-storage-platform/internal/infrastructure/cdn/cloudfront"
 	"github.com/sanjeev0303/object-storage-platform/internal/infrastructure/database/postgres"
+	storageregistry "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/registry"
 	s3storage "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/s3"
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
@@ -34,6 +35,7 @@ import (
 	ingestionservice "github.com/sanjeev0303/object-storage-platform/internal/service/ingestion"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/processing"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/quota"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/storageconn"
 	uploadservice "github.com/sanjeev0303/object-storage-platform/internal/service/upload"
 )
 
@@ -190,6 +192,39 @@ func run() error {
 		return objectStorage.Capabilities(r.Context(), deliveryBucket)
 	}
 
+	// Storage connections (Phase 11). Uploads, delivery and lifecycle
+	// reach a record's bytes through the connection it is bound to; the
+	// platform's buckets work as before. Tenants' connections resolve only
+	// with BYOS enabled and its credential keys configured.
+	storageCfg, err := config.LoadStorage()
+	if err != nil {
+		return fmt.Errorf("load storage connection configuration: %w", err)
+	}
+	deliveryPrefix := "assets"
+	if dc, err := config.LoadDelivery(); err == nil && dc.Prefix != "" {
+		deliveryPrefix = dc.Prefix
+	}
+	storageMetrics := metrics.New()
+	connections := postgres.NewStorageConnectionRepository(db)
+	storageRegistry, err := storageregistry.ForProcess(storageCfg, objectStorage, bucket, deliveryBucket, deliveryPrefix, connections, storageMetrics)
+	if err != nil {
+		return fmt.Errorf("configure storage connections: %w", err)
+	}
+	uploadService.Route(storageRegistry, storageRegistry)
+	multipartService.Route(storageRegistry, storageRegistry)
+	routes.Delivery.Route(storageRegistry)
+	routes.Lifecycle.Route(storageRegistry)
+	sealer, err := storageregistry.Sealer(storageCfg)
+	if err != nil {
+		return fmt.Errorf("configure storage connections: %w", err)
+	}
+	routes.StorageConnections, err = storageconn.NewService(storageconn.Dependencies{
+		Connections: connections, Sealer: sealer, Clients: storageRegistry, Audit: auditService, Log: log,
+	}, storageCfg, storageregistry.Policy(storageCfg))
+	if err != nil {
+		return fmt.Errorf("configure storage connections: %w", err)
+	}
+
 	// Managed datasets. The API records imports and validations; the
 	// dataset worker runs them, so this service reads no object content.
 	datasetConfig, err := config.LoadDatasets()
@@ -230,6 +265,7 @@ func run() error {
 	securityMetrics.Publish("security")
 	catalogMetrics.Publish("catalog")
 	datasetMetrics.Publish("datasets")
+	storageMetrics.Publish("storage")
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.HTTPPort,

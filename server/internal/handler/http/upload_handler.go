@@ -71,6 +71,9 @@ func (h *UploadHandler) Create(w http.ResponseWriter, r *http.Request) {
 		Status:    string(result.Upload.Status),
 		UploadURL: result.Plan.UploadURL,
 		ExpiresAt: result.Upload.ExpiresAt,
+
+		UploadHeaders:       result.Plan.Headers,
+		StorageConnectionID: boundConnection(result.Upload.StorageConnectionID),
 	})
 }
 
@@ -102,7 +105,7 @@ func (h *UploadHandler) fail(w http.ResponseWriter, err error) {
 	case errors.As(err, &quotaErr):
 		writeQuotaError(w, quotaErr)
 	case errors.Is(err, model.ErrForbidden), errors.Is(err, model.ErrTenantRequired), errors.Is(err, model.ErrUploadNotFound),
-		errors.Is(err, model.ErrPathExists), errors.Is(err, model.ErrPathBusy):
+		errors.Is(err, model.ErrPathExists), errors.Is(err, model.ErrPathBusy), storageConnectionError(err):
 		writeSecurityError(w, h.log, err)
 	case errors.Is(err, uploadservice.ErrInvalidRequest):
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -136,4 +139,13 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	_ = json.NewEncoder(w).Encode(errorResponse{
 		Error: message,
 	})
+}
+
+// boundConnection names a binding; records that never set one are the
+// platform's.
+func boundConnection(id string) string {
+	if model.IsPlatformConnection(id) {
+		return model.PlatformConnectionID
+	}
+	return id
 }

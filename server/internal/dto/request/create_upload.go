@@ -16,4 +16,7 @@ type CreateUploadRequest struct {
 	Path       string            `json:"path,omitempty"`
 	Metadata   map[string]string `json:"metadata,omitempty"`
 	CreateOnly bool              `json:"create_only,omitempty"`
+	// StorageConnectionID sends the upload to this storage connection
+	// instead of the organization's default (needs storage.use).
+	StorageConnectionID string `json:"storage_connection_id,omitempty"`
 }

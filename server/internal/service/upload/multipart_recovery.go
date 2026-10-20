@@ -32,7 +32,11 @@ func (s *MultipartService) ResolveInitiation(ctx context.Context, tenantID, uplo
 		return session.Status, nil
 	}
 
-	ids, err := s.storage.ListMultipartUploads(ctx, s.bucket, session.ObjectKey)
+	at, err := s.staging(ctx, session)
+	if err != nil {
+		return "", err
+	}
+	ids, err := at.storage.ListMultipartUploads(ctx, at.bucket, session.ObjectKey)
 	if err != nil {
 		return "", fmt.Errorf("list provider uploads: %w", err)
 	}
@@ -57,7 +61,7 @@ func (s *MultipartService) ResolveInitiation(ctx context.Context, tenantID, uplo
 		// Never expected, since nothing initiates twice. Keeping either one
 		// would be a guess, so remove them all and fail the session.
 		for _, id := range ids {
-			err := s.storage.AbortMultipart(ctx, s.bucket, session.ObjectKey, id)
+			err := at.storage.AbortMultipart(ctx, at.bucket, session.ObjectKey, id)
 			if err != nil && !errors.Is(err, interfaces.ErrStorageUploadNotFound) {
 				return "", fmt.Errorf("abort duplicate provider upload: %w", err)
 			}
@@ -83,7 +87,11 @@ func (s *MultipartService) ResolveCompletion(ctx context.Context, tenantID, uplo
 		return status, err
 	}
 
-	stored, err := s.storage.ListParts(ctx, s.bucket, session.ObjectKey, session.StorageUploadID)
+	at, err := s.staging(ctx, session)
+	if err != nil {
+		return "", err
+	}
+	stored, err := at.storage.ListParts(ctx, at.bucket, session.ObjectKey, session.StorageUploadID)
 	if errors.Is(err, interfaces.ErrStorageUploadNotFound) {
 		// Neither an object nor an upload. The upload may have completed
 		// between our two calls, so look for the object once more.
@@ -108,12 +116,12 @@ func (s *MultipartService) ResolveCompletion(ctx context.Context, tenantID, uplo
 	for _, part := range recorded {
 		asInput.Parts = append(asInput.Parts, CompletedPartInput{PartNumber: part.PartNumber, ETag: part.ETag})
 	}
-	parts, err := validateCompletion(session, recorded, asInput)
+	parts, err := validateCompletion(session, recorded, asInput, at.rules)
 	if err != nil {
 		return "", retry.Permanent(fmt.Errorf("provider parts cannot complete the upload: %w", err))
 	}
 
-	if err := s.storage.CompleteMultipart(ctx, s.bucket, session.ObjectKey, session.StorageUploadID, parts); err != nil {
+	if err := at.storage.CompleteMultipart(ctx, at.bucket, session.ObjectKey, session.StorageUploadID, parts); err != nil {
 		return "", err
 	}
 
@@ -124,7 +132,11 @@ func (s *MultipartService) ResolveCompletion(ctx context.Context, tenantID, uplo
 // session to COMPLETED, or to FAILED when its size is wrong. It returns
 // interfaces.ErrObjectNotFound while no object exists.
 func (s *MultipartService) confirmCompletion(ctx context.Context, session model.UploadSession) (model.UploadStatus, error) {
-	metadata, err := s.storage.HeadObject(ctx, s.bucket, session.ObjectKey)
+	at, err := s.staging(ctx, session)
+	if err != nil {
+		return "", err
+	}
+	metadata, err := at.storage.HeadObject(ctx, at.bucket, session.ObjectKey)
 	if err != nil {
 		return "", fmt.Errorf("inspect completed object: %w", err)
 	}
@@ -146,17 +158,21 @@ func (s *MultipartService) ResolveAbort(ctx context.Context, tenantID, uploadID 
 		return session.Status, nil
 	}
 
+	at, err := s.staging(ctx, session)
+	if err != nil {
+		return "", err
+	}
 	ids := []string{session.StorageUploadID}
 	if session.StorageUploadID == "" {
 		// Initiation may have taken effect without its ID being saved.
-		ids, err = s.storage.ListMultipartUploads(ctx, s.bucket, session.ObjectKey)
+		ids, err = at.storage.ListMultipartUploads(ctx, at.bucket, session.ObjectKey)
 		if err != nil {
 			return "", fmt.Errorf("list provider uploads: %w", err)
 		}
 	}
 
 	for _, id := range ids {
-		err := s.storage.AbortMultipart(ctx, s.bucket, session.ObjectKey, id)
+		err := at.storage.AbortMultipart(ctx, at.bucket, session.ObjectKey, id)
 		if err != nil && !errors.Is(err, interfaces.ErrStorageUploadNotFound) {
 			return "", fmt.Errorf("abort provider upload: %w", err)
 		}
@@ -164,9 +180,9 @@ func (s *MultipartService) ResolveAbort(ctx context.Context, tenantID, uploadID 
 
 	// "Upload not found" is also what a completed upload answers, so it
 	// alone does not prove the abort's goal. No object may remain either.
-	_, err = s.storage.HeadObject(ctx, s.bucket, session.ObjectKey)
+	_, err = at.storage.HeadObject(ctx, at.bucket, session.ObjectKey)
 	if err == nil {
-		if err := s.storage.DeleteObject(ctx, s.bucket, session.ObjectKey); err != nil {
+		if err := at.storage.DeleteObject(ctx, at.bucket, session.ObjectKey); err != nil {
 			return "", fmt.Errorf("delete object of aborted upload: %w", err)
 		}
 	} else if !errors.Is(err, interfaces.ErrObjectNotFound) {
@@ -229,14 +245,18 @@ func (s *MultipartService) VerifyIntegrity(ctx context.Context, tenantID, upload
 		return session.Status, nil
 	}
 
-	if session.ObjectKey != quarantineKey(session.TenantID, session.ID) {
+	at, err := s.staging(ctx, session)
+	if err != nil {
+		return "", err
+	}
+	if session.ObjectKey != at.key {
 		return s.finish(ctx, session, model.UploadStatusFailed, model.FailureObjectKeyMismatch)
 	}
 	if session.ChecksumSHA256 == "" {
 		return s.finish(ctx, session, model.UploadStatusFailed, model.FailureChecksumMissing)
 	}
 
-	metadata, err := s.storage.HeadObject(ctx, s.bucket, session.ObjectKey)
+	metadata, err := at.storage.HeadObject(ctx, at.bucket, session.ObjectKey)
 	if errors.Is(err, interfaces.ErrObjectNotFound) {
 		return s.finish(ctx, session, model.UploadStatusFailed, model.FailureUploadMissing)
 	}
@@ -247,7 +267,7 @@ func (s *MultipartService) VerifyIntegrity(ctx context.Context, tenantID, upload
 		return s.finish(ctx, session, model.UploadStatusFailed, model.FailureObjectSizeMismatch)
 	}
 
-	body, err := s.storage.OpenObject(ctx, s.bucket, session.ObjectKey)
+	body, err := at.storage.OpenObject(ctx, at.bucket, session.ObjectKey)
 	if err != nil {
 		return "", fmt.Errorf("open object for verification: %w", err)
 	}
