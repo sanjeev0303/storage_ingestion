@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -181,18 +182,26 @@ func run() error {
 			}
 		}()
 	}
+	// The consumer is waited for on shutdown, so no handler is cut off while
+	// the database it uses is closed.
+	var wg sync.WaitGroup
 	if ec.Queue == "sqs" {
 		consumer, err := ingestionConsumer(startupCtx, db, ec, svc, owner, log, registry)
 		if err != nil {
 			return err
 		}
-		go consumer.Run(ctx)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			consumer.Run(ctx)
+		}()
 		log.Info("ingestion consumer started", "queue", event.QueueIngestion)
 	}
 
 	log.Info("upload worker started", "owner", owner, "poll_interval", ic.PollInterval,
 		"global_upload_slots", ic.GlobalUploadSlots, "small_file_threshold", ic.SmallFileThreshold)
 	uploadworker.Run(ctx, svc, quotas, owner, ic.PollInterval, ic.ReconcileInterval, log)
+	wg.Wait()
 	log.Info("upload worker stopped")
 	return nil
 }

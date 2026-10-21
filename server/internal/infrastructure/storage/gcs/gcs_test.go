@@ -14,7 +14,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -74,6 +76,90 @@ func TestSignedURLsNeedAServiceAccountKey(t *testing.T) {
 	s := &Storage{}
 	if _, err := s.sign("b", "k", http.MethodGet, time.Now().Add(time.Minute), "", nil); !errors.Is(err, model.ErrUnsupportedProvider) {
 		t.Fatalf("no key, no signed URL: %v", err)
+	}
+}
+
+// A real (https) endpoint keeps the service account's credentials. Only a
+// plain-http emulator is called anonymously, and only it may go without a key.
+func TestAnHTTPSEndpointKeepsTheServiceAccount(t *testing.T) {
+	ctx := context.Background()
+	seen := make(chan string, 1)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"access_token":"test-token","token_type":"Bearer","expires_in":3600}`)
+			return
+		}
+		select {
+		case seen <- r.Header.Get("Authorization"):
+		default:
+		}
+		http.Error(w, `{"error":{"code":404,"message":"not found"}}`, http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	var key map[string]string
+	if err := json.Unmarshal(serviceAccount(t), &key); err != nil {
+		t.Fatal(err)
+	}
+	key["token_uri"] = srv.URL + "/token"
+	keyJSON, _ := json.Marshal(key)
+
+	s, err := New(ctx, Config{ServiceAccountJSON: keyJSON, HTTPClient: srv.Client(), Endpoint: srv.URL + "/storage/v1/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.HeadObject(ctx, "b", "k"); !errors.Is(err, interfaces.ErrObjectNotFound) {
+		t.Fatalf("head through the endpoint: %v", err)
+	}
+	if got := <-seen; got != "Bearer test-token" {
+		t.Fatalf("calls to a real endpoint must carry the service account's token, got %q", got)
+	}
+
+	if _, err := New(ctx, Config{HTTPClient: srv.Client(), Endpoint: srv.URL + "/storage/v1/"}); !errors.Is(err, model.ErrCredentialMissing) {
+		t.Fatalf("only an emulator may go without a key: %v", err)
+	}
+}
+
+// Every part sorts before its upload's marker, so an upload with more parts
+// than a page holds has its marker on a later page, and must still be found.
+// fake-gcs-server cuts a listing at maxResults without a next-page token, so
+// a stub pages the way GCS does.
+func TestAnUploadWithManyPartsIsStillListed(t *testing.T) {
+	ctx := context.Background()
+	const key, id = "staging/t1/many", "u1"
+	var names []string
+	for n := int32(1); n <= 1001; n++ {
+		names = append(names, partKey(key, id, n))
+	}
+	names = append(names, markerKey(key, id))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start, _ := strconv.Atoi(r.URL.Query().Get("pageToken"))
+		size, _ := strconv.Atoi(r.URL.Query().Get("maxResults"))
+		if size <= 0 || size > 1000 {
+			size = 1000
+		}
+		end := min(start+size, len(names))
+		var items []map[string]string
+		for _, name := range names[start:end] {
+			items = append(items, map[string]string{"name": name, "bucket": "b", "timeCreated": "2026-10-21T00:00:00Z"})
+		}
+		page := map[string]any{"kind": "storage#objects", "items": items}
+		if end < len(names) {
+			page["nextPageToken"] = strconv.Itoa(end)
+		}
+		_ = json.NewEncoder(w).Encode(page)
+	}))
+	defer srv.Close()
+
+	s, err := New(ctx, Config{HTTPClient: srv.Client(), Endpoint: srv.URL + "/storage/v1/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if ids, err := s.ListMultipartUploads(ctx, "b", key); err != nil || len(ids) != 1 || ids[0] != id {
+		t.Fatalf("the marker is past the first page and must still be found: %v %v", ids, err)
 	}
 }
 

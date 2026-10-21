@@ -130,6 +130,11 @@ func enqueue(ctx context.Context, tx pgx.Tx, now time.Time, maxAttempts int, upl
 		WHERE s.status IN ('COMPLETED', 'VERIFIED')
 		  AND ($2 = '' OR s.id = $2)
 		  AND NOT EXISTS (SELECT 1 FROM assets AS a WHERE a.upload_id = s.id)
+		  -- The binding trigger refuses a deleted connection, and one refused
+		  -- row would fail this statement for every tenant. Such an upload
+		  -- stays COMPLETED, without an asset, for an operator to look at.
+		  AND NOT EXISTS (SELECT 1 FROM storage_connections AS c
+		                  WHERE c.id IN (s.storage_connection_id, s.staging_connection_id) AND c.status = 'DELETED')
 		ON CONFLICT DO NOTHING
 	`, now, uploadID)
 	if err != nil {

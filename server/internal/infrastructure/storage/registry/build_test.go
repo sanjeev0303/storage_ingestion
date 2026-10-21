@@ -129,6 +129,13 @@ func TestMinIOAsAnS3CompatibleConnection(t *testing.T) {
 	if err != nil || meta.SizeBytes != int64(len(data)) {
 		t.Fatalf("streaming write: %+v %v", meta, err)
 	}
+	// A source that ends early fails instead of storing a truncated object.
+	if _, err := p.WriteObject(ctx, bucket, prefix+"short", bytes.NewReader(data[:7<<20]), int64(len(data)), "application/octet-stream"); err == nil {
+		t.Fatal("a short source must not complete the object")
+	}
+	if _, err := p.HeadObject(ctx, bucket, prefix+"short"); !errors.Is(err, interfaces.ErrObjectNotFound) {
+		t.Fatalf("no truncated object is left behind: %v", err)
+	}
 	r, err := p.OpenRange(ctx, bucket, prefix+"big", 5<<20, 5<<20+3, interfaces.ReadCondition{IfMatch: meta.ETag})
 	if err != nil {
 		t.Fatal(err)

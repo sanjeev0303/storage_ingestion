@@ -34,14 +34,24 @@ type fakeScanner struct {
 	pingErr error
 	calls   int
 	during  func(ctx context.Context) error
+	onPing  func()
+	partial int64 // when set, read only this many bytes before answering
 }
 
 func (f *fakeScanner) Name() string { return "fake" }
 
-func (f *fakeScanner) Ping(context.Context) error { return f.pingErr }
+func (f *fakeScanner) Ping(context.Context) error {
+	if f.onPing != nil {
+		f.onPing()
+	}
+	return f.pingErr
+}
 
 func (f *fakeScanner) Scan(ctx context.Context, content io.Reader) interfaces.ScanResult {
 	f.calls++
+	if f.partial > 0 {
+		content = io.LimitReader(content, f.partial)
+	}
 	if _, err := io.Copy(io.Discard, content); err != nil {
 		return interfaces.ScanResult{Outcome: model.ScanError, Detail: "read failed"}
 	}
@@ -342,6 +352,43 @@ func TestOversizedFileIsRejectedBeforeReading(t *testing.T) {
 }
 
 // ─── Scanning ────────────────────────────────────────────────────────
+
+// Bytes swapped in quarantine after verification are never published as
+// scanned: here a clean object is scanned in place of the verified one,
+// which is put back before the copy.
+func TestContentSwappedAfterVerificationIsNotPromoted(t *testing.T) {
+	h := newHarness()
+	h.goodUpload(t, "up-1")
+	key := "quarantine/" + tenant + "/up-1"
+	scanned := []byte("%PDF-1.7\n" + strings.Repeat("y", 600))
+	h.scanner.onPing = func() { h.storage.PutObject(key, scanned) }
+	h.scanner.during = func(context.Context) error { h.storage.PutObject(key, pdfBytes); return nil }
+	h.run(t, h.service(t, "worker-a"))
+
+	asset := h.onlyAsset(t)
+	if asset.Status != model.AssetStatusRejected || asset.RejectionReason != model.FailureChecksumMismatch {
+		t.Fatalf("expected REJECTED/%s, got %s/%s", model.FailureChecksumMismatch, asset.Status, asset.RejectionReason)
+	}
+	if h.storage.CopyCalls != 0 {
+		t.Fatal("bytes the scanner did not see must never be copied out of quarantine")
+	}
+}
+
+// A scanner that answers CLEAN without reading the whole object has not
+// scanned it: that is an incomplete scan, retried and finally held.
+func TestAScanThatStopsEarlyIsIncomplete(t *testing.T) {
+	h := newHarness()
+	h.goodUpload(t, "up-1")
+	h.scanner.partial = 10
+	h.run(t, h.service(t, "worker-a"))
+
+	if asset := h.onlyAsset(t); asset.Status == model.AssetStatusAvailable {
+		t.Fatal("an object scanned only in part must not be promoted")
+	}
+	if job := h.onlyJob(t); job.ScanResult != model.ScanError || h.storage.CopyCalls != 0 {
+		t.Fatalf("expected an incomplete scan and no copy, got %s (copies %d)", job.ScanResult, h.storage.CopyCalls)
+	}
+}
 
 func TestMalwareIsRejectedAndRecorded(t *testing.T) {
 	h := newHarness()

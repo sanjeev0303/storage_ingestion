@@ -32,6 +32,15 @@ func TestLoadStorageKeys(t *testing.T) {
 	}
 }
 
+func TestAShortSecretInsideTheKeyIsNotReuse(t *testing.T) {
+	t.Setenv("BYOS_ENABLED", "true")
+	t.Setenv("STORAGE_CREDENTIAL_KEYS", "1:"+testKey(19)) // "ExMTExMT...", which contains "x"
+	t.Setenv("SQS_SECRET_ACCESS_KEY", "x")
+	if _, err := LoadStorage(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLoadStorageRefusesBadKeys(t *testing.T) {
 	cases := map[string]map[string]string{
 		"missing":   {"STORAGE_CREDENTIAL_KEYS": ""},

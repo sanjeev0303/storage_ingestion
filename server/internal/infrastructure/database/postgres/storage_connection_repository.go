@@ -261,11 +261,15 @@ func (r *StorageConnectionRepository) SetStatus(ctx context.Context, tenantID, c
 	return c, nil
 }
 
+// A completed upload is still work until its asset exists: deleting its
+// connection first would leave nothing to process it with.
 const dependentsQuery = `
 	SELECT
-	    (SELECT count(*) FROM upload_sessions WHERE tenant_id = $1
-	        AND (storage_connection_id = $2 OR staging_connection_id = $2)
-	        AND status IN ('PENDING', 'UPLOADING', 'COMPLETING', 'ABORTING')),
+	    (SELECT count(*) FROM upload_sessions AS s WHERE s.tenant_id = $1
+	        AND (s.storage_connection_id = $2 OR s.staging_connection_id = $2)
+	        AND (s.status IN ('PENDING', 'UPLOADING', 'COMPLETING', 'ABORTING')
+	             OR (s.status IN ('COMPLETED', 'VERIFIED')
+	                 AND NOT EXISTS (SELECT 1 FROM assets AS a WHERE a.upload_id = s.id)))),
 	    (SELECT count(*) FROM assets WHERE tenant_id = $1
 	        AND (storage_connection_id = $2 OR staging_connection_id = $2) AND status <> 'DELETED'),
 	    (SELECT count(*) FROM datasets WHERE tenant_id = $1 AND storage_connection_id = $2),

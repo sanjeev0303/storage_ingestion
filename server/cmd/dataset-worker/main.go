@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -147,17 +148,25 @@ func run() error {
 			}
 		}()
 	}
+	// The consumer is waited for on shutdown, so no handler is cut off while
+	// the database it uses is closed.
+	var wg sync.WaitGroup
 	if ec.Queue == "sqs" {
 		consumer, err := datasetConsumer(startupCtx, db, ec, dc, svc, owner, log, registry)
 		if err != nil {
 			return err
 		}
-		go consumer.Run(ctx)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			consumer.Run(ctx)
+		}()
 		log.Info("dataset consumer started", "queue", event.QueueDatasets)
 	}
 
 	log.Info("dataset worker started", "owner", owner, "poll_interval", dc.PollInterval, "slots", dc.WorkerSlots)
 	datasetworker.Run(ctx, svc, owner, dc.WorkerSlots, dc.PollInterval, log)
+	wg.Wait()
 	log.Info("dataset worker stopped")
 	return nil
 }

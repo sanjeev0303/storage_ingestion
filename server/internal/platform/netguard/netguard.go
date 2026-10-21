@@ -43,7 +43,10 @@ func DefaultPolicy() Policy {
 
 // alwaysBlocked are addresses no policy allows: "this network",
 // carrier-grade NAT (which hosts some clouds' metadata services), IETF
-// protocol assignments, benchmarking and reserved ranges.
+// protocol assignments, benchmarking and reserved ranges, IPv6 ranges that
+// translate or tunnel to an IPv4 address (NAT64, 6to4, Teredo) and so could
+// reach a private one, and AWS's IPv6 metadata service, which sits inside
+// the private fd00::/8 range.
 var alwaysBlocked = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),
 	netip.MustParsePrefix("100.64.0.0/10"),
@@ -51,6 +54,10 @@ var alwaysBlocked = []netip.Prefix{
 	netip.MustParsePrefix("198.18.0.0/15"),
 	netip.MustParsePrefix("240.0.0.0/4"),
 	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("2001::/32"),
+	netip.MustParsePrefix("fd00:ec2::254/128"),
 }
 
 // Blocked reports whether a client may not connect to ip.
@@ -62,14 +69,15 @@ func (p Policy) Blocked(ip netip.Addr) bool {
 		// Link-local includes 169.254.169.254, the metadata service of
 		// most clouds.
 		return true
-	case ip.IsLoopback(), ip.IsPrivate():
-		// Private includes fd00::/8, where AWS keeps its IPv6 metadata.
-		return !p.AllowPrivate
 	}
+	// Checked before the private ranges, which AllowPrivate opens.
 	for _, prefix := range alwaysBlocked {
 		if prefix.Contains(ip) {
 			return true
 		}
+	}
+	if ip.IsLoopback() || ip.IsPrivate() {
+		return !p.AllowPrivate
 	}
 	return false
 }
