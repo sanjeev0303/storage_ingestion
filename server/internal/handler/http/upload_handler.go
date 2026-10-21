@@ -73,7 +73,7 @@ func (h *UploadHandler) Create(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt: result.Upload.ExpiresAt,
 
 		UploadHeaders:       result.Plan.Headers,
-		StorageConnectionID: boundConnection(result.Upload.StorageConnectionID),
+		StorageConnectionID: result.Upload.StorageConnectionID,
 	})
 }
 
@@ -139,13 +139,4 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	_ = json.NewEncoder(w).Encode(errorResponse{
 		Error: message,
 	})
-}
-
-// boundConnection names a binding; records that never set one are the
-// platform's.
-func boundConnection(id string) string {
-	if model.IsPlatformConnection(id) {
-		return model.PlatformConnectionID
-	}
-	return id
 }

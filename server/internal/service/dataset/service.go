@@ -50,9 +50,10 @@ type ManifestStore interface {
 	OpenRange(ctx context.Context, bucket, objectKey string, first, last int64, cond interfaces.ReadCondition) (io.ReadCloser, error)
 }
 
-// ContentReader streams object versions' bytes, for content checks.
+// ContentReader streams object versions' bytes, for content checks: a
+// recorded provider version is read by its ID, never by the key alone.
 type ContentReader interface {
-	OpenObject(ctx context.Context, bucket, objectKey string) (io.ReadCloser, error)
+	OpenRange(ctx context.Context, bucket, objectKey string, first, last int64, cond interfaces.ReadCondition) (io.ReadCloser, error)
 }
 
 // Quotas gives a tenant's effective quota.

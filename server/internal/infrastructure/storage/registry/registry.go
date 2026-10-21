@@ -94,17 +94,34 @@ func (r *Registry) Platform() interfaces.StorageLocation { return r.deps.Platfor
 // Locate resolves a record's bound connection. A deleted, pending or
 // unknown connection, or one of another tenant, does not resolve.
 func (r *Registry) Locate(ctx context.Context, tenantID, connectionID string) (interfaces.StorageLocation, error) {
-	if connectionID == "" || connectionID == model.PlatformConnectionID {
+	if connectionID == model.PlatformConnectionID {
 		return r.deps.Platform, nil
 	}
-	c, err := r.row(ctx, tenantID, connectionID)
-	if err != nil {
-		return interfaces.StorageLocation{}, err
+	if connectionID == "" {
+		return interfaces.StorageLocation{}, fmt.Errorf("%w: the record has no storage binding", model.ErrConnectionNotFound)
 	}
-	if !c.HoldsWork() {
-		return interfaces.StorageLocation{}, fmt.Errorf("%w: it is %s", model.ErrConnectionNotActive, c.Status)
+	missing := 0 // the newest credential version found missing
+	for {
+		c, err := r.row(ctx, tenantID, connectionID)
+		if err != nil {
+			return interfaces.StorageLocation{}, err
+		}
+		if !c.HoldsWork() {
+			return interfaces.StorageLocation{}, fmt.Errorf("%w: it is %s", model.ErrConnectionNotActive, c.Status)
+		}
+		loc, err := r.location(ctx, c)
+		// Only the newest credential is stored: one missing at the row's
+		// version was rotated after the row was read, here or in another
+		// process. Read the row again, as long as that finds a newer version.
+		if errors.Is(err, model.ErrCredentialMissing) && c.CredentialVersion > missing {
+			missing = c.CredentialVersion
+			r.mu.Lock()
+			delete(r.rows, connectionID)
+			r.mu.Unlock()
+			continue
+		}
+		return loc, err
 	}
-	return r.location(ctx, c)
 }
 
 // ChooseForUpload picks the connection for a new upload: the one asked

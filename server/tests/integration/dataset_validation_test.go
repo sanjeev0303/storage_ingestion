@@ -349,6 +349,82 @@ func TestContentValidationModes(t *testing.T) {
 	}
 }
 
+// A snapshot names exact versions, and content checks read exactly those.
+// In a versioned bucket the recorded provider version is read, so bytes
+// written over the key later neither pass nor fail for it; a read that
+// fails leaves the member unexamined; a deleted version is missing. A new
+// catalog version at the same path changes only later snapshots. Without
+// provider versions the key is read, and an overwrite shows as a mismatch
+// (TestContentValidationModes).
+func TestContentValidationReadsTheSnapshotsVersions(t *testing.T) {
+	s := openSecurityStack(t, nil)
+	ctx := context.Background()
+	acme := s.team(t, "ds-pinned")
+	dev := acme.developer
+	s.ie.storage.Versioning = true
+	objs := s.publishObjects(t, dev, "pinned", 3)
+	for _, o := range objs {
+		if o.StorageVersionID == "" {
+			t.Fatalf("no provider version recorded: %+v", o)
+		}
+	}
+	d := s.newDataset(t, dev, "pinned")
+	for _, o := range objs {
+		s.addMembers(t, dev, d.ID, memberOf(o, "x", "train"))
+	}
+	v1, _, err := s.datasets.Snapshot(ctx, dev, d.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reread := s.profileOf(t, acme.admin, "pinned-reread", 0,
+		ruleOf("bytes", "content_checksum", model.SeverityError, `{"reverify":true}`))
+	full := datasetservice.ValidationInput{VersionID: v1.ID, ProfileID: reread.ID, Mode: model.ModeFull}
+
+	// Object 0's key is written over out of band, and object 2 gets a new
+	// catalog version at its path: v1's bytes are all still there.
+	s.ie.storage.PutObject(objs[0].ObjectKey, []byte("written over the key"))
+	newer := s.publishAt(t, dev, "pinned/item-02.txt", textData("pinned-2 again", 77))
+	job, report, body := s.validated(t, dev, d.ID, full, false)
+	if status, _, _ := body.result("bytes"); status != datasetservice.CheckPassed || report.Status != model.LifecycleReady ||
+		job.State != model.ValidationCompleted || body.Content.Read != 3 || body.Content.Examined != 3 {
+		t.Fatalf("pinned reads: %s %s %s %+v", status, report.Status, job.State, body.Content)
+	}
+
+	// A read that fails is not examined, and the check does not pass.
+	s.ie.storage.RangeErr = errors.New("storage unavailable")
+	_, _, body = s.validated(t, dev, d.ID, full, false)
+	if status, _, _ := body.result("bytes"); status == datasetservice.CheckPassed || body.Content.NotExamined != 1 {
+		t.Fatalf("an unread member passed: %s %+v", status, body.Content)
+	}
+
+	// Object 1's recorded version is deleted: missing, not a pass.
+	if err := s.ie.storage.DeleteObjectVersion(ctx, s.ie.bucket, objs[1].ObjectKey, objs[1].StorageVersionID); err != nil {
+		t.Fatal(err)
+	}
+	_, report, _ = s.validated(t, dev, d.ID, full, false)
+	findings := s.allFindings(t, dev, report.ID, "")
+	if codes := findingCodes(findings); codes["CONTENT_MISSING"] != 1 || len(codes) != 1 || findings[0].AssetID != objs[1].ID {
+		t.Fatalf("deleted version: %v", findings)
+	}
+
+	// The next snapshot names the new catalog version; v1 still names the old.
+	v2, _, err := s.datasets.Snapshot(ctx, dev, d.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned := func(v model.DatasetVersion) string {
+		for _, m := range s.versionMembers(t, dev, v) {
+			if m.ObjectID == objs[2].ObjectID {
+				return m.AssetID
+			}
+		}
+		return ""
+	}
+	if pinned(v1) != objs[2].ID || pinned(v2) != newer.ID {
+		t.Fatalf("v1 names %s, v2 names %s; want %s and %s", pinned(v1), pinned(v2), objs[2].ID, newer.ID)
+	}
+}
+
 func TestEvidenceRulesLeakageAndDuplicates(t *testing.T) {
 	s := openSecurityStack(t, nil)
 	ctx := context.Background()

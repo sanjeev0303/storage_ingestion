@@ -536,8 +536,11 @@ func (s *Service) readContents(ctx context.Context, owner string, job model.Vali
 // checkContent establishes one member's content integrity: from
 // processing's verification of the same bytes when there is one (unless
 // the rule asks to read again), otherwise by reading the bytes and
-// comparing their SHA-256 and size with the snapshot's records. Versions
-// that cannot be read are not examined; that is never a pass.
+// comparing their SHA-256 and size with the snapshot's records. A version
+// published to a versioned bucket is read by its provider version ID, so
+// an object written over the key later is not mistaken for it; without
+// one the key is read, and changed bytes show as a mismatch. Versions that
+// cannot be read are not examined; that is never a pass.
 func (s *Service) checkContent(ctx context.Context, tenantID string, rule *contentRule, m model.MemberEvidence) contentResult {
 	if m.AssetStatus != model.AssetStatusAvailable || m.ObjectKey == "" {
 		return contentResult{}
@@ -568,7 +571,7 @@ func (s *Service) checkContent(ctx context.Context, tenantID string, rule *conte
 	err := s.content.Do(ctx, func(ctx context.Context) error {
 		ctx, cancel := context.WithTimeout(ctx, s.cfg.ObjectTimeout)
 		defer cancel()
-		body, err := reader.OpenObject(ctx, bucket, m.ObjectKey)
+		body, err := reader.OpenRange(ctx, bucket, m.ObjectKey, 0, -1, interfaces.ReadCondition{VersionID: m.StorageVersionID})
 		if err != nil {
 			return err
 		}

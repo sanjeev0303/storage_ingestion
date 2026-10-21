@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"strings"
@@ -91,6 +92,39 @@ func TestPrivateAddressIsRefusedAtConnectTime(t *testing.T) {
 	_, err = p.HeadObject(ctx, "b", "k")
 	if !errors.Is(err, netguard.ErrRejected) {
 		t.Fatalf("the dial to a loopback address must be refused: %v", err)
+	}
+}
+
+// The registry closes a cached client when credentials rotate or the cache
+// evicts it, while requests that already hold the client may still use it.
+// The GCS SDK documents that uses after Close may panic; with its HTTP
+// transport (v1.68) they do not. This guards that against an upgrade.
+func TestAGCSClientIsUsableAfterTheCacheLetsItGo(t *testing.T) {
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"code":404,"message":"No such object"}}`))
+	}))
+	defer stub.Close()
+	policy := netguard.DefaultPolicy()
+	policy.AllowPrivate = true
+	c := model.StorageConnection{ID: "sc_gcs", TenantID: "t1", Provider: model.ProviderGCS, AuthMethod: model.AuthServiceAccountKey,
+		Bucket: "b", Endpoint: stub.URL}
+	// An http endpoint is an emulator: the key is parsed, never used to sign in.
+	key := `{"type":"service_account","client_email":"test@example.test","private_key":"unused"}`
+	p, closeClient, err := NewBuilder(policy, 16<<20).Build(context.Background(), c, model.StorageSecrets{ServiceAccountJSON: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeClient()
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("a request holding the client panicked after the cache closed it: %v", r)
+		}
+	}()
+	if _, err := p.HeadObject(context.Background(), "b", "missing"); !errors.Is(err, interfaces.ErrObjectNotFound) {
+		t.Fatalf("head after close: %v", err)
 	}
 }
 

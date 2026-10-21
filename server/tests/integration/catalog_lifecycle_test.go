@@ -191,9 +191,18 @@ func TestProviderVersioningIsRecordedWhereSupported(t *testing.T) {
 	if err != nil || report.Counts[model.FindingObjectMissing] != 0 || report.VersionsChecked != 2 {
 		t.Fatalf("both versions are found, each its own way: %+v %v", report, err)
 	}
-	// Overwritten out of band, the key holds another version now: the
-	// recorded one is reported (this store keeps only the newest).
+	// Overwritten out of band, the key holds another version now, but the
+	// recorded one is still there: it is what is checked.
 	s.ie.storage.PutObject(versioned.ObjectKey, textData("other", 40))
+	report, err = s.reconciler.Reconcile(ctx, catalog.ReconcileOptions{TenantID: acme.org.ID, DryRun: true, CheckStorage: true})
+	if err != nil || report.Counts[model.FindingObjectMissing] != 0 {
+		t.Fatalf("an overwrite of the key does not hide the recorded version: %+v %v", report, err)
+	}
+	// Once that version itself is gone it is reported, although the key
+	// still holds bytes.
+	if err := s.ie.storage.DeleteObjectVersion(ctx, s.ie.bucket, versioned.ObjectKey, versioned.StorageVersionID); err != nil {
+		t.Fatal(err)
+	}
 	report, err = s.reconciler.Reconcile(ctx, catalog.ReconcileOptions{TenantID: acme.org.ID, DryRun: true, CheckStorage: true})
 	if err != nil || report.Counts[model.FindingObjectMissing] != 1 || report.Findings[0].AssetID != versioned.ID {
 		t.Fatalf("the recorded version is checked, not the key: %+v %v", report, err)

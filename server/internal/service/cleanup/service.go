@@ -583,7 +583,7 @@ func (s *Service) checkAsset(ctx context.Context, asset model.Asset, stats *Cycl
 // locate resolves an asset's bound connection: the platform's own buckets,
 // or a tenant connection through the router.
 func (s *Service) locate(ctx context.Context, tenantID, connectionID string) (interfaces.LifecycleStorage, interfaces.StoragePlace, error) {
-	if connectionID == "" || connectionID == model.PlatformConnectionID {
+	if connectionID == model.PlatformConnectionID {
 		return s.deps.Storage, interfaces.StoragePlace{
 			ConnectionID:  model.PlatformConnectionID,
 			StagingBucket: s.cfg.QuarantineBucket, StagingPrefix: "quarantine",

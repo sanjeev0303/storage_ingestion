@@ -31,7 +31,7 @@ type binding struct {
 func chooseBinding(ctx context.Context, chooser interfaces.StorageChooser, p model.Principal, requested, dataset, uploadID string) (binding, error) {
 	b := binding{finalID: model.PlatformConnectionID, stagingID: model.PlatformConnectionID, key: quarantineKey(p.TenantID, uploadID)}
 	if chooser == nil {
-		if !model.IsPlatformConnection(requested) {
+		if requested != "" && !model.IsPlatformConnection(requested) {
 			return binding{}, fmt.Errorf("%w: %w", ErrInvalidRequest, model.ErrStorageNotConfigured)
 		}
 		return b, nil

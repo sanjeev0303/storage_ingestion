@@ -500,6 +500,40 @@ Where the time goes:
 - **End to end: processing.** Publication trails uploads: up to 1,102 entries waited for processing, and the oldest processing job waited 55–75 s. For large files ClamAV is busy (mean 188% CPU). The processing backlog limit (`INGESTION_TENANT_PROCESSING_BACKLOG`, 2,000 by default) is what holds uploads back when it grows.
 - **Not the Go processes.** Their heaps stay under 12 MiB; storage PUTs take 49–90 ms at the median.
 
+### Where the database's time goes (measured 2026-10-21)
+
+Same laptop, with authentication, quotas and storage connections in place. PostgreSQL 17 with default settings. The API, upload, processing and outbox workers run natively with `EVENT_QUEUE=sqs`, on a freshly migrated database. The per-organization request limits were raised (`RATE_LIMIT_UPLOAD_FINISH`, `RATE_LIMIT_UPLOAD_INIT` and `RATE_LIMIT_LISTING` set to `60000/1m`), so the client's requests are not throttled.
+
+`ingestion-loadgen -db` now also samples `pg_stat_activity` ten times a second. It records each active session's statement and what it waits on, and prints the busiest pairs as the average number of sessions in each. That shows where PostgreSQL spends its time, row-lock waits included.
+
+| Run | Upload phase | Published | Waiting on row locks (avg. sessions) | Committing (avg. sessions) |
+|---|---|---|---|---|
+| 2,000 files of 1–64 KiB, one tenant | 25.9 files/s | 10.4 files/s | 2.98 | 0.67 |
+| 2 × 1,000 files, two tenants at once | 20.6 files/s each, 41.2 together | 5.8 files/s each | 3.03 | 0.81 |
+| 1,000 files, processing concurrency 2 | 38.7 files/s | 13.2 files/s | | |
+| 1,000 files, processing concurrency 4 | 28.9 files/s | 12.7 files/s | | |
+| 1,000 files, processing concurrency 8 | 23.1 files/s | 9.6 files/s | 3.19 | 0.77 |
+
+Run-to-run variation on this machine is large (the same 1,000-file run gave 28.9–39.8 files/s). Read the table for its shape rather than its digits.
+
+What the samples show:
+
+- **The ceiling is per tenant, and it is two rows.** About three sessions on average wait for a row lock. Nearly all of them wait on two per-tenant rows:
+  - `ingestion_tenant_usage`: the ingestion counters, updated by every entry transition;
+  - `tenant_usage`: the quota counters, locked by every upload reservation (`lockStorageUsage`) and by every publication (`addUsage`).
+  
+  The job and dataset rows never appear, because they are locked after the usage row and so are already serialized behind it. A second tenant has its own rows and adds throughput (41.2 against 25.9 files/s).
+- **Why the rows are slow: commit, not queries.** From this host a statement round trip takes 0.54 ms at p50 and a small write's commit takes 3.3 ms (p95 4.3 ms). A reservation holds `tenant_usage` through four round trips and its commit, about 5.5 ms. The counts it makes under the lock use partial indexes (`ix_upload_sessions_active`, `ix_processing_jobs_pending_tenant`) and take tens of microseconds. So a tenant's transactions on one usage row run at most a couple of hundred per second, and every file needs several of them.
+- **More processing workers do not help.** Processing takes the same tenant rows (publication moves the quota and ingestion counters). Raising `PROCESSING_CONCURRENCY` from 2 to 8 lowered both the publish rate and the upload rate.
+- **Earlier hot spots.** The global `ingestion_capacity` row noted below for Phase 7 is gone. The job row is still updated by every transition, so once the usage rows stop serializing a tenant, it is the next limit for a single job.
+
+What would raise the ceiling. These are not implemented: each changes how hard limits are enforced, and needs its own review.
+
+1. **Reserve quota once per claim.** A claim grants up to `INGESTION_MAX_CLAIM` entries, and today each grant reserves quota in its own transaction (`CreateReservedUpload`). One reservation for the batch would lock `tenant_usage` once instead of 32 times. Claims measured 550–680 ms at p50 while their grants queued on that row. The batch reservation must keep each session's idempotency key and catalog path claim, and lock object rows in path order.
+2. **Fold publication into one counter change.** A publication updates both usage rows. Applying both in the transaction that already holds the ingestion counters, or batching publications per worker poll, halves the publish-side lock acquisitions.
+3. **Stripe the counters.** Give each tenant N usage rows. Releases and other decrements touch one row chosen at random. Admission locks all N in order and sums them, so hard limits stay exact; only admission pays for the stripes.
+4. **Asynchronous decrements.** Releases could append deltas that a worker folds into the row. Admission would then see usage that is slightly too high, which is safe for hard limits because it can only refuse early, but the API's usage figures lag.
+
 To reproduce, run the API and workers as in "Running it locally", then:
 
 ```bash
@@ -512,7 +546,7 @@ To reproduce, run the API and workers as in "Running it locally", then:
 
 ## Limitations
 
-- **A tenant's entry changes serialize on its usage row,** and a job's on its job row, because counters are kept in the same transaction as every change. That costs a ceiling per tenant: about 44 small files per second here. More tenants add throughput.
+- **A tenant's entry changes serialize on its usage rows** (`ingestion_tenant_usage`, and `tenant_usage` for quota), because counters are kept in the same transaction as every change and those rows are held through the commit. That costs a ceiling per tenant: 26–40 small files per second here. More tenants add throughput. See "Where the database's time goes" for the measurements and the options.
   - Upgrade path if one tenant needs more: shard the usage row, or append counter deltas and fold them asynchronously. The claim already serializes the only increments the limits depend on.
 - **Claims of all tenants take one lock.** A claim is short (20 ms uncontended), and a client should claim in batches (`max` up to `INGESTION_MAX_CLAIM`).
 - **Cancelling a very large job is a background task.** Claims stop at once, but the worker cancels at most `INGESTION_WORKER_BATCH` × 20 entries per pass: about 2,100 entries per second here, 476 s for a million. Raise `INGESTION_WORKER_BATCH` for faster bulk cancellation.

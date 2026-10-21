@@ -35,9 +35,11 @@ var (
 // to it.
 const PlatformConnectionID = "platform"
 
-// IsPlatformConnection tells whether a binding is the platform's. Records
-// and fakes that never set one ("") are.
-func IsPlatformConnection(id string) bool { return id == "" || id == PlatformConnectionID }
+// IsPlatformConnection tells whether a binding is the platform's. Every
+// stored record names its binding (the columns are NOT NULL, and records
+// older than connections were bound to "platform" by migration), so an
+// empty one is a lost binding, never the platform's: resolving it fails.
+func IsPlatformConnection(id string) bool { return id == PlatformConnectionID }
 
 // StorageProviderType names a storage provider.
 type StorageProviderType string

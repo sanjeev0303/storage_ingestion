@@ -100,7 +100,7 @@ Signing uses the key's private key locally; no `iam.serviceAccounts.signBlob` is
 - **Encryption.** Credentials are accepted only on create and rotate, and stored only as AES-256-GCM ciphertext (`internal/platform/secretbox`). The ciphertext is sealed with a dedicated 32-byte key from `STORAGE_CREDENTIAL_KEYS`. With BYOS on, a missing, malformed, all-zero or reused key (the database password, `S3_SECRET_ACCESS_KEY` and so on) stops the process at startup.
 - **Associated data.** Each ciphertext's associated data is `storage-credential/v1|<tenant>|<connection>|<provider>|<credential version>`. A ciphertext copied to another row, tenant, provider or version does not open.
 - **Where plaintext lives.** Plaintext exists only while a provider client is built; the buffer is cleared after decoding. `model.StorageSecrets` prints, logs and JSON-encodes as `[redacted credentials]`. No API response, audit event, log line, error, metric or queue message carries a credential. Provider error messages are reduced to categories.
-- **Credential rotation.** `POST /{id}/rotate-credentials` tests the new credentials first and stores them only if the test passes. It then bumps the credential version and drops cached clients in this process; other processes rebuild when their connection cache expires (`STORAGE_CONNECTION_CACHE_TTL`, 10 s). The old secret is never returned.
+- **Credential rotation.** `POST /{id}/rotate-credentials` tests the new credentials first and stores them only if the test passes. It then bumps the credential version and drops cached clients in this process; other processes rebuild when their connection cache expires (`STORAGE_CONNECTION_CACHE_TTL`, 10 s). Only the newest credential is stored, so a process that needs a new client while its cached row still names the old version re-reads the row instead of failing; clients it already holds keep working with the old secret until they are rebuilt. The old secret is never returned.
 - **Key rotation.**
   1. Add a new key version (`STORAGE_CREDENTIAL_KEYS=1:<old>,2:<new>`, `STORAGE_CREDENTIAL_KEY_VERSION=2`) on every process. New credentials are then sealed with version 2, and old ciphertexts still open with version 1.
   2. Rotate each connection's credentials to re-seal them.
@@ -187,6 +187,8 @@ The chosen connection must be the organization's own (or `platform`) and `ACTIVE
 - new uploads, dataset choices and defaults: an `ACTIVE` connection.
 
 Upload and asset bindings can never change once written.
+
+A binding is never empty: the columns are `NOT NULL` and records older than connections were bound to `platform` by the migration. Code that meets an empty binding treats it as lost, not as the platform's: resolving it fails, and nothing is read, written or deleted on the platform's bucket in its place.
 
 The upload response names `storage_connection_id`. A single upload also returns `upload_headers` the client must send (Azure needs `x-ms-blob-type: BlockBlob`). Idempotent retries replay the bound session; asking for a different connection with the same key is a conflict.
 

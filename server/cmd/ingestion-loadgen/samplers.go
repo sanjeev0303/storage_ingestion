@@ -35,6 +35,11 @@ type samplers struct {
 	dbErr     string
 	container map[string]*containerUse
 
+	// activity counts, per wait and statement, the active PostgreSQL
+	// sessions seen at each of activitySamples readings.
+	activity        map[string]int
+	activitySamples int
+
 	progress progressSample
 }
 
@@ -203,6 +208,52 @@ func (s *samplers) database(ctx context.Context, url string) error {
 					s.dbErr = err.Error()
 				}
 				s.mu.Unlock()
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	return nil
+}
+
+// statements samples PostgreSQL's active sessions ten times a second: each
+// one's statement (its opening text) and what it waits on, or CPU. Over a
+// run the counts show where the database's time goes, lock waits included.
+func (s *samplers) statements(ctx context.Context, url string) error {
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		return err
+	}
+	s.activity = map[string]int{}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		defer conn.Close(context.Background())
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			rows, err := conn.Query(ctx, `
+				SELECT COALESCE(wait_event_type || ':' || wait_event, 'CPU'), left(regexp_replace(query, '\s+', ' ', 'g'), 70)
+				FROM pg_stat_activity
+				WHERE datname = current_database() AND state = 'active' AND pid <> pg_backend_pid()`)
+			if err == nil {
+				seen := map[string]int{}
+				for rows.Next() {
+					var wait, statement string
+					if rows.Scan(&wait, &statement) == nil {
+						seen[wait+"\t"+statement]++
+					}
+				}
+				rows.Close()
+				s.mu.Lock()
+				s.activitySamples++
+				for k, n := range seen {
+					s.activity[k] += n
+				}
+				s.mu.Unlock()
+			}
+			select {
+			case <-ctx.Done():
 				return
 			case <-ticker.C:
 			}

@@ -78,7 +78,7 @@ func (h *MultipartUploadHandler) start(
 		ExpiresAt: result.Session.ExpiresAt,
 		Reused:    result.Reused,
 
-		StorageConnectionID: boundConnection(result.Session.StorageConnectionID),
+		StorageConnectionID: result.Session.StorageConnectionID,
 	})
 }
 

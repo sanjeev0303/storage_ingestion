@@ -710,7 +710,8 @@ func NewInventoryRepository() *InventoryRepository {
 	}
 }
 
-// connectionOrPlatform reads "" as the platform connection.
+// connectionOrPlatform reads "" as the platform connection, as the
+// binding columns' default does for a record written without one.
 func connectionOrPlatform(id string) string {
 	if id == "" {
 		return model.PlatformConnectionID

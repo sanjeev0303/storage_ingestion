@@ -458,6 +458,20 @@ func TestBringYourOwnStorageEndToEnd(t *testing.T) {
 	s.expect(t, admin, org, http.MethodPost, "/api/v1/storage-connections/"+conn.ID+"/disable", "", http.StatusConflict, nil)
 	s.expect(t, owner, org, http.MethodPost, "/api/v1/storage-connections/platform/set-default", "", http.StatusOK, nil)
 
+	// A new default does not move what is already stored: the asset is
+	// still read from the tenant's bucket.
+	var again response.DownloadURLResponse
+	s.expect(t, dev, org, http.MethodPost, "/api/v1/assets/"+asset.ID+"/download-url", `{}`, http.StatusOK, &again)
+	resp, err = http.Get(again.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !bytes.Equal(got, data) || !strings.HasPrefix(again.URL, link.URL[:strings.Index(link.URL, "?")]) {
+		t.Fatalf("after the default changed: %d %q", resp.StatusCode, got)
+	}
+
 	// A dataset may choose the connection for its own uploads (with
 	// storage.use); other uploads follow the default again.
 	var ds response.DatasetResponse
