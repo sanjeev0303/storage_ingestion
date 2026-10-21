@@ -129,6 +129,7 @@ func (s *ObjectStorage) WriteObject(ctx context.Context, bucket, objectKey strin
 	}
 	buf := make([]byte, partSize)
 	var parts []types.CompletedPart
+	var written int64
 	for number := int32(1); ; number++ {
 		n, err := io.ReadFull(body, buf)
 		if n == 0 && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
@@ -145,9 +146,14 @@ func (s *ObjectStorage) WriteObject(ctx context.Context, bucket, objectKey strin
 			return abort(classify("upload part", err))
 		}
 		parts = append(parts, types.CompletedPart{PartNumber: aws.Int32(number), ETag: out.ETag})
+		written += int64(n)
 		if int64(n) < partSize {
 			break
 		}
+	}
+	// A source that ended early must not become a complete-looking object.
+	if written != size {
+		return abort(fmt.Errorf("read source: %w: got %d of %d bytes", io.ErrUnexpectedEOF, written, size))
 	}
 	_, err = s.client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
 		Bucket: aws.String(bucket), Key: aws.String(objectKey), UploadId: aws.String(uploadID),

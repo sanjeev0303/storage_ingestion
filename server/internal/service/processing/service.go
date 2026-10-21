@@ -2,10 +2,13 @@ package processing
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -521,9 +524,16 @@ func (s *Service) scan(ctx context.Context, job *model.ProcessingJob, asset mode
 	if err != nil {
 		return "", fmt.Errorf("open object to scan: %w", err)
 	}
+	// Hash and count exactly what the scanner reads. Quarantine is not
+	// pinned to the verified bytes, so a write credential still valid after
+	// verification could swap them for the scan; only bytes matching the
+	// declared SHA-256, which promotion checks the copy against too, may
+	// pass as scanned.
+	hasher := sha256.New()
+	var read byteCount
 	scanCtx, cancel := context.WithTimeout(ctx, s.cfg.ScanTimeout)
 	started := time.Now()
-	result := s.deps.Scanner.Scan(scanCtx, body)
+	result := s.deps.Scanner.Scan(scanCtx, io.TeeReader(body, io.MultiWriter(hasher, &read)))
 	cancel()
 	body.Close()
 
@@ -536,6 +546,18 @@ func (s *Service) scan(ctx context.Context, job *model.ProcessingJob, asset mode
 
 	switch result.Outcome {
 	case model.ScanClean:
+		if int64(read) < asset.SizeBytes {
+			return s.scanIncomplete(ctx, job, interfaces.ScanResult{Outcome: model.ScanError, Detail: "the scanner did not read the whole object"})
+		}
+		if int64(read) != asset.SizeBytes || !strings.EqualFold(hex.EncodeToString(hasher.Sum(nil)), asset.ChecksumSHA256) {
+			job.VerificationStatus = model.StageFailed
+			if _, err := s.save(ctx, job); err != nil {
+				return "", err
+			}
+			s.deps.Metrics.Add("verification_failed", 1)
+			s.log.Warn("quarantined object changed after verification; asset rejected", "asset_id", asset.ID, "tenant_id", asset.TenantID)
+			return s.reject(ctx, job, asset, model.QuarantineVerificationFailed, model.FailureChecksumMismatch)
+		}
 		job.ScanSignature = ""
 		job.Stage = model.StagePromote
 		s.event(ctx, *job, "scanned", "CLEAN")
@@ -551,6 +573,14 @@ func (s *Service) scan(ctx context.Context, job *model.ProcessingJob, asset mode
 	default:
 		return s.scanIncomplete(ctx, job, result)
 	}
+}
+
+// byteCount counts the bytes written to it.
+type byteCount int64
+
+func (c *byteCount) Write(p []byte) (int, error) {
+	*c += byteCount(len(p))
+	return len(p), nil
 }
 
 // scanIncomplete records the attempt and returns an error: TIMEOUT and

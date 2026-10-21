@@ -76,27 +76,35 @@ func New(ctx context.Context, cfg Config) (*Storage, error) {
 		s.partBytes = 16 << 20
 	}
 	var opts []option.ClientOption
+	// Only a plain-http endpoint is an emulator (http is allowed for private
+	// development endpoints only), and only an emulator is called without
+	// credentials. A real endpoint, regional or not, keeps the key.
+	emulator := false
+	if cfg.Endpoint != "" {
+		u, err := url.Parse(cfg.Endpoint)
+		if err != nil {
+			return nil, err
+		}
+		emulator = u.Scheme == "http"
+		s.signHost, s.insecure = u.Host, emulator
+		opts = append(opts, option.WithEndpoint(cfg.Endpoint))
+	}
 	if len(cfg.ServiceAccountJSON) > 0 {
 		jwt, err := google.JWTConfigFromJSON(cfg.ServiceAccountJSON, storage.ScopeFullControl)
 		if err != nil {
 			return nil, fmt.Errorf("%w: the service account key is not valid", model.ErrInvalidConnection)
 		}
 		s.accessID, s.privateKey = jwt.Email, jwt.PrivateKey
-		if cfg.Endpoint == "" {
+		if !emulator {
 			// Token requests go through the guarded client too.
 			tokenCtx := context.WithValue(context.Background(), oauth2.HTTPClient, cfg.HTTPClient)
 			opts = append(opts, option.WithHTTPClient(oauth2.NewClient(tokenCtx, jwt.TokenSource(tokenCtx))))
 		}
-	} else if cfg.Endpoint == "" {
+	} else if !emulator {
 		return nil, fmt.Errorf("%w: GCS needs a service account key", model.ErrCredentialMissing)
 	}
-	if cfg.Endpoint != "" {
-		u, err := url.Parse(cfg.Endpoint)
-		if err != nil {
-			return nil, err
-		}
-		s.signHost, s.insecure = u.Host, u.Scheme == "http"
-		opts = append(opts, option.WithEndpoint(cfg.Endpoint), option.WithoutAuthentication(), option.WithHTTPClient(cfg.HTTPClient))
+	if emulator {
+		opts = append(opts, option.WithoutAuthentication(), option.WithHTTPClient(cfg.HTTPClient))
 	}
 	client, err := storage.NewClient(ctx, opts...)
 	if err != nil {
@@ -455,11 +463,23 @@ func (s *Storage) CompleteMultipart(ctx context.Context, bucket, key, uploadID s
 	if err := s.compose(ctx, bucket, key, sources, contentType); err != nil {
 		return err
 	}
+	// The object is complete. Listings hide part objects, so a part left
+	// behind is found only through its upload's marker: keep the marker
+	// unless every part and intermediate is gone, and the upload stays
+	// listed for an abort to clear (an abort never touches key itself).
+	cleaned := true
 	for _, p := range parts {
-		_ = s.DeleteObject(ctx, bucket, partKey(key, uploadID, p.PartNumber))
+		if err := s.DeleteObject(ctx, bucket, partKey(key, uploadID, p.PartNumber)); err != nil {
+			cleaned = false
+		}
 	}
 	for _, name := range intermediates {
-		_ = s.DeleteObject(ctx, bucket, name)
+		if err := s.DeleteObject(ctx, bucket, name); err != nil {
+			cleaned = false
+		}
+	}
+	if !cleaned {
+		return nil
 	}
 	return s.DeleteObject(ctx, bucket, markerKey(key, uploadID))
 }
@@ -500,17 +520,25 @@ func (s *Storage) AbortMultipart(ctx context.Context, bucket, key, uploadID stri
 }
 
 func (s *Storage) ListMultipartUploads(ctx context.Context, bucket, key string) ([]string, error) {
-	page, err := s.uploadsUnder(ctx, bucket, key+partsSuffix, "", 1000)
-	if err != nil {
-		return nil, err
-	}
+	// Every part sorts before its upload's marker, so an upload of a
+	// thousand parts has its marker on a later page: read them all.
 	var ids []string
-	for _, u := range page.Uploads {
-		if u.ObjectKey == key {
-			ids = append(ids, u.StorageUploadID)
+	cursor := ""
+	for {
+		page, err := s.uploadsUnder(ctx, bucket, key+partsSuffix, cursor, 1000)
+		if err != nil {
+			return nil, err
 		}
+		for _, u := range page.Uploads {
+			if u.ObjectKey == key {
+				ids = append(ids, u.StorageUploadID)
+			}
+		}
+		if page.Cursor == "" {
+			return ids, nil
+		}
+		cursor = page.Cursor
 	}
-	return ids, nil
 }
 
 func (s *Storage) ListMultipartUploadsPage(ctx context.Context, bucket, prefix, cursor string, limit int) (interfaces.MultipartUploadPage, error) {

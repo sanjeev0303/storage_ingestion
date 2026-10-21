@@ -77,26 +77,42 @@ func (s *requestStats) percentile(kind string, p float64) time.Duration {
 }
 
 // call sends one API request. A non-2xx answer is an error carrying the
-// response's first bytes. It returns the status.
+// response's first bytes. A 429 is sent again a second later until the
+// request's minute is up: the API's rate limits are part of the load, and
+// giving up would strand a claimed entry until its lease expires. It
+// returns the status.
 func (a *api) call(ctx context.Context, kind, method, path string, in, out any) (int, error) {
-	var body io.Reader
+	var raw []byte
 	if in != nil {
-		raw, err := json.Marshal(in)
-		if err != nil {
+		var err error
+		if raw, err = json.Marshal(in); err != nil {
 			return 0, err
 		}
-		body = bytes.NewReader(raw)
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, method, a.base+path, body)
-	if err != nil {
-		return 0, err
+	for {
+		var body io.Reader
+		if in != nil {
+			body = bytes.NewReader(raw)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, a.base+path, body)
+		if err != nil {
+			return 0, err
+		}
+		if in != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		status, err := a.send(kind, req, out)
+		if status != http.StatusTooManyRequests {
+			return status, err
+		}
+		select {
+		case <-ctx.Done():
+			return status, err
+		case <-time.After(time.Second):
+		}
 	}
-	if in != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	return a.send(kind, req, out)
 }
 
 func (a *api) send(kind string, req *http.Request, out any) (int, error) {

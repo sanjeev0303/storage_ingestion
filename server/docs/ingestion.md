@@ -72,7 +72,7 @@ The manifest as a whole fails only in these cases:
 - it does not match its declared SHA-256;
 - the tenant's pending entries would pass `max_pending_entries`. That batch is rolled back, and the manifest can be sent again later.
 
-### Paths (`internal/service/ingestion/path.go`)
+### Paths (`internal/model/path.go`)
 
 Normalization: `.` segments and repeated `/` collapse. The **path key** used to detect duplicates is the normalized path in lower case, so `Photos/Cat.jpg` and `photos//./cat.jpg` collide.
 

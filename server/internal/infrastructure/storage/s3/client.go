@@ -40,7 +40,7 @@ func LoadConfig() (Config, error) {
 	if cfg.Endpoint != "" {
 		parsed, err := url.Parse(cfg.Endpoint)
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-			return Config{}, fmt.Errorf("S3_ENDPOINT must be a vlid absolute URL")
+			return Config{}, fmt.Errorf("S3_ENDPOINT must be a valid absolute URL")
 		}
 
 		if parsed.Scheme != "https" &&
@@ -55,7 +55,7 @@ func LoadConfig() (Config, error) {
 
 	// If explicit credentials are supplied, require both key and secret.
 	if (cfg.AccessKeyID == "") != (cfg.SecretAccessKey == "") {
-		return Config{}, fmt.Errorf("S3_ACCESS_KEY_ID and S3_ACCESS_KEY must be set together")
+		return Config{}, fmt.Errorf("S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY must be set together")
 	}
 
 	return cfg, nil

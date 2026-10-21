@@ -53,7 +53,7 @@ func TestValidateURL(t *testing.T) {
 			t.Errorf("local %s refused: %v", raw, err)
 		}
 	}
-	for _, raw := range []string{"http://169.254.169.254", "http://s3.example.com"} {
+	for _, raw := range []string{"http://169.254.169.254", "http://[fd00:ec2::254]", "http://s3.example.com"} {
 		if _, err := local.ValidateURL(raw); err == nil {
 			t.Errorf("local %s accepted", raw)
 		}
@@ -63,7 +63,8 @@ func TestValidateURL(t *testing.T) {
 func TestBlockedAddresses(t *testing.T) {
 	p := DefaultPolicy()
 	for _, a := range []string{"127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.169.254", "::1", "fe80::1",
-		"fd00:ec2::254", "100.100.100.200", "0.0.0.0", "224.0.0.1", "::ffff:127.0.0.1", "240.0.0.1"} {
+		"fd00:ec2::254", "100.100.100.200", "0.0.0.0", "224.0.0.1", "::ffff:127.0.0.1", "240.0.0.1",
+		"64:ff9b:1::a9fe:a9fe", "2002:a9fe:a9fe::1", "2001:0:4136:e378:8000:63bf:3fff:fdd2"} {
 		if !p.Blocked(netip.MustParseAddr(a)) {
 			t.Errorf("%s allowed", a)
 		}

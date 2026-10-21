@@ -126,7 +126,9 @@ func LoadStorage() (Storage, error) {
 			continue
 		}
 		for _, key := range s.CredentialKeys {
-			if bytes.Equal(key, []byte(other)) || strings.Contains(spec, other) {
+			// A short value turns up inside a random key's base64 by chance
+			// ("x" often does), which says nothing about reuse.
+			if bytes.Equal(key, []byte(other)) || (len(other) >= 16 && strings.Contains(spec, other)) {
 				return Storage{}, fmt.Errorf("STORAGE_CREDENTIAL_KEYS must not reuse %s", name)
 			}
 		}

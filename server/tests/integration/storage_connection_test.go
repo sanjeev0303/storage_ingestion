@@ -81,6 +81,51 @@ func boundSession(tenantID, id, connectionID string, status model.UploadStatus) 
 	}
 }
 
+// A completed upload is still work until its asset exists, so its
+// connection cannot be deleted under it. And an upload already stranded on a
+// deleted connection never stops processing for anyone else.
+func TestConnectionDeletionWaitsForUnprocessedUploads(t *testing.T) {
+	e := openSecurityEnv(t, nil)
+	ctx := context.Background()
+	owner, _ := e.account(t, "conn-drain")
+	org := e.organization(t, "conn-drain", owner)
+	repo := postgres.NewStorageConnectionRepository(e.db)
+	uploads := postgres.NewUploadRepository(e.db)
+	c := activeConnection(t, repo, org.ID, "Draining bucket", testKeyring(t))
+
+	waiting := boundSession(org.ID, "up-waiting-"+e.run, c.ID, model.UploadStatusCompleted)
+	if err := uploads.Create(ctx, waiting); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.SetStatus(ctx, org.ID, c.ID, []model.ConnectionStatus{model.ConnectionActive}, model.ConnectionDisabled, "it", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if d, err := repo.Dependents(ctx, org.ID, c.ID); err != nil || d.ActiveUploads != 1 {
+		t.Fatalf("a completed upload without an asset is a dependent: %+v %v", d, err)
+	}
+	if _, err := repo.Delete(ctx, org.ID, c.ID, "it", time.Now()); !errors.Is(err, model.ErrConnectionInUse) {
+		t.Fatalf("the connection must not be deleted before its upload is processed: %v", err)
+	}
+
+	// A database where it was deleted anyway, before this check existed.
+	if _, err := e.db.Pool.Exec(ctx, `UPDATE storage_connections SET status = 'DELETED', deleted_at = now() WHERE id = $1`, c.ID); err != nil {
+		t.Fatal(err)
+	}
+	next := boundSession(org.ID, "up-next-"+e.run, model.PlatformConnectionID, model.UploadStatusCompleted)
+	if err := uploads.Create(ctx, next); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := postgres.NewProcessingJobRepository(e.db).EnqueueDue(ctx, time.Now().UTC(), 3); err != nil {
+		t.Fatalf("a stranded upload must not stop processing for everyone: %v", err)
+	}
+	var processed, stranded int
+	err := e.db.Pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE upload_id = $1), count(*) FILTER (WHERE upload_id = $2) FROM assets`,
+		next.ID, waiting.ID).Scan(&processed, &stranded)
+	if err != nil || processed != 1 || stranded != 0 {
+		t.Fatalf("the next upload is processed (%d) and the stranded one is skipped (%d): %v", processed, stranded, err)
+	}
+}
+
 func TestStorageConnectionsInPostgres(t *testing.T) {
 	e := openSecurityEnv(t, nil)
 	ctx := context.Background()
