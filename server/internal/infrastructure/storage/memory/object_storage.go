@@ -74,8 +74,11 @@ type ObjectStorage struct {
 	// DeleteCalls counts DeleteObject and DeleteObjectVersion calls.
 	DeleteCalls int
 	// versions holds the current version ID of objects a test made
-	// versioned; other objects behave as in an unversioned bucket.
+	// versioned, and versionData every version's key and bytes, so an
+	// overwritten version stays readable by its ID as in S3. Other objects
+	// behave as in an unversioned bucket.
 	versions        map[string]string
+	versionData     map[string]storedVersion
 	DeletedVersions []string
 	// Versioning is what Capabilities reports: a test of a versioned
 	// bucket sets it.
@@ -178,6 +181,21 @@ func (s *ObjectStorage) newVersion(key string) {
 	}
 	s.nextID++
 	s.versions[key] = fmt.Sprintf("version-%d", s.nextID)
+	s.keepVersion(key, s.versions[key])
+}
+
+type storedVersion struct {
+	key  string
+	data []byte
+}
+
+// keepVersion remembers key's current bytes as versionID. The caller holds
+// the lock.
+func (s *ObjectStorage) keepVersion(key, versionID string) {
+	if s.versionData == nil {
+		s.versionData = make(map[string]storedVersion)
+	}
+	s.versionData[versionID] = storedVersion{key: key, data: s.objects[key]}
 }
 
 // PutObject stores a whole object directly, as a completed upload would.
@@ -254,19 +272,26 @@ func (s *ObjectStorage) SetVersion(key, versionID string) {
 		s.versions = make(map[string]string)
 	}
 	s.versions[key] = versionID
+	if _, ok := s.objects[key]; ok {
+		s.keepVersion(key, versionID)
+	}
 }
 
-// HeadObjectVersion finds key only at its current version.
-func (s *ObjectStorage) HeadObjectVersion(ctx context.Context, bucket, key, versionID string) (interfaces.ObjectMetadata, error) {
+// HeadObjectVersion finds one version of key, current or not.
+func (s *ObjectStorage) HeadObjectVersion(ctx context.Context, _ string, key, versionID string) (interfaces.ObjectMetadata, error) {
+	if err := ctx.Err(); err != nil {
+		return interfaces.ObjectMetadata{}, err
+	}
 	s.mu.Lock()
-	current, ok := s.versions[key]
-	s.mu.Unlock()
-	if !ok || current != versionID {
+	defer s.mu.Unlock()
+	if err := take(&s.HeadErr); err != nil {
+		return interfaces.ObjectMetadata{}, err
+	}
+	v, ok := s.versionData[versionID]
+	if !ok || v.key != key {
 		return interfaces.ObjectMetadata{}, fmt.Errorf("head object version: %w", interfaces.ErrObjectNotFound)
 	}
-	meta, err := s.HeadObject(ctx, bucket, key)
-	meta.VersionID = versionID
-	return meta, err
+	return interfaces.ObjectMetadata{SizeBytes: int64(len(v.data)), ETag: etag(v.data), VersionID: versionID}, nil
 }
 
 // DeleteObjectVersion removes key when versionID is its current version.
@@ -282,6 +307,9 @@ func (s *ObjectStorage) DeleteObjectVersion(ctx context.Context, _ string, key, 
 		return err
 	}
 	s.DeletedVersions = append(s.DeletedVersions, versionID)
+	if v, ok := s.versionData[versionID]; ok && v.key == key {
+		delete(s.versionData, versionID)
+	}
 	if s.versions[key] == versionID {
 		delete(s.objects, key)
 		delete(s.versions, key)
@@ -362,6 +390,7 @@ func (s *ObjectStorage) CompleteMultipart(ctx context.Context, _ string, key str
 	}
 	s.objects[key] = object.Bytes()
 	s.modified[key] = s.clock()
+	s.newVersion(key)
 	delete(s.uploads, uploadID)
 
 	return take(&s.CompleteLost)
@@ -486,8 +515,8 @@ func (s *ObjectStorage) PresignGet(ctx context.Context, bucket, key string, ttl 
 }
 
 // OpenRange returns bytes first..last of an object, or all of it when
-// last < 0, if the object still has the ETag in cond.IfMatch. Version IDs
-// are not modelled: a set VersionID is refused, as by an unversioned bucket.
+// last < 0, if the object still has the ETag in cond.IfMatch. A set
+// VersionID reads that version, which only a versioned bucket has.
 func (s *ObjectStorage) OpenRange(ctx context.Context, _ string, key string, first, last int64, cond interfaces.ReadCondition) (io.ReadCloser, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -500,10 +529,11 @@ func (s *ObjectStorage) OpenRange(ctx context.Context, _ string, key string, fir
 		return nil, err
 	}
 	data, ok := s.objects[key]
-	if !ok {
-		return nil, fmt.Errorf("get object range: %w", interfaces.ErrObjectNotFound)
-	}
 	if cond.VersionID != "" {
+		v, found := s.versionData[cond.VersionID]
+		data, ok = v.data, found && v.key == key
+	}
+	if !ok {
 		return nil, fmt.Errorf("get object range: %w", interfaces.ErrObjectNotFound)
 	}
 	if cond.IfMatch != "" && cond.IfMatch != etag(data) {

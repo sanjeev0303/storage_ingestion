@@ -17,6 +17,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -25,6 +26,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -130,8 +132,17 @@ type report struct {
 	Self      map[string]any `json:"loadgen_memory"`
 	Servers   map[string]any `json:"server_memory,omitempty"`
 	Database  map[string]any `json:"database,omitempty"`
+	// Activity is where PostgreSQL's time went: the busiest wait and
+	// statement pairs, as the average number of sessions in each.
+	Activity  []activityLine `json:"database_activity,omitempty"`
 	Container map[string]any `json:"containers,omitempty"`
 	Notes     []string       `json:"notes"`
+}
+
+type activityLine struct {
+	Wait      string  `json:"wait"`
+	Statement string  `json:"statement"`
+	Average   float64 `json:"average_sessions"`
 }
 
 type uploadReport struct {
@@ -208,6 +219,10 @@ func run(o options) error {
 	}
 	if o.db != "" {
 		if err := s.database(sampleCtx, o.db); err != nil {
+			stopSampling()
+			return fmt.Errorf("database sampling: %w", err)
+		}
+		if err := s.statements(sampleCtx, o.db); err != nil {
 			stopSampling()
 			return fmt.Errorf("database sampling: %w", err)
 		}
@@ -624,6 +639,14 @@ func (r *report) collect(a *api, s *samplers) {
 			"error":           s.dbErr,
 		}
 	}
+	if s.activitySamples > 0 {
+		for key, n := range s.activity {
+			wait, statement, _ := strings.Cut(key, "\t")
+			r.Activity = append(r.Activity, activityLine{Wait: wait, Statement: statement, Average: float64(n) / float64(s.activitySamples)})
+		}
+		slices.SortFunc(r.Activity, func(a, b activityLine) int { return cmp.Compare(b.Average, a.Average) })
+		r.Activity = r.Activity[:min(len(r.Activity), 15)]
+	}
 	if len(s.container) > 0 {
 		r.Container = map[string]any{}
 		for name, c := range s.container {
@@ -678,6 +701,12 @@ func (r *report) print(w io.Writer) {
 	if r.Database != nil {
 		raw, _ := json.Marshal(r.Database)
 		p("  database: %s", raw)
+	}
+	if len(r.Activity) > 0 {
+		p("  database activity (average sessions; 10 readings a second):")
+		for _, a := range r.Activity {
+			p("    %6.2f  %-28s %s", a.Average, a.Wait, a.Statement)
+		}
 	}
 	for name, c := range r.Container {
 		use := c.(*containerUse)

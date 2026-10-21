@@ -101,8 +101,10 @@ func TestLocateResolvesOnlyTheTenantsOwnConnections(t *testing.T) {
 	if loc, err := h.registry.Locate(ctx, "t2", "platform"); err != nil || loc.ConnectionID != model.PlatformConnectionID {
 		t.Fatalf("platform: %+v %v", loc, err)
 	}
-	if loc, err := h.registry.Locate(ctx, "t1", ""); err != nil || loc.ReadyPrefix != "assets" {
-		t.Fatalf("an unset binding is the platform: %+v %v", loc, err)
+	// Every stored record names its binding, so an empty one is lost, not
+	// the platform's: it must not quietly reach the platform bucket.
+	if loc, err := h.registry.Locate(ctx, "t1", ""); !errors.Is(err, model.ErrConnectionNotFound) || loc.Storage != nil {
+		t.Fatalf("an unset binding resolved: %+v %v", loc, err)
 	}
 	loc, err := h.registry.Locate(ctx, "t1", "sc_one")
 	if err != nil || loc.ReadyBucket != "customer-bucket" || loc.StagingKey("t1", "u1") != "staging/t1/u1" {
@@ -177,6 +179,48 @@ func TestClientsAreCachedAndRebuiltOnRotation(t *testing.T) {
 	h.clock = h.clock.Add(16 * time.Minute)
 	if _, err := h.registry.Locate(ctx, "t1", c.ID); err != nil || h.builds != 4 {
 		t.Fatalf("an expired client is rebuilt: builds %d %v", h.builds, err)
+	}
+}
+
+// Requests keep resolving and using a connection while its credentials
+// rotate: none fails, and the rotation is what later requests are built
+// from. Meant for -race.
+func TestRotationDuringConcurrentUseIsSafe(t *testing.T) {
+	h := newHarness(t, nil)
+	ctx := context.Background()
+	c := h.connection(t, "t1", "sc_one", keys)
+	rotated := model.StorageSecrets{AccessKeyID: "AKIDNEW", SecretAccessKey: "new-secret"}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 200 {
+				loc, err := h.registry.Locate(ctx, "t1", c.ID)
+				if err == nil {
+					_, err = loc.Storage.HeadObject(ctx, loc.ReadyBucket, "k")
+				}
+				if err != nil && !errors.Is(err, interfaces.ErrObjectNotFound) {
+					errs <- err
+					return
+				}
+			}
+		}()
+	}
+	for v := 2; v <= 6; v++ {
+		h.repo.Put(c, h.seal(t, c, v, rotated))
+		h.registry.Invalidate(c.ID)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("a request failed during rotation: %v", err)
+	}
+	h.registry.Invalidate(c.ID)
+	if _, err := h.registry.Locate(ctx, "t1", c.ID); err != nil || h.secrets[len(h.secrets)-1].AccessKeyID != "AKIDNEW" {
+		t.Fatalf("after rotation the client is built from the new secrets: %v", err)
 	}
 }
 

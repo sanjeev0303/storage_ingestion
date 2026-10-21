@@ -353,7 +353,7 @@ func (r *ReconciliationRepository) CountStuck(ctx context.Context, olderThan tim
 
 func (r *ReconciliationRepository) FinishedSessions(ctx context.Context, since, until time.Time, afterID string, limit int) ([]model.UploadSession, error) {
 	rows, err := r.db.Pool.Query(ctx, `
-		SELECT tenant_id, id, object_key, COALESCE(storage_upload_id, ''), status
+		SELECT tenant_id, id, object_key, COALESCE(storage_upload_id, ''), status, storage_connection_id, staging_connection_id
 		FROM upload_sessions
 		WHERE status IN ('ABORTED', 'FAILED', 'EXPIRED')
 		  AND updated_at > $1
@@ -371,7 +371,7 @@ func (r *ReconciliationRepository) FinishedSessions(ctx context.Context, since, 
 	for rows.Next() {
 		var s model.UploadSession
 		var status string
-		if err := rows.Scan(&s.TenantID, &s.ID, &s.ObjectKey, &s.StorageUploadID, &status); err != nil {
+		if err := rows.Scan(&s.TenantID, &s.ID, &s.ObjectKey, &s.StorageUploadID, &status, &s.StorageConnectionID, &s.StagingConnectionID); err != nil {
 			return nil, fmt.Errorf("scan finished session: %w", err)
 		}
 		s.Status = model.UploadStatus(status)

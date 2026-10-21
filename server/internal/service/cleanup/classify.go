@@ -49,11 +49,9 @@ func (s *Service) classify(ctx context.Context, a area, object interfaces.Stored
 }
 
 // boundTo tells whether a record's connection binding is the area's. A
-// record bound elsewhere does not own an object here, nor disown it.
+// record bound elsewhere, or with no binding, does not own an object here,
+// nor disown it.
 func boundTo(a area, connectionID string) bool {
-	if connectionID == "" {
-		connectionID = model.PlatformConnectionID
-	}
 	return connectionID == a.connectionID
 }
 

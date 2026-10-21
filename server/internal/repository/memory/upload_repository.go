@@ -52,8 +52,16 @@ func (r *UploadRepository) Create(
 		return model.ErrUploadAlreadyExists
 	}
 
-	r.uploads[upload.ID] = *upload
+	r.uploads[upload.ID] = boundSession(*upload)
 	return nil
+}
+
+// boundSession gives a session stored without a binding the platform's,
+// as the columns' default does.
+func boundSession(s model.UploadSession) model.UploadSession {
+	s.StorageConnectionID = connectionOrPlatform(s.StorageConnectionID)
+	s.StagingConnectionID = connectionOrPlatform(s.StagingConnectionID)
+	return s
 }
 
 // GetByID retrieves an upload belonging to the requeste tenant.
@@ -142,7 +150,7 @@ func (r *UploadRepository) CreateWithIdempotency(
 		return model.ErrIdempotencyConflict
 	}
 
-	r.uploads[upload.ID] = *upload
+	r.uploads[upload.ID] = boundSession(*upload)
 	r.idempotency[indexKey] = upload.ID
 
 	return nil

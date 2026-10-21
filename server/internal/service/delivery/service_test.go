@@ -121,6 +121,21 @@ func TestOnlyAvailableAssetsAreDelivered(t *testing.T) {
 	}
 }
 
+// A record always names its storage binding. One that has lost it is
+// refused, never read from the platform bucket in its place.
+func TestAnAssetWithoutABindingIsNotServed(t *testing.T) {
+	e := newEnv(t, nil)
+	e.asset(t, "a1", model.AssetStatusAvailable)
+	e.assets.Update("a1", func(a *model.Asset) { a.StorageConnectionID = "" })
+
+	if _, err := e.svc.CreateDownloadURL(context.Background(), owner, "a1", URLRequest{}); err == nil {
+		t.Fatal("a download URL was signed for an asset without a binding")
+	}
+	if len(e.storage.Presigns) != 0 {
+		t.Fatalf("the platform bucket was signed for: %+v", e.storage.Presigns)
+	}
+}
+
 func TestOtherTenantsGetTheSameNotFound(t *testing.T) {
 	e := newEnv(t, nil)
 	e.asset(t, "a1", model.AssetStatusAvailable)

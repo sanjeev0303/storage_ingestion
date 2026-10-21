@@ -540,8 +540,11 @@ type MemberEvidence struct {
 	AssetChecksum  string
 	// ObjectKey is where the version's bytes are, on the storage
 	// connection StorageConnectionID; neither leaves the service.
+	// StorageVersionID is the provider's version (or GCS generation)
+	// recorded at publication, when the bucket versions objects.
 	ObjectKey           string
 	StorageConnectionID string
+	StorageVersionID    string
 	// From the version's processing job: PASSED or FAILED (or "" when there
 	// is no record), DECLARED or COMPUTED, and the scan's result.
 	VerificationStatus string

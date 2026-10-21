@@ -44,8 +44,16 @@ func (r *AssetRepository) Create(ctx context.Context, asset *model.Asset) error 
 			return errors.New("asset already exists")
 		}
 	}
-	r.assets[asset.ID] = *asset
+	r.assets[asset.ID] = bound(*asset)
 	return nil
+}
+
+// bound gives an asset stored without a binding the platform's, as the
+// columns' default does.
+func bound(a model.Asset) model.Asset {
+	a.StorageConnectionID = connectionOrPlatform(a.StorageConnectionID)
+	a.StagingConnectionID = connectionOrPlatform(a.StagingConnectionID)
+	return a
 }
 
 func (r *AssetRepository) GetByID(ctx context.Context, tenantID string, assetID string) (*model.Asset, error) {

@@ -77,6 +77,29 @@ func (e *reconcileEnv) session(t *testing.T, id string, status model.UploadStatu
 	}
 }
 
+// The database scan for leftover provider sessions finds each one where
+// its session staged: a finished session must come back with its binding.
+func TestPostgresFinishedSessionsCarryTheirBinding(t *testing.T) {
+	env := openReconcileEnv(t)
+	env.session(t, "done", model.UploadStatusAborted)
+	now := time.Now()
+	// IDs sort after the tenant's prefix, so paging from it reaches ours.
+	sessions, err := env.tasks.FinishedSessions(context.Background(), now.Add(-time.Hour), now.Add(time.Hour), env.tenant, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range sessions {
+		if s.ID != env.tenant+"-done" {
+			continue
+		}
+		if s.StorageConnectionID != model.PlatformConnectionID || s.StagingConnectionID != model.PlatformConnectionID {
+			t.Fatalf("a finished session without its binding: %+v", s)
+		}
+		return
+	}
+	t.Fatalf("the finished session was not listed: %+v", sessions)
+}
+
 // task inserts a PENDING task due at farPast for a session.
 func (e *reconcileEnv) task(t *testing.T, id string, maxAttempts int) string {
 	t.Helper()
