@@ -49,6 +49,12 @@ type Auth struct {
 	// Only behind a proxy that sets it; otherwise clients could pick their
 	// own address.
 	TrustProxyHeaders bool
+
+	// SelfRegistration lets anyone create an account and an organization
+	// at POST /auth/register. Off by default: there is no email delivery,
+	// so an address is not verified, and most deployments want accounts to
+	// come from an administrator or an invitation.
+	SelfRegistration bool
 }
 
 // RateRule allows Requests per Window.
@@ -66,8 +72,11 @@ type Audit struct {
 
 // Rate-limited operations and their default rules.
 var defaultRates = map[string]string{
-	"refresh":       "30/1m",
-	"credentials":   "10/15m",
+	"refresh":     "30/1m",
+	"credentials": "10/15m",
+	// Self-registration hashes a password and creates an organization, so
+	// each source address gets only a few a hour.
+	"register":      "5/1h",
 	"upload_init":   "300/1m",
 	"upload_finish": "600/1m",
 	"manifest":      "60/1m",
@@ -135,6 +144,7 @@ func LoadSecurity() (Security, error) {
 	}
 	s.Auth.Argon2Memory, s.Auth.Argon2Time, s.Auth.Argon2Threads = uint32(memory), uint32(passes), uint8(threads)
 	s.Auth.TrustProxyHeaders = strings.EqualFold(getEnv("AUTH_TRUST_PROXY_HEADERS", "false"), "true")
+	s.Auth.SelfRegistration = strings.EqualFold(getEnv("AUTH_SELF_REGISTRATION", "false"), "true")
 
 	s.Rates = map[string]RateRule{}
 	for op, fallback := range defaultRates {

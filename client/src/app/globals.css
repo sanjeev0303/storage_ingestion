@@ -1,0 +1,283 @@
+@import "tailwindcss";
+
+/*
+  Palette: ground #DDE3E8 (60%), plum #3A0F34 (30%), amber #EAAA00 (10%).
+  Amber is never used as text on the ground (1.6:1); it is a fill with plum on top (7.9:1).
+  Everything else is mixed from those three.
+*/
+:root {
+  --ground: #dde3e8;
+  --ink: #3a0f34;
+  --accent: #eaaa00;
+  --on-accent: #3a0f34;
+  /* Secondary text: 4.5:1 or better on the ground and on the faint fill, in both themes. */
+  --muted: color-mix(in srgb, var(--ink) 78%, var(--ground));
+  --faint: color-mix(in srgb, var(--ink) 14%, var(--ground));
+  --light: color-mix(in srgb, var(--ground) 40%, #f4f7f9);
+  --shade: color-mix(in srgb, var(--ink) 24%, var(--ground));
+  /* Form control boundary: 3:1 against the ground (WCAG 1.4.11). */
+  --edge: color-mix(in srgb, var(--ink) 55%, var(--ground));
+
+  --neo-sm: 3px 3px 7px var(--shade), -3px -3px 7px var(--light);
+  --neo: 6px 6px 14px var(--shade), -6px -6px 14px var(--light);
+  --neo-in: inset 3px 3px 7px var(--shade), inset -3px -3px 7px var(--light);
+  --neo-in-sm: inset 2px 2px 4px var(--shade), inset -2px -2px 4px var(--light);
+
+  --radius: 4px;
+  /* Width of the homepage container; full-width layouts align their text to its edge. */
+  --content-max: 80rem;
+  --radius-sm: 2px;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --ground: #3a0f34;
+  --ink: #dde3e8;
+  --accent: #eaaa00;
+  --on-accent: #3a0f34;
+  --light: color-mix(in srgb, var(--ground) 86%, #dde3e8);
+  --shade: color-mix(in srgb, var(--ground) 55%, #000);
+  --faint: color-mix(in srgb, var(--ink) 16%, var(--ground));
+  --muted: color-mix(in srgb, var(--ink) 88%, var(--ground));
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #3a0f34;
+    --ink: #dde3e8;
+    --accent: #eaaa00;
+    --on-accent: #3a0f34;
+    --light: color-mix(in srgb, var(--ground) 86%, #dde3e8);
+    --shade: color-mix(in srgb, var(--ground) 55%, #000);
+    --faint: color-mix(in srgb, var(--ink) 16%, var(--ground));
+    --muted: color-mix(in srgb, var(--ink) 88%, var(--ground));
+    color-scheme: dark;
+  }
+}
+
+@theme inline {
+  --color-ground: var(--ground);
+  --color-ink: var(--ink);
+  --color-accent: var(--accent);
+  --color-on-accent: var(--on-accent);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-edge: var(--edge);
+  --font-sans: var(--font-hanken), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains), ui-monospace, monospace;
+  /* Corners stay crisp: every radius step resolves to 2px or 4px. */
+  --radius-xs: 2px;
+  --radius-sm: 2px;
+  --radius-md: 4px;
+  --radius-lg: 4px;
+  --radius-xl: 4px;
+  --radius-2xl: 4px;
+  --shadow-neo: var(--neo);
+  --shadow-neo-sm: var(--neo-sm);
+  --shadow-neo-in: var(--neo-in);
+  /* A stronger ease-out than the built-in: starts fast, settles gently. */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.875rem;
+  --text-md: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.375rem;
+  --text-2xl: 1.75rem;
+}
+
+html {
+  background: var(--ground);
+  color: var(--ink);
+  scrollbar-color: var(--muted) var(--ground);
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: 1.5;
+  background: var(--ground);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  min-height: 100dvh;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+:root[data-theme="dark"] :focus-visible {
+  outline-color: var(--accent);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) :focus-visible {
+    outline-color: var(--accent);
+  }
+}
+
+button,
+a,
+input,
+select,
+textarea {
+  touch-action: manipulation;
+}
+
+table {
+  font-variant-numeric: tabular-nums;
+}
+
+input,
+textarea,
+select {
+  caret-color: var(--ink);
+}
+
+/* Neomorphic surfaces: one ground, a light edge and a shade edge. */
+@utility neo {
+  background: var(--ground);
+  box-shadow: var(--neo);
+  border-radius: var(--radius);
+}
+
+@utility neo-sm {
+  background: var(--ground);
+  box-shadow: var(--neo-sm);
+  border-radius: var(--radius);
+}
+
+@utility neo-in {
+  background: var(--ground);
+  box-shadow: var(--neo-in);
+  border-radius: var(--radius);
+}
+
+@utility neo-in-sm {
+  background: var(--ground);
+  box-shadow: var(--neo-in-sm);
+  border-radius: var(--radius);
+}
+
+@utility mono-data {
+  font-family: var(--font-mono);
+  font-size: max(0.8125em, 13px);
+  overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Overlays and menus. Entering is a short ease-out; leaving is quicker still.
+   Modals stay centred; menus grow from the trigger (Radix exposes the origin). */
+@keyframes overlay-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes overlay-out {
+  to {
+    opacity: 0;
+  }
+}
+/* Tailwind positions the dialog with the individual translate property, so only scale is animated here. */
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    scale: 0.96;
+  }
+}
+@keyframes dialog-out {
+  to {
+    opacity: 0;
+    scale: 0.98;
+  }
+}
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+@keyframes menu-out {
+  to {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+}
+
+.overlay[data-state="open"] {
+  animation: overlay-in 200ms var(--ease-out);
+}
+.overlay[data-state="closed"] {
+  animation: overlay-out 140ms var(--ease-out) forwards;
+}
+.dialog[data-state="open"] {
+  animation: dialog-in 200ms var(--ease-out);
+}
+.dialog[data-state="closed"] {
+  animation: dialog-out 140ms var(--ease-out) forwards;
+}
+.menu {
+  transform-origin: var(--radix-dropdown-menu-content-transform-origin);
+}
+.menu[data-state="open"] {
+  animation: menu-in 160ms var(--ease-out);
+}
+.menu[data-state="closed"] {
+  animation: menu-out 110ms var(--ease-out) forwards;
+}
+
+/* Homepage type: five steps, nothing under 13px. The console keeps its own fixed scale. */
+@utility t-display {
+  font-size: clamp(2.5rem, 5.4vw, 4.75rem);
+  line-height: 1.02;
+  letter-spacing: -0.03em;
+  font-weight: 600;
+  text-wrap: balance;
+}
+@utility t-h2 {
+  font-size: clamp(1.75rem, 3.2vw, 2.75rem);
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  font-weight: 600;
+  text-wrap: balance;
+}
+@utility t-lead {
+  font-size: clamp(1.25rem, 2vw, 1.875rem);
+  line-height: 1.25;
+  font-weight: 450;
+  letter-spacing: -0.01em;
+}
+@utility t-body {
+  font-size: 1.0625rem;
+  line-height: 1.6;
+}
+@utility t-small {
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+/* Diagram text and strokes follow the section's colour. Amber is the one accent. */
+.diagram text {
+  font-family: var(--font-hanken), ui-sans-serif, system-ui, sans-serif;
+  fill: currentColor;
+}
+.diagram .mono {
+  font-family: var(--font-jetbrains), ui-monospace, monospace;
+}
