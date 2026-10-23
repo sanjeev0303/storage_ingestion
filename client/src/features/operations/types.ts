@@ -1,0 +1,134 @@
+// Mirrors docs/api/identity-admin-audit.md sections 6.1, 7 and 8, and storage connections.
+
+export type AssetStatus = "QUARANTINED" | "PROCESSING" | "AVAILABLE" | "REJECTED" | "SOFT_DELETED";
+
+export type Asset = {
+  id: string;
+  file_name: string;
+  content_type: string;
+  size_bytes: number;
+  checksum_sha256?: string;
+  dataset?: string;
+  status: AssetStatus;
+  rejection_reason?: string;
+  deliverable: boolean;
+  etag?: string;
+  published_at?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type DeletionState =
+  | "SCHEDULED"
+  | "IN_PROGRESS"
+  | "RETRY_WAIT"
+  | "STORAGE_DELETED"
+  | "FAILED"
+  | "COMPLETED"
+  | "CANCELLED";
+
+export type Deletion = { id: string; state: DeletionState; purge_after: string; restorable: boolean };
+
+export type DeleteAssetResponse = {
+  asset_id: string;
+  status: "SOFT_DELETED";
+  deletion: Deletion;
+  created: boolean;
+};
+
+export type RestoreAssetResponse = { asset_id: string; status: AssetStatus };
+
+export type AssetLifecycle = {
+  asset_id: string;
+  status: AssetStatus;
+  dataset?: string;
+  retain_until: string;
+  expires_at?: string;
+  deletion_grace_seconds: number;
+  deletion?: Deletion;
+};
+
+export type QuarantineEntry = {
+  id: string;
+  category: string;
+  reason: string;
+  scan_result: string;
+  status: "HELD" | "RELEASED" | "REJECTED" | "PURGED";
+  created_at: string;
+  retain_until: string | null;
+};
+
+export type ProcessingRecord = {
+  asset_id: string;
+  asset_status: AssetStatus;
+  job_state: "PENDING" | "SUCCEEDED" | "FAILED" | "EXHAUSTED";
+  job_stage: "VERIFY" | "SCAN" | "PROMOTE" | "CLEANUP";
+  attempts: number;
+  last_error?: string;
+  quarantine: QuarantineEntry[];
+};
+
+export type ReleaseQuarantineResponse = { asset_id: string; job_state: string; stage: string };
+
+export type RetentionScope = "TENANT" | "DATASET" | "ASSET";
+
+export type RetentionPolicyRequest = {
+  scope: RetentionScope;
+  scope_key?: string;
+  min_retention?: string;
+  max_age?: string;
+  deletion_grace?: string;
+  quarantine_retention?: string;
+  reason: string;
+};
+
+export type RetentionPolicyResponse = {
+  id: string;
+  scope: string;
+  scope_key: string;
+  version: number;
+  effective_from: string;
+};
+
+export type LegalHoldRequest = { scope: RetentionScope; scope_key?: string; reason: string };
+export type LegalHold = { id: string; scope: string; scope_key: string; placed_at: string };
+
+export type DeadLetterStatus = "OPEN" | "RETRIED" | "REPLAYED" | "RESOLVED" | "DISCARDED";
+
+export type DeadLetter = {
+  id: string;
+  event_id: string;
+  event_type?: string;
+  tenant_id?: string;
+  consumer?: string;
+  status: DeadLetterStatus;
+  category?: string;
+  last_error?: string;
+  created_at: string;
+  replay_event_id?: string;
+  stale?: string;
+};
+
+export type DeadLetterAction = "retry" | "replay" | "resolve" | "discard";
+
+export type StorageConnection = {
+  id: string;
+  name: string;
+  provider: string;
+  status: string;
+  is_default: boolean;
+  last_tested_at?: string;
+  last_test_ok_at?: string;
+  last_error_category?: string;
+  capabilities_checked_at?: string;
+};
+
+export type QuotaReconcileResponse = {
+  tenant_id: string;
+  settled_reservations: number;
+  repaired: boolean;
+  reserved_bytes_before: number;
+  reserved_bytes_after: number;
+  stored_bytes_before: number;
+  stored_bytes_after: number;
+};

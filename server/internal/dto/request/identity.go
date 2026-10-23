@@ -7,6 +7,14 @@ type LoginRequest struct {
 	Password string `json:"password"`
 }
 
+// RegisterRequest creates an account and the organization it owns.
+type RegisterRequest struct {
+	Email            string `json:"email"`
+	Password         string `json:"password"`
+	DisplayName      string `json:"display_name,omitempty"`
+	OrganizationName string `json:"organization_name"`
+}
+
 type RefreshRequest struct {
 	RefreshToken string `json:"refresh_token"`
 }

@@ -46,6 +46,7 @@ func (h *IdentityHandler) Routes() IdentityRoutes {
 	return IdentityRoutes{
 		Public: map[string]nethttp.HandlerFunc{
 			"POST /api/v1/auth/login":          h.login,
+			"POST /api/v1/auth/register":       h.register,
 			"POST /api/v1/auth/refresh":        h.refresh,
 			"POST /api/v1/auth/activate":       h.activate,
 			"POST /api/v1/auth/password/reset": h.resetPassword,
@@ -201,6 +202,22 @@ func (h *IdentityHandler) login(w nethttp.ResponseWriter, r *nethttp.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, nethttp.StatusOK, tokensResponse(tokens))
+}
+
+func (h *IdentityHandler) register(w nethttp.ResponseWriter, r *nethttp.Request) {
+	var body request.RegisterRequest
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	tokens, err := h.identity.Register(r.Context(), identity.Registration{
+		Email: body.Email, Password: body.Password, DisplayName: body.DisplayName, OrganizationName: body.OrganizationName,
+	}, client(r))
+	if err != nil {
+		writeSecurityError(w, h.log, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, nethttp.StatusCreated, tokensResponse(tokens))
 }
 
 func (h *IdentityHandler) refresh(w nethttp.ResponseWriter, r *nethttp.Request) {

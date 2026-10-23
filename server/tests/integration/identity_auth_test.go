@@ -414,3 +414,73 @@ func parkAdministrators(t *testing.T, e *securityEnv) []string {
 	}
 	return ids
 }
+
+func TestSelfRegistrationIsClosedByDefault(t *testing.T) {
+	e := openSecurityEnv(t, nil)
+	_, err := e.identity.Register(context.Background(), identity.Registration{
+		Email: e.email("closed"), Password: "correct horse battery staple", OrganizationName: "Closed Labs",
+	}, e.client)
+	if !errors.Is(err, identity.ErrRegistrationClosed) {
+		t.Fatalf("expected ErrRegistrationClosed, got %v", err)
+	}
+}
+
+func TestSelfRegistrationCreatesAnOwnerAndSignsThemIn(t *testing.T) {
+	e := openSecurityEnv(t, map[string]string{"AUTH_SELF_REGISTRATION": "true", "RATE_LIMIT_REGISTER": "4/1m"})
+	ctx := context.Background()
+	reg := identity.Registration{
+		Email: "  " + strings.ToUpper(e.email("sam")) + " ", Password: "correct horse battery staple",
+		DisplayName: "Sam", OrganizationName: "  Sam & Co. Labs  ",
+	}
+	tokens, err := e.identity.Register(ctx, reg, e.client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(tokens.AccessToken, "sat_") || tokens.User.Email != e.email("sam") || tokens.User.Status != model.UserActive {
+		t.Fatalf("tokens: %+v", tokens)
+	}
+
+	// The new account owns exactly the organization it named.
+	id, err := e.identity.Authenticate(ctx, tokens.AccessToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := e.identity.Principal(ctx, id, "")
+	if err != nil || p.RoleID != model.RoleOwner || !p.Can(model.PermOwnership) {
+		t.Fatalf("principal: %+v %v", p, err)
+	}
+	org, err := e.tenancy.GetOrganization(ctx, p.TenantID)
+	if err != nil || org.Name != "Sam & Co. Labs" || !strings.HasPrefix(org.Slug, "sam-co-labs-") {
+		t.Fatalf("organization: %+v %v", org, err)
+	}
+	// Let the test's clean-up find the organization, whose slug ends in a random tail.
+	if _, err := e.db.Pool.Exec(ctx, `UPDATE organizations SET slug = slug || '-' || $2 WHERE id = $1`, org.ID, e.run); err != nil {
+		t.Fatal(err)
+	}
+
+	// The password works for a normal sign-in afterwards.
+	if _, err := e.identity.Login(ctx, e.email("sam"), reg.Password, e.client); err != nil {
+		t.Fatalf("sign in after registering: %v", err)
+	}
+
+	// An address is registered once, and a weak password is refused.
+	if _, err := e.identity.Register(ctx, reg, e.client); !errors.Is(err, model.ErrEmailTaken) {
+		t.Fatalf("a second registration for the address: %v", err)
+	}
+	weak := identity.Registration{Email: e.email("weak"), Password: "short", OrganizationName: "Weak"}
+	if _, err := e.identity.Register(ctx, weak, e.client); !errors.Is(err, model.ErrWeakPassword) {
+		t.Fatalf("weak password: %v", err)
+	}
+	noOrg := identity.Registration{Email: e.email("noorg"), Password: "correct horse battery staple"}
+	if _, err := e.identity.Register(ctx, noOrg, e.client); !errors.Is(err, identity.ErrInvalidInput) {
+		t.Fatalf("missing organization name: %v", err)
+	}
+
+	// The fourth attempt from one address in the window is throttled.
+	if _, err := e.identity.Register(ctx, weak, e.client); !errors.Is(err, model.ErrRateLimited) {
+		t.Fatalf("expected throttling, got %v", err)
+	}
+	if got := e.auditEvents(t, model.PlatformChain, "user.create"); len(got) == 0 {
+		t.Fatal("registration is audited")
+	}
+}
