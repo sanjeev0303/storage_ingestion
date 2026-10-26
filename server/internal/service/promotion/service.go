@@ -106,8 +106,10 @@ func readyKey(dst side, asset model.Asset) string {
 // against the asset's verified size and SHA-256, and only then moves the
 // asset PROCESSING -> AVAILABLE with the new key. It returns the asset's
 // resulting status. A REJECTED or DELETED result means someone else
-// finished the asset first; the caller then removes the copy.
-func (s *Service) Promote(ctx context.Context, asset model.Asset, destinationKey string) (model.AssetStatus, error) {
+// finished the asset first; the caller then removes the copy. confirm,
+// when set, runs just before the asset is published; an error from it
+// publishes nothing.
+func (s *Service) Promote(ctx context.Context, asset model.Asset, destinationKey string, confirm func(context.Context) error) (model.AssetStatus, error) {
 	src, err := s.place(ctx, asset.TenantID, asset.StagingConnectionID)
 	if err != nil {
 		return "", err
@@ -166,6 +168,11 @@ func (s *Service) Promote(ctx context.Context, asset model.Asset, destinationKey
 		}
 	}
 
+	if confirm != nil {
+		if err := confirm(ctx); err != nil {
+			return "", err
+		}
+	}
 	// Delivery reads only this exact stored object (If-Match / version), so
 	// a later out-of-band overwrite can never be served under this asset.
 	err = s.assets.RecordStorageVersion(ctx, asset.TenantID, asset.ID, stored.ETag, stored.VersionID, s.now())

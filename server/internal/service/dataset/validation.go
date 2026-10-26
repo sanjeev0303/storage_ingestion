@@ -566,12 +566,29 @@ func (s *Service) checkContent(ctx context.Context, tenantID string, rule *conte
 		}
 		reader, bucket = loc.Storage, loc.ReadyBucket
 	}
+	// A packed version is read from its entry in the pack: exactly its
+	// byte range, pinned to the pack as written.
+	key, first, last := m.ObjectKey, int64(0), int64(-1)
+	cond := interfaces.ReadCondition{VersionID: m.StorageVersionID}
+	if s.deps.Packs != nil {
+		loc, packed, err := s.deps.Packs.PackedLocation(ctx, tenantID, m.AssetID)
+		if err != nil {
+			return contentResult{}
+		}
+		if packed {
+			if first, last, err = loc.Range(0, -1); err != nil {
+				return contentResult{}
+			}
+			bucket, key = loc.Bucket, loc.ObjectKey
+			cond = interfaces.ReadCondition{IfMatch: loc.StorageETag, VersionID: loc.StorageVersionID}
+		}
+	}
 
 	var r contentResult
 	err := s.content.Do(ctx, func(ctx context.Context) error {
 		ctx, cancel := context.WithTimeout(ctx, s.cfg.ObjectTimeout)
 		defer cancel()
-		body, err := reader.OpenRange(ctx, bucket, m.ObjectKey, 0, -1, interfaces.ReadCondition{VersionID: m.StorageVersionID})
+		body, err := reader.OpenRange(ctx, bucket, key, first, last, cond)
 		if err != nil {
 			return err
 		}

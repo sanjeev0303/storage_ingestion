@@ -18,6 +18,7 @@ import (
 
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
+	"github.com/sanjeev0303/object-storage-platform/internal/platform/retry"
 )
 
 var _ interfaces.StorageProvider = (*ObjectStorage)(nil)
@@ -103,6 +104,12 @@ func (s *ObjectStorage) WriteObject(ctx context.Context, bucket, objectKey strin
 	if partSize <= 0 {
 		partSize = defaultTransferPart
 	}
+	if size > maxObjectBytes {
+		return interfaces.ObjectMetadata{}, retry.Permanent(fmt.Errorf("write object: %d bytes is more than S3's largest object (5 TiB)", size))
+	}
+	// ponytail: memory is one part, so a 5 TiB object holds 525 MiB; a
+	// transfer that large would want its own buffer pool.
+	partSize = max(partSize, (size+maxParts-1)/maxParts)
 	body = io.LimitReader(body, size)
 	if size <= partSize {
 		buf := make([]byte, size)

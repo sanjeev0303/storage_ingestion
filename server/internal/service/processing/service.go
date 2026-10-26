@@ -75,14 +75,20 @@ type Config struct {
 	Bucket      string
 	BatchSize   int
 	Concurrency int
-	// Lease bounds each job's processing time as well as its claim.
-	Lease time.Duration
-	Retry retry.Policy
+	// Lease is how long a claim lasts unrenewed: after a crash, the job
+	// is claimable again within one Lease. From the claim until the job
+	// ends, waiting for a slot included, its lease is renewed every
+	// RenewEvery (default Lease/3), for at most MaxJobDuration (default
+	// 30m), so one stuck job cannot hold its lease forever.
+	Lease          time.Duration
+	RenewEvery     time.Duration
+	MaxJobDuration time.Duration
+	Retry          retry.Policy
 	// Policy is the platform content policy. A tenant policy can only
 	// narrow it: denied types are added, the size limit is the smaller one.
 	Policy     model.ContentPolicy
 	ScanPolicy ScanPolicy
-	// ScanTimeout bounds one scan; it must be shorter than Lease.
+	// ScanTimeout bounds one scan; it must be shorter than MaxJobDuration.
 	ScanTimeout time.Duration
 	// QuarantineRetention is how long a rejected object is kept for
 	// investigation before it is purged.
@@ -111,8 +117,17 @@ func NewService(deps Dependencies, cfg Config, log *slog.Logger) (*Service, erro
 	if cfg.BatchSize <= 0 || cfg.Concurrency <= 0 || cfg.Lease <= 0 || cfg.Policy.MaxSizeBytes <= 0 {
 		return nil, errors.New("processing batch size, concurrency, lease and file limit must be positive")
 	}
-	if cfg.ScanTimeout <= 0 || cfg.ScanTimeout >= cfg.Lease {
-		return nil, errors.New("processing scan timeout must be positive and shorter than the lease")
+	if cfg.RenewEvery == 0 {
+		cfg.RenewEvery = cfg.Lease / 3
+	}
+	if cfg.MaxJobDuration == 0 {
+		cfg.MaxJobDuration = 30 * time.Minute
+	}
+	if cfg.RenewEvery <= 0 || 2*cfg.RenewEvery > cfg.Lease {
+		return nil, errors.New("processing lease renewal must come at least twice per lease")
+	}
+	if cfg.ScanTimeout <= 0 || cfg.ScanTimeout >= cfg.MaxJobDuration || cfg.MaxJobDuration < cfg.Lease {
+		return nil, errors.New("processing scan timeout must be positive and shorter than the maximum job duration, which must not be shorter than the lease")
 	}
 	if cfg.QuarantineRetention <= 0 {
 		return nil, errors.New("quarantine retention must be positive")
@@ -172,20 +187,31 @@ func (s *Service) RunOnce(ctx context.Context) (CycleStats, error) {
 	}
 	stats.Claimed = len(jobs)
 
+	// Every claimed job renews its lease from now on, also while it waits
+	// for a free slot: a lease that ran out in the queue would hand the job
+	// to another worker and cost it an attempt it never used.
+	leases := make([]lease, len(jobs))
+	for i, job := range jobs {
+		leases[i] = s.leased(ctx, job, s.jobLog(job))
+	}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	slots := make(chan struct{}, s.cfg.Concurrency)
-	for _, job := range jobs {
+	for i, job := range jobs {
 		if ctx.Err() != nil {
-			break // unprocessed claims expire and are picked up again
+			// Unprocessed claims expire and are picked up again.
+			for _, l := range leases[i:] {
+				l.stop()
+			}
+			break
 		}
 		slots <- struct{}{}
 		wg.Add(1)
-		go func(job model.ProcessingJob) {
+		go func(job model.ProcessingJob, l lease) {
 			defer wg.Done()
 			defer func() { <-slots }()
-			s.process(ctx, job, &stats, &mu)
-		}(job)
+			s.process(ctx, job, l, &stats, &mu)
+		}(job, leases[i])
 	}
 	wg.Wait()
 
@@ -233,7 +259,7 @@ func (s *Service) Intake(ctx context.Context, tenantID, uploadID string) (string
 
 	var stats CycleStats
 	var mu sync.Mutex
-	s.process(ctx, claimed, &stats, &mu)
+	s.process(ctx, claimed, s.leased(ctx, claimed, s.jobLog(claimed)), &stats, &mu)
 	switch {
 	case stats.Succeeded > 0:
 		return "asset promoted", nil
@@ -247,8 +273,8 @@ func (s *Service) Intake(ctx context.Context, tenantID, uploadID string) (string
 	return "processing interrupted; the job resumes when its lease expires", nil
 }
 
-func (s *Service) process(ctx context.Context, job model.ProcessingJob, stats *CycleStats, mu *sync.Mutex) {
-	log := s.log.With(
+func (s *Service) jobLog(job model.ProcessingJob) *slog.Logger {
+	return s.log.With(
 		"job_id", job.ID,
 		"tenant_id", job.TenantID,
 		"asset_id", job.AssetID,
@@ -256,11 +282,15 @@ func (s *Service) process(ctx context.Context, job model.ProcessingJob, stats *C
 		"attempt", job.AttemptCount,
 		"max_attempts", job.MaxAttempts,
 	)
+}
+
+// process runs one claimed job under its lease and records the outcome.
+func (s *Service) process(ctx context.Context, job model.ProcessingJob, l lease, stats *CycleStats, mu *sync.Mutex) {
+	log := s.jobLog(job)
 	started := time.Now()
 
-	workCtx, cancel := context.WithTimeout(ctx, s.cfg.Lease)
-	state, err := s.run(workCtx, &job)
-	cancel()
+	state, err := s.run(l.ctx, &job)
+	lost := l.stop()
 
 	count := func(field *int, metric string) {
 		mu.Lock()
@@ -274,7 +304,7 @@ func (s *Service) process(ctx context.Context, job model.ProcessingJob, stats *C
 		log.Info("processing interrupted by shutdown", "reached_stage", string(job.Stage))
 		return
 	}
-	if errors.Is(err, model.ErrLeaseLost) {
+	if lost || errors.Is(err, model.ErrLeaseLost) {
 		count(&stats.LeaseLost, "jobs_lease_lost")
 		log.Warn("processing lease lost; another worker owns the job")
 		return
@@ -297,7 +327,7 @@ func (s *Service) process(ctx context.Context, job model.ProcessingJob, stats *C
 	var releaseErr error
 	switch {
 	case err == nil:
-		releaseErr = s.deps.Jobs.Finish(ctx, job.ID, s.cfg.Owner, now, state, "")
+		releaseErr = s.deps.Jobs.Finish(ctx, job.ID, job.LeaseOwner, now, state, "")
 		if releaseErr == nil && state == model.ProcessingSucceeded {
 			count(&stats.Succeeded, "jobs_succeeded")
 			log.Info("asset promoted to AVAILABLE", "duration_ms", duration)
@@ -307,7 +337,7 @@ func (s *Service) process(ctx context.Context, job model.ProcessingJob, stats *C
 		}
 
 	case exhausted:
-		releaseErr = s.deps.Jobs.Finish(ctx, job.ID, s.cfg.Owner, now, model.ProcessingExhausted, retry.Sanitize(err))
+		releaseErr = s.deps.Jobs.Finish(ctx, job.ID, job.LeaseOwner, now, model.ProcessingExhausted, retry.Sanitize(err))
 		if releaseErr == nil {
 			count(&stats.Exhausted, "jobs_exhausted")
 			log.Error("processing exhausted; asset held in quarantine until an operator acts",
@@ -316,7 +346,7 @@ func (s *Service) process(ctx context.Context, job model.ProcessingJob, stats *C
 
 	default:
 		next := now.Add(s.cfg.Retry.Delay(job.AttemptCount))
-		releaseErr = s.deps.Jobs.Reschedule(ctx, job.ID, s.cfg.Owner, now, next, retry.Sanitize(err))
+		releaseErr = s.deps.Jobs.Reschedule(ctx, job.ID, job.LeaseOwner, now, next, retry.Sanitize(err))
 		if releaseErr == nil {
 			count(&stats.Retried, "jobs_retried")
 			log.Warn("processing will retry", "reached_stage", string(job.Stage),
@@ -330,6 +360,70 @@ func (s *Service) process(ctx context.Context, job model.ProcessingJob, stats *C
 	} else if releaseErr != nil {
 		log.Error("record processing outcome", "error", releaseErr)
 	}
+}
+
+// errJobTooLong ends a job that kept its lease for MaxJobDuration.
+var errJobTooLong = errors.New("processing took longer than the maximum job duration")
+
+// lease is a claimed job's renewal. Its context ends when the lease is
+// lost (another worker may hold the job now), when renewal has failed for
+// a whole lease, or MaxJobDuration after the claim; content reads, scans
+// and copies stop with it. stop ends the renewal, waits for it, and
+// reports whether the lease was lost.
+type lease struct {
+	ctx  context.Context
+	stop func() bool
+}
+
+// leased renews job's lease from the claim until stop.
+func (s *Service) leased(ctx context.Context, job model.ProcessingJob, log *slog.Logger) lease {
+	leaseCtx, cancel := context.WithCancelCause(ctx)
+	workCtx, cancelTimeout := context.WithTimeoutCause(leaseCtx, s.cfg.MaxJobDuration, errJobTooLong)
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(s.cfg.RenewEvery)
+		defer ticker.Stop()
+		renewed := time.Now()
+		for {
+			select {
+			case <-done:
+				return
+			case <-workCtx.Done():
+				return
+			case <-ticker.C:
+			}
+			err := s.deps.Jobs.Renew(workCtx, job.ID, job.LeaseOwner, s.now(), s.cfg.Lease)
+			switch {
+			case err == nil:
+				renewed = time.Now()
+				s.deps.Metrics.Add("lease_renewals", 1)
+			case errors.Is(err, model.ErrLeaseLost):
+				s.deps.Metrics.Add("lease_renewals_lost", 1)
+				log.Warn("processing lease lost; stopping the job")
+				cancel(model.ErrLeaseLost)
+				return
+			default:
+				s.deps.Metrics.Add("lease_renewal_errors", 1)
+				log.Warn("renew processing lease", "error", retry.Sanitize(err))
+				if time.Since(renewed) >= s.cfg.Lease {
+					// Unrenewed for a whole lease: another worker may hold it.
+					cancel(model.ErrLeaseLost)
+					return
+				}
+			}
+		}
+	}()
+	return lease{ctx: workCtx, stop: func() bool {
+		close(done)
+		wg.Wait()
+		lost := errors.Is(context.Cause(leaseCtx), model.ErrLeaseLost)
+		cancelTimeout()
+		cancel(nil)
+		return lost
+	}}
 }
 
 // run advances the job stage by stage until it reaches a final state. A
@@ -623,7 +717,12 @@ func (s *Service) promote(ctx context.Context, job *model.ProcessingJob, asset m
 		}
 	}
 
-	status, err := s.deps.Promoter.Promote(ctx, asset, job.PromotionKey)
+	// The lease is renewed once more just before the asset is published: a
+	// worker that lost the job to another one publishes nothing.
+	confirm := func(ctx context.Context) error {
+		return s.deps.Jobs.Renew(ctx, job.ID, job.LeaseOwner, s.now(), s.cfg.Lease)
+	}
+	status, err := s.deps.Promoter.Promote(ctx, asset, job.PromotionKey, confirm)
 	if err != nil {
 		return "", err
 	}
@@ -916,7 +1015,7 @@ func (s *Service) recordEvent(ctx context.Context, job model.ProcessingJob, name
 }
 
 func (s *Service) save(ctx context.Context, job *model.ProcessingJob) (model.ProcessingState, error) {
-	return "", s.deps.Jobs.SaveProgress(ctx, *job, s.cfg.Owner, s.now())
+	return "", s.deps.Jobs.SaveProgress(ctx, *job, job.LeaseOwner, s.now())
 }
 
 // staging resolves where an asset's upload landed: the platform's
@@ -936,12 +1035,11 @@ func (s *Service) staging(ctx context.Context, asset model.Asset) (interfaces.Mu
 }
 
 // recordStorage is where a quarantine record's object is: its asset's
-// staging connection.
+// staging connection. A record cascades with its asset (migrations 000007
+// and 000012) and every asset carries a binding (000015), so a missing
+// asset is an error; its object is never looked for on the platform.
 func (s *Service) recordStorage(ctx context.Context, record model.QuarantineRecord) (interfaces.MultipartStorage, string, error) {
 	asset, err := s.deps.Assets.GetByID(ctx, record.TenantID, record.AssetID)
-	if errors.Is(err, model.ErrAssetNotFound) {
-		return s.deps.Storage, s.cfg.Bucket, nil
-	}
 	if err != nil {
 		return nil, "", err
 	}

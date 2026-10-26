@@ -146,9 +146,7 @@ func (r *StorageConnectionRepository) missed(ctx context.Context, tenantID, conn
 	return model.ErrRevisionConflict
 }
 
-// UpdateConnection changes non-secret settings. A change of where the
-// connection points (region, endpoint, path style) sends an active
-// connection back to PENDING until it is tested again.
+// UpdateConnection changes non-secret settings at the given revision.
 func (r *StorageConnectionRepository) UpdateConnection(ctx context.Context, tenantID, connectionID string, revision int64, change interfaces.ConnectionChange) (model.StorageConnection, error) {
 	c, err := scanConnection(r.db.Pool.QueryRow(ctx, `
 		UPDATE storage_connections SET
@@ -157,9 +155,6 @@ func (r *StorageConnectionRepository) UpdateConnection(ctx context.Context, tena
 		    endpoint = coalesce($6, endpoint),
 		    force_path_style = coalesce($7, force_path_style),
 		    staging_mode = coalesce($8, staging_mode),
-		    status = CASE WHEN status = 'ACTIVE' AND (region <> coalesce($5, region) OR endpoint <> coalesce($6, endpoint)
-		                       OR force_path_style <> coalesce($7, force_path_style))
-		                  THEN 'PENDING' ELSE status END,
 		    revision = revision + 1, updated_by = $9, updated_at = $10
 		WHERE tenant_id = $1 AND id = $2 AND revision = $3 AND status <> 'DELETED'
 		RETURNING `+connectionColumns,
@@ -279,6 +274,21 @@ func (r *StorageConnectionRepository) Dependents(ctx context.Context, tenantID, 
 	return dependents(ctx, r.db.Pool, tenantID, connectionID)
 }
 
+func (r *StorageConnectionRepository) HeldObject(ctx context.Context, tenantID, connectionID string) (string, error) {
+	var key string
+	err := r.db.Pool.QueryRow(ctx, `
+		SELECT object_key FROM assets
+		WHERE tenant_id = $1 AND storage_connection_id = $2 AND status = 'AVAILABLE'
+		LIMIT 1`, tenantID, connectionID).Scan(&key)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("find an object the connection holds: %w", err)
+	}
+	return key, nil
+}
+
 type queryRower interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
@@ -348,6 +358,44 @@ func (r *StorageConnectionRepository) DefaultConnection(ctx context.Context, ten
 		return "", fmt.Errorf("read default connection: %w", err)
 	}
 	return id, nil
+}
+
+// Disable locks the organization's row first, the row SetDefault updates:
+// a SetDefault that commits first is seen here as the default, and one
+// that waits fails the binding trigger's ACTIVE check once this commits.
+func (r *StorageConnectionRepository) Disable(ctx context.Context, tenantID, connectionID, actor string, at time.Time) (model.StorageConnection, error) {
+	tx, err := r.db.Pool.Begin(ctx)
+	if err != nil {
+		return model.StorageConnection{}, fmt.Errorf("begin disable connection: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	var defaultID string
+	err = tx.QueryRow(ctx, `SELECT default_storage_connection_id FROM organizations WHERE id = $1 FOR UPDATE`, tenantID).Scan(&defaultID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return model.StorageConnection{}, fmt.Errorf("lock organization: %w", err)
+	}
+	if defaultID == connectionID {
+		return model.StorageConnection{}, fmt.Errorf("%w: it is the organization's default; set another default first", model.ErrConnectionInUse)
+	}
+	c, err := scanConnection(tx.QueryRow(ctx, `
+		UPDATE storage_connections SET status = 'DISABLED', disabled_at = $3,
+		    revision = revision + 1, updated_by = $4, updated_at = $3
+		WHERE tenant_id = $1 AND id = $2 AND status IN ('ACTIVE', 'PENDING')
+		RETURNING `+connectionColumns, tenantID, connectionID, at, actor))
+	if errors.Is(err, model.ErrConnectionNotFound) {
+		if err := r.missed(ctx, tenantID, connectionID); errors.Is(err, model.ErrConnectionNotFound) {
+			return c, err
+		}
+		return c, model.ErrConnectionNotActive
+	}
+	if err != nil {
+		return c, fmt.Errorf("disable storage connection: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return c, fmt.Errorf("commit disable connection: %w", err)
+	}
+	return c, nil
 }
 
 // SetDefault makes the connection the organization's default. The binding

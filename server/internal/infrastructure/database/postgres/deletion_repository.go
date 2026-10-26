@@ -318,6 +318,16 @@ func (r *DeletionRepository) Protect(ctx context.Context, operationID, owner str
 	`, operationID, owner, now, next, reason)
 }
 
+func (r *DeletionRepository) Wait(ctx context.Context, operationID, owner string, now, next time.Time, reason string) error {
+	return r.leased(ctx, `
+		UPDATE deletion_operations
+		SET state = 'RETRY_WAIT', attempt_count = GREATEST(attempt_count - 1, 0),
+		    next_attempt_at = $4, last_error = $5,
+		    lease_owner = NULL, lease_expires_at = NULL, updated_at = $3
+		WHERE id = $1 AND lease_owner = $2 AND lease_expires_at > $3 AND state = 'IN_PROGRESS'
+	`, operationID, owner, now, next, reason)
+}
+
 func (r *DeletionRepository) Start(ctx context.Context, operationID, owner string, now time.Time) (bool, error) {
 	// A hold committed before this statement, or a restore, stops it.
 	tag, err := r.db.Pool.Exec(ctx, `

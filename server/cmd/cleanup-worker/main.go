@@ -9,7 +9,6 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -135,11 +134,12 @@ func run() error {
 	holds := postgres.NewLegalHoldRepository(db)
 	events := postgres.NewLifecycleEventRepository(db)
 	cursors := postgres.NewCursorRepository(db)
+	packs := postgres.NewPackRepository(db)
 
 	lifecycle, err := assetservice.NewService(assetservice.Dependencies{
 		Assets: assets, Uploads: uploads, Jobs: jobs, Quarantine: postgres.NewQuarantineRepository(db),
 		Policies: postgres.NewRetentionPolicyRepository(db), Holds: holds, Deletions: postgres.NewDeletionRepository(db),
-		Events: events, Cursors: cursors, Storage: storage, Metrics: registry, Router: router,
+		Events: events, Cursors: cursors, Storage: storage, Metrics: registry, Router: router, Packs: packs,
 	}, assetservice.Config{
 		Owner: owner, QuarantineBucket: bucket, DeliveryBucket: deliveryBucket, DeliveryPrefix: lc.PromotionPrefix,
 		Platform: assetservice.PlatformRetention{
@@ -178,7 +178,7 @@ func run() error {
 	cleanup, err := cleanupservice.NewService(cleanupservice.Dependencies{
 		Storage: storage, Inventory: postgres.NewInventoryRepository(db), Cursors: cursors, Uploads: uploads,
 		Assets: assets, Jobs: jobs, Holds: holds, Events: events, Metrics: registry,
-		Router: router, Connections: postgres.NewStorageConnectionRepository(db),
+		Router: router, Connections: postgres.NewStorageConnectionRepository(db), Packs: packs,
 	}, cleanupservice.Config{
 		Owner: owner, QuarantineBucket: bucket, DeliveryBucket: deliveryBucket, DeliveryPrefix: lc.PromotionPrefix,
 		TenantID: *tenant, PageSize: lc.ScanPageSize, PagesPerRun: lc.ScanPages, Lease: lc.LeaseDuration,
@@ -254,12 +254,8 @@ func run() error {
 
 	if lc.MetricsAddr != "" {
 		registry.Publish("lifecycle")
-		// expvar serves /debug/vars on the default mux.
-		go func() {
-			if err := http.ListenAndServe(lc.MetricsAddr, nil); err != nil {
-				log.Error("metrics listener stopped", "error", err)
-			}
-		}()
+		stopMetrics := metrics.Serve(lc.MetricsAddr, db.Pool.Ping, log)
+		defer stopMetrics()
 	}
 	var wg sync.WaitGroup
 	if consumer != nil {

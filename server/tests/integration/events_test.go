@@ -977,10 +977,11 @@ func TestStaleEventsAreNotReplayed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := e.jobs.ClaimJob(ctx, job.ID, "it", now, time.Minute); err != nil || !ok {
+	claimed, ok, err := e.jobs.ClaimJob(ctx, job.ID, "it", now, time.Minute)
+	if err != nil || !ok {
 		t.Fatalf("claim job: %v", err)
 	}
-	if err := e.jobs.Finish(ctx, job.ID, "it", now, model.ProcessingSucceeded, ""); err != nil {
+	if err := e.jobs.Finish(ctx, job.ID, claimed.LeaseOwner, now, model.ProcessingSucceeded, ""); err != nil {
 		t.Fatal(err)
 	}
 	dl := e.addDeadLetter(t, ev, processingQueue)

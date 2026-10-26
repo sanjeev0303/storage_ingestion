@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"strings"
 	"time"
 
@@ -25,6 +24,10 @@ type ObjectStorage struct {
 	presigner *s3.PresignClient
 	// partBytes is the buffer of a streaming write (connection.go).
 	partBytes int64
+	// singleCopyBytes and copyPartBytes override the copy limits in
+	// tests (copy.go); zero means S3's own.
+	singleCopyBytes int64
+	copyPartBytes   int64
 }
 
 // Compile-time assertions: ObjectStorage must satisfy both interfaces.
@@ -109,18 +112,23 @@ func (s *ObjectStorage) HeadObject(
 	return metadata, nil
 }
 
-// DeleteObject removes an object from the specified bucket.
+// DeleteObject removes an object from the specified bucket. A delete
+// marker in the answer means the bucket keeps versions (on or suspended),
+// so the key's versions are removed as well.
 func (s *ObjectStorage) DeleteObject(
 	ctx context.Context,
 	bucket string,
 	objectKey string,
 ) error {
-	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+	out, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(objectKey),
 	})
 	if err != nil {
 		return classify("delete object", err)
+	}
+	if aws.ToBool(out.DeleteMarker) || aws.ToString(out.VersionId) != "" {
+		return s.deleteVersions(ctx, bucket, objectKey)
 	}
 
 	return nil
@@ -424,8 +432,9 @@ func (s *ObjectStorage) OpenObject(
 	return out.Body, nil
 }
 
-// CopyObject is a server-side copy. A single CopyObject call handles objects
-// up to 5 GiB, which is the application's upload limit.
+// CopyObject is a server-side copy, pinned to the source's ETag read
+// first. One CopyObject call copies up to 5 GiB; a larger source is copied
+// in parts (copy.go).
 func (s *ObjectStorage) CopyObject(
 	ctx context.Context,
 	sourceBucket string,
@@ -434,19 +443,26 @@ func (s *ObjectStorage) CopyObject(
 	destinationKey string,
 ) error {
 	if sourceBucket == "" || sourceKey == "" || destinationBucket == "" || destinationKey == "" {
-		return errors.New("source and destination bucket and key are required")
+		return errCopyArguments
 	}
 
-	// CopySource is "bucket/key", URL-encoded segment by segment.
-	segments := strings.Split(sourceKey, "/")
-	for i, segment := range segments {
-		segments[i] = url.PathEscape(segment)
+	source, err := s.HeadObject(ctx, sourceBucket, sourceKey)
+	if err != nil {
+		return err
+	}
+	limit := s.singleCopyBytes
+	if limit <= 0 {
+		limit = maxSingleCopyBytes
+	}
+	if source.SizeBytes > limit {
+		return s.copyInParts(ctx, sourceBucket, sourceKey, source.ETag, source.SizeBytes, destinationBucket, destinationKey)
 	}
 
-	_, err := s.client.CopyObject(ctx, &s3.CopyObjectInput{
-		Bucket:     aws.String(destinationBucket),
-		Key:        aws.String(destinationKey),
-		CopySource: aws.String(sourceBucket + "/" + strings.Join(segments, "/")),
+	_, err = s.client.CopyObject(ctx, &s3.CopyObjectInput{
+		Bucket:            aws.String(destinationBucket),
+		Key:               aws.String(destinationKey),
+		CopySource:        aws.String(copySource(sourceBucket, sourceKey)),
+		CopySourceIfMatch: aws.String(source.ETag),
 	})
 	if err != nil {
 		return classify("copy object", err)

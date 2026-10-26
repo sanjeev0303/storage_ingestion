@@ -155,23 +155,44 @@ const maxCancelRounds = 20
 // AdvanceCancellations works through cancelling jobs: waiting entries are
 // cancelled in batches, and uploads in progress are aborted and cancelled.
 // Stored uploads keep going; the job is CANCELLED once they finish.
+//
+// Waiting entries are cancelled in position order from where the last
+// batch stopped, across passes, so a batch never reads past the entries
+// already cancelled. After a pass reaches the end, the next one starts
+// over, but only if the job's counters still show entries waiting: an
+// upload that failed meanwhile can be waiting again behind the cursor.
 func (s *Service) AdvanceCancellations(ctx context.Context) (int, error) {
 	jobs, err := s.deps.Repo.JobsInState(ctx, model.JobCancelling, s.cfg.WorkerBatch)
 	if err != nil {
 		return 0, err
 	}
+	s.cancelMu.Lock()
+	reached := make(map[string]int64, len(jobs))
+	for _, job := range jobs {
+		reached[job.ID] = s.cancelledTo[job.ID]
+	}
+	s.cancelledTo = reached // jobs no longer cancelling are forgotten
+	s.cancelMu.Unlock()
+
 	total := 0
 	for _, job := range jobs {
-		for round := 0; round < maxCancelRounds && ctx.Err() == nil; round++ {
-			n, err := s.deps.Repo.CancelWaiting(ctx, job.ID, s.cfg.WorkerBatch, s.now())
+		after := reached[job.ID]
+		waiting := job.Counters.Pending + job.Counters.Retryable
+		for round := 0; waiting > 0 && round < maxCancelRounds && ctx.Err() == nil; round++ {
+			n, last, err := s.deps.Repo.CancelWaiting(ctx, job.ID, after, s.cfg.WorkerBatch, s.now())
 			if err != nil {
 				return total, err
 			}
 			total += n
+			after = last
 			if n < s.cfg.WorkerBatch {
+				after = 0
 				break
 			}
 		}
+		s.cancelMu.Lock()
+		s.cancelledTo[job.ID] = after
+		s.cancelMu.Unlock()
 		inFlight, err := s.deps.Repo.InFlight(ctx, job.ID, s.cfg.WorkerBatch)
 		if err != nil {
 			return total, err

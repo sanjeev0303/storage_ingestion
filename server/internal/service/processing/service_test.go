@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +31,7 @@ var quietLog = slog.New(slog.NewTextHandler(io.Discard, nil))
 // during(). An error from during() is reported as a TIMEOUT when the scan
 // deadline passed and as an ERROR otherwise, as the ClamAV adapter does.
 type fakeScanner struct {
+	mu      sync.Mutex
 	results []interfaces.ScanResult
 	pingErr error
 	calls   int
@@ -48,7 +50,9 @@ func (f *fakeScanner) Ping(context.Context) error {
 }
 
 func (f *fakeScanner) Scan(ctx context.Context, content io.Reader) interfaces.ScanResult {
+	f.mu.Lock()
 	f.calls++
+	f.mu.Unlock()
 	if f.partial > 0 {
 		content = io.LimitReader(content, f.partial)
 	}
@@ -63,6 +67,8 @@ func (f *fakeScanner) Scan(ctx context.Context, content io.Reader) interfaces.Sc
 			return interfaces.ScanResult{Outcome: model.ScanError, Detail: "failed"}
 		}
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if len(f.results) > 0 {
 		result := f.results[0]
 		f.results = f.results[1:]
@@ -652,7 +658,7 @@ func TestShutdownWritesNoOutcome(t *testing.T) {
 
 	stats, _ := h.service(t, "worker-a").RunOnce(ctx)
 	job := h.onlyJob(t)
-	if stats.Succeeded+stats.Retried+stats.Exhausted+stats.Failed != 0 || job.LeaseOwner != "worker-a" || job.State != model.ProcessingPending {
+	if stats.Succeeded+stats.Retried+stats.Exhausted+stats.Failed != 0 || job.LeaseOwner != "worker-a#1" || job.State != model.ProcessingPending {
 		t.Fatalf("an interrupted job must keep its lease to expire: %+v / %+v", stats, job)
 	}
 }
@@ -854,5 +860,28 @@ func TestTenantPolicyNarrowsValidation(t *testing.T) {
 				t.Fatalf("validation result not recorded or scanned anyway: %+v", job)
 			}
 		})
+	}
+}
+
+// A quarantine record without its asset (impossible: they cascade) is
+// never purged from the platform's bucket in place of the asset's own
+// connection.
+func TestPurgeNeverFallsBackToThePlatformBucket(t *testing.T) {
+	h := newHarness()
+	ctx := context.Background()
+	key := "quarantine/" + tenant + "/up-gone"
+	h.storage.PutObject(key, []byte("rejected bytes"))
+	retain := h.clock.Add(-time.Hour)
+	if err := h.held.Reject(ctx, model.QuarantineRecord{
+		ID: "q-gone", TenantID: tenant, AssetID: "gone", JobID: "job-gone", UploadID: "up-gone", ObjectKey: key,
+		Category: model.QuarantineMalwareDetected, Reason: model.RejectMalwareDetected, RetainUntil: &retain, CreatedAt: retain,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := h.service(t, "worker-a").PurgeExpired(ctx); err != nil || n != 0 {
+		t.Fatalf("purged %d: %v", n, err)
+	}
+	if _, ok := h.storage.Object(key); !ok {
+		t.Fatal("an object was deleted from the platform bucket for a record without its asset")
 	}
 }

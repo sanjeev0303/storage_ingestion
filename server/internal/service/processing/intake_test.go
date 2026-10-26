@@ -54,7 +54,7 @@ func TestIntakeLeavesAJobHeldElsewhereToItsWorker(t *testing.T) {
 	if err != nil || !strings.Contains(note, "another worker") {
 		t.Fatalf("a job another worker holds is left alone: %q %v", note, err)
 	}
-	if job := h.onlyJob(t); job.LeaseOwner != "worker-b" || job.AttemptCount != 1 {
+	if job := h.onlyJob(t); job.LeaseOwner != "worker-b#1" || job.AttemptCount != 1 {
 		t.Fatalf("the other worker's lease must stand: %+v", job)
 	}
 }

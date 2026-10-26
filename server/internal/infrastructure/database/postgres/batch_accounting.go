@@ -554,16 +554,16 @@ func (r *IngestionRepository) RequestCancel(ctx context.Context, tenantID, jobID
 	return job, err
 }
 
-func (r *IngestionRepository) CancelWaiting(ctx context.Context, jobID string, limit int, now time.Time) (int, error) {
-	count := 0
+func (r *IngestionRepository) CancelWaiting(ctx context.Context, jobID string, after int64, limit int, now time.Time) (int, int64, error) {
+	count, last := 0, after
 	err := r.inTx(ctx, func(tx pgx.Tx) error {
 		entries, err := collectEntries(tx.Query(ctx, `
 			SELECT `+entryColumns+` FROM ingestion_entries
-			WHERE job_id = $1 AND state IN ('PENDING', 'FAILED_RETRYABLE')
+			WHERE job_id = $1 AND position > $3 AND state IN ('PENDING', 'FAILED_RETRYABLE')
 			  AND EXISTS (SELECT 1 FROM ingestion_jobs WHERE id = $1 AND state = 'CANCELLING')
 			ORDER BY position LIMIT $2
 			FOR UPDATE SKIP LOCKED
-		`, jobID, limit))
+		`, jobID, limit, after))
 		if err != nil || len(entries) == 0 {
 			return err
 		}
@@ -585,11 +585,14 @@ func (r *IngestionRepository) CancelWaiting(ctx context.Context, jobID string, l
 		if err != nil {
 			return err
 		}
-		count = len(entries)
+		count, last = len(entries), positions[len(positions)-1]
 		_, err = settle(ctx, tx, job, now)
 		return err
 	})
-	return count, err
+	if err != nil {
+		return 0, after, err
+	}
+	return count, last, nil
 }
 
 func (r *IngestionRepository) Retry(ctx context.Context, req interfaces.RetryRequest) (int, error) {

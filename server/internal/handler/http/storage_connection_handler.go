@@ -212,7 +212,13 @@ func (h *StorageConnectionHandler) update(w nethttp.ResponseWriter, r *nethttp.R
 		mode := model.StagingMode(*body.StagingMode)
 		in.StagingMode = &mode
 	}
-	c, err := h.service.Update(r.Context(), principalOf(r), r.PathValue("id"), revision, in)
+	c, result, err := h.service.Update(r.Context(), principalOf(r), r.PathValue("id"), revision, in)
+	if errors.Is(err, storageconn.ErrTestFailed) {
+		// The new settings were not stored; the connection keeps the old.
+		w.Header().Set("Cache-Control", "private, no-store")
+		writeJSON(w, nethttp.StatusUnprocessableEntity, testResponse(result))
+		return
+	}
 	if err != nil {
 		h.fail(w, err)
 		return

@@ -80,8 +80,11 @@ type IngestionRepository interface {
 	// then on. A job with no open entries is CANCELLED at once.
 	RequestCancel(ctx context.Context, tenantID, jobID string, now time.Time) (model.IngestionJob, error)
 	// CancelWaiting cancels up to limit PENDING and FAILED_RETRYABLE
-	// entries of a CANCELLING job, and returns how many.
-	CancelWaiting(ctx context.Context, jobID string, limit int, now time.Time) (int, error)
+	// entries of a CANCELLING job after position after, in position order.
+	// It returns how many, and the last position it cancelled (after when
+	// none), so the next call starts there instead of past every entry
+	// already cancelled.
+	CancelWaiting(ctx context.Context, jobID string, after int64, limit int, now time.Time) (int, int64, error)
 	// Retry makes failed entries PENDING again: FAILED_RETRYABLE ones, and
 	// FAILED ones with a retryable error and manual retries left. It
 	// returns how many it moved. A finished job becomes RUNNING again.

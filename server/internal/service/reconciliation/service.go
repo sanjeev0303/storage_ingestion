@@ -2,6 +2,8 @@ package reconciliation
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -23,8 +25,11 @@ type Resolver interface {
 	Expire(ctx context.Context, tenantID, uploadID string) (model.UploadStatus, error)
 	VerifyIntegrity(ctx context.Context, tenantID, uploadID string) (model.UploadStatus, error)
 
-	ScanOrphanSessions(ctx context.Context, cursor string, opts uploadservice.ScanOptions) ([]model.ReconciliationFinding, string, error)
-	ScanOrphanObjects(ctx context.Context, cursor string, opts uploadservice.ScanOptions) ([]model.ReconciliationFinding, string, error)
+	// PlatformPlace is the platform's staging area; ScanSessionsAt and
+	// ScanObjectsAt scan one page of any connection's.
+	PlatformPlace() uploadservice.ScanPlace
+	ScanSessionsAt(ctx context.Context, place uploadservice.ScanPlace, cursor string, opts uploadservice.ScanOptions) ([]model.ReconciliationFinding, string, error)
+	ScanObjectsAt(ctx context.Context, place uploadservice.ScanPlace, cursor string, opts uploadservice.ScanOptions) ([]model.ReconciliationFinding, string, error)
 	CleanStaleParts(ctx context.Context, refs []model.UploadRef, dryRun bool) ([]model.ReconciliationFinding, error)
 	AbortLeftoverSessions(ctx context.Context, sessions []model.UploadSession, dryRun bool) ([]model.ReconciliationFinding, error)
 }
@@ -84,9 +89,17 @@ type Service struct {
 	metrics  *metrics.Registry
 	now      func() time.Time
 
-	// Where each listing scan continues next cycle (this process only).
+	// Set by Route: tenants' connections for the listing scans, and the
+	// inventory that keeps each scan's progress.
+	connections interfaces.ConnectionLister
+	router      interfaces.StorageRouter
+	inventory   interfaces.InventoryRepository
+
+	// sessionCursor is where the finished-session scan continues next
+	// cycle; cursors, without an inventory, where each listing scan does
+	// (this process only).
 	sessionCursor string
-	objectCursor  string
+	cursors       map[string]string
 }
 
 func NewService(
@@ -130,7 +143,19 @@ func NewService(
 		log:      log,
 		metrics:  registry,
 		now:      func() time.Time { return time.Now().UTC() },
+		cursors:  map[string]string{},
 	}, nil
+}
+
+// Route extends the listing scans to tenants' storage connections that
+// stage uploads in their own buckets, and keeps every scan's progress in
+// inventory: its cursor, pages, findings and sanitized last error, under a
+// lease, so a scan resumes after a restart and two workers never scan one
+// place at once. Without it only the platform is scanned, from cursors
+// kept in this process.
+func (s *Service) Route(connections interfaces.ConnectionLister, router interfaces.StorageRouter, inventory interfaces.InventoryRepository) *Service {
+	s.connections, s.router, s.inventory = connections, router, inventory
+	return s
 }
 
 // CycleStats is what one cycle did; a dry run fills Due and Findings with
@@ -298,25 +323,25 @@ func (s *Service) resolve(ctx context.Context, task model.ReconciliationTask) (m
 }
 
 // scan runs the bounded discrepancy scans: orphaned provider sessions,
-// orphaned quarantine objects, and stale part rows. Each listing scan
-// takes at most ScanPages pages per cycle and resumes from its cursor.
+// orphaned staging objects, and stale part rows. Each listing scan runs on
+// every place uploads land, takes at most ScanPages pages of each per
+// cycle and resumes from that place's cursor.
 func (s *Service) scan(ctx context.Context, stats *CycleStats) error {
 	opts := uploadservice.ScanOptions{
 		PageSize: s.cfg.ScanPageSize, MinAge: s.cfg.OrphanMinAge, DryRun: s.cfg.DryRun, DeleteUnrecorded: s.cfg.DeleteUnrecorded,
 	}
-	var errs []error
+	places, err := s.places(ctx)
+	errs := []error{err}
 
-	var err error
 	switch s.cfg.SessionScan {
 	case SessionScanProvider:
-		s.sessionCursor, err = s.scanPages(ctx, stats, s.sessionCursor, opts, s.resolver.ScanOrphanSessions)
+		err = s.scanPlaces(ctx, stats, model.ScanUploadSessions, places, opts, s.resolver.ScanSessionsAt)
 	case SessionScanDatabase:
 		err = s.scanFinishedSessions(ctx, stats)
 	}
 	errs = append(errs, err)
 
-	s.objectCursor, err = s.scanPages(ctx, stats, s.objectCursor, opts, s.resolver.ScanOrphanObjects)
-	errs = append(errs, err)
+	errs = append(errs, s.scanPlaces(ctx, stats, model.ScanUploadObjects, places, opts, s.resolver.ScanObjectsAt))
 
 	refs, err := s.tasks.StaleParts(ctx, s.now().Add(-s.cfg.OrphanMinAge), s.cfg.ScanPageSize)
 	if err == nil {
@@ -358,24 +383,154 @@ func (s *Service) scanFinishedSessions(ctx context.Context, stats *CycleStats) e
 	return nil
 }
 
-type scanFunc func(ctx context.Context, cursor string, opts uploadservice.ScanOptions) ([]model.ReconciliationFinding, string, error)
+// place is a staging area to scan, or why a connection's could not be
+// reached this cycle.
+type place struct {
+	uploadservice.ScanPlace
+	err error
+}
 
-func (s *Service) scanPages(ctx context.Context, stats *CycleStats, cursor string, opts uploadservice.ScanOptions, scan scanFunc) (string, error) {
+// places are where uploads land: the platform's staging area and, once
+// routed, the staging prefix of every tenant connection that holds work
+// (active or disabled) and stages in its own bucket. Only trusted records
+// name them. A connection that cannot be reached comes back with its
+// error, to be recorded; it never falls back to the platform.
+func (s *Service) places(ctx context.Context) ([]place, error) {
+	places := []place{{ScanPlace: s.resolver.PlatformPlace()}}
+	if s.connections == nil || s.router == nil {
+		return places, nil
+	}
+	connections, err := s.connections.ConnectionsHoldingWork(ctx, "")
+	if err != nil {
+		return places, fmt.Errorf("list storage connections: %w", err)
+	}
+	for _, c := range connections {
+		if c.StagingMode != model.StagingInPlace {
+			continue // its uploads land on the platform
+		}
+		p := place{ScanPlace: uploadservice.ScanPlace{
+			ConnectionID: c.ID, Bucket: c.Bucket, Prefix: c.StagingPrefix, TenantID: c.TenantID, Customer: true,
+		}}
+		loc, err := s.router.Locate(ctx, c.TenantID, c.ID)
+		if err != nil {
+			p.err = fmt.Errorf("storage connection %s: %w", c.ID, err)
+		} else {
+			p.Storage, p.Bucket, p.Prefix = loc.Storage, loc.StagingBucket, loc.StagingPrefix
+		}
+		places = append(places, p)
+	}
+	return places, nil
+}
+
+type placeScan func(ctx context.Context, place uploadservice.ScanPlace, cursor string, opts uploadservice.ScanOptions) ([]model.ReconciliationFinding, string, error)
+
+// scanPlaces runs one listing scan on every place. A place that fails is
+// recorded and the others go on.
+func (s *Service) scanPlaces(ctx context.Context, stats *CycleStats, kind string, places []place, opts uploadservice.ScanOptions, scan placeScan) error {
+	var errs []error
+	for _, p := range places {
+		if ctx.Err() != nil {
+			break
+		}
+		if s.inventory == nil || s.cfg.DryRun {
+			errs = append(errs, s.scanInMemory(ctx, stats, kind, p, opts, scan))
+		} else {
+			errs = append(errs, s.scanPersisted(ctx, stats, kind, p, opts, scan))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// scanInMemory scans a place from a cursor kept in this process. A dry run
+// scans this way too, so it writes no scan record.
+func (s *Service) scanInMemory(ctx context.Context, stats *CycleStats, kind string, p place, opts uploadservice.ScanOptions, scan placeScan) error {
+	if p.err != nil {
+		return p.err
+	}
+	key := kind + " " + p.ConnectionID
+	cursor := s.cursors[key]
+	defer func() { s.cursors[key] = cursor }()
 	for page := 0; page < s.cfg.ScanPages; page++ {
 		if ctx.Err() != nil {
-			return cursor, nil
+			return nil
 		}
-		findings, next, err := scan(ctx, cursor, opts)
+		findings, next, err := scan(ctx, p.ScanPlace, cursor, opts)
 		s.record(ctx, stats, findings)
 		if err != nil {
-			return cursor, err
+			return err
 		}
 		cursor = next
 		if cursor == "" {
 			break // the listing is done; next cycle starts over
 		}
 	}
-	return cursor, nil
+	return nil
+}
+
+// maxScanErrors ends a scan after that many failed pages in a row; the next
+// one starts over. Until then it resumes from its saved cursor.
+const maxScanErrors = 5
+
+// scanPersisted scans a place from the cursor saved in the inventory and
+// saves it after every page.
+func (s *Service) scanPersisted(ctx context.Context, stats *CycleStats, kind string, p place, opts uploadservice.ScanOptions, scan placeScan) error {
+	run, ok, err := s.inventory.OpenScan(ctx, kind, p.ConnectionID, p.Bucket, p.ListPrefix(), s.cfg.Owner, newScanID(), s.now(), s.cfg.Lease)
+	if err != nil {
+		return fmt.Errorf("open %s scan: %w", kind, err)
+	}
+	if !ok {
+		return nil // another worker is scanning this place
+	}
+	if p.err != nil {
+		return s.scanFailed(ctx, run, p.err)
+	}
+	for page := 0; page < s.cfg.ScanPages; page++ {
+		if ctx.Err() != nil {
+			return nil // the saved cursor resumes it
+		}
+		findings, next, err := scan(ctx, p.ScanPlace, run.Cursor, opts)
+		s.record(ctx, stats, findings)
+		if err != nil {
+			return s.scanFailed(ctx, run, err)
+		}
+		run.Cursor = next
+		run.Pages++
+		run.CandidatesMarked += len(findings)
+		run.Errors, run.LastError = 0, ""
+		if next == "" {
+			if err := s.inventory.FinishScan(ctx, run, s.cfg.Owner, s.now(), model.ScanCompleted); err != nil {
+				return fmt.Errorf("finish %s scan: %w", kind, err)
+			}
+			return nil
+		}
+		if err := s.inventory.SaveProgress(ctx, run, s.cfg.Owner, s.now(), s.cfg.Lease); err != nil {
+			return fmt.Errorf("save %s scan: %w", kind, err)
+		}
+	}
+	return nil
+}
+
+// scanFailed keeps a failed scan resumable from its last saved cursor, with
+// the failure recorded (sanitized), until maxScanErrors in a row end it.
+func (s *Service) scanFailed(ctx context.Context, run model.InventoryScan, cause error) error {
+	s.metrics.Add("reconciliation_scan_errors", 1)
+	run.Errors++
+	run.LastError = retry.Sanitize(cause)
+	var err error
+	if run.Errors >= maxScanErrors {
+		err = s.inventory.FinishScan(ctx, run, s.cfg.Owner, s.now(), model.ScanFailed)
+	} else {
+		err = s.inventory.SaveProgress(ctx, run, s.cfg.Owner, s.now(), s.cfg.Lease)
+	}
+	s.log.Warn("reconciliation scan failed; it resumes next cycle", "kind", run.Kind, "connection", run.ConnectionID,
+		"prefix", run.Prefix, "errors", run.Errors, "error", run.LastError)
+	return errors.Join(fmt.Errorf("%s scan of %s on %s: %w", run.Kind, run.Prefix, run.ConnectionID, cause), err)
+}
+
+func newScanID() string {
+	var b [12]byte
+	_, _ = rand.Read(b[:])
+	return "rs_" + hex.EncodeToString(b[:])
 }
 
 // record keeps a cycle's findings: stored and counted on a real run, only
@@ -385,14 +540,18 @@ func (s *Service) record(ctx context.Context, stats *CycleStats, findings []mode
 		stats.Findings = append(stats.Findings, f)
 		s.metrics.Add("discrepancy_"+f.Kind+"_"+f.Outcome, 1)
 
-		log := s.log.With("kind", f.Kind, "action", f.Action, "outcome", f.Outcome,
+		log := s.log.With("kind", f.Kind, "action", f.Action, "outcome", f.Outcome, "connection", f.ConnectionID,
 			"tenant_id", f.TenantID, "upload_id", f.UploadID, "reason", f.Reason)
 		switch f.Outcome {
 		case model.FindingPlanned:
 			log.Info("reconciliation dry run: would act")
 			continue
 		case model.FindingReported:
-			log.Warn("unrecorded item left in place; set RECONCILIATION_UNRECORDED_ACTION=delete to remove such items")
+			if model.IsPlatformConnection(f.ConnectionID) {
+				log.Warn("unrecorded item left in place; set RECONCILIATION_UNRECORDED_ACTION=delete to remove such items")
+			} else {
+				log.Warn("item on a tenant's own storage left in place: no record proves it is the platform's")
+			}
 			continue
 		case model.FindingFailed:
 			log.Error("reconciliation action failed; retried next cycle")

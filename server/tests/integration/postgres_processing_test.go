@@ -12,7 +12,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
 )
 
-// Needs TEST_DATABASE_URL with migrations through 000004 applied. EnqueueDue
+// Needs TEST_DATABASE_URL with every migration (through 000015) applied. EnqueueDue
 // works on the whole database, so use a dedicated test database only.
 
 type processingEnv struct {
@@ -182,7 +182,17 @@ func TestPostgresStageResultsAreDurable(t *testing.T) {
 	claimed.ScanResult = model.ScanClean
 	claimed.ScannedAt = &now
 	claimed.PromotionKey = "assets/" + env.tenant + "/" + claimed.AssetID
-	if err := env.jobs.SaveProgress(ctx, claimed, "worker-recover", now); err != nil {
+	// Each claim is its own lease owner: the worker's bare name is not.
+	if claimed.LeaseOwner != "worker-recover#1" {
+		t.Fatalf("lease owner %q", claimed.LeaseOwner)
+	}
+	if err := env.jobs.Renew(ctx, job.ID, "worker-recover", now, time.Hour); !errors.Is(err, model.ErrLeaseLost) {
+		t.Fatalf("renew under the bare worker name: %v", err)
+	}
+	if err := env.jobs.Renew(ctx, job.ID, claimed.LeaseOwner, now, time.Hour); err != nil {
+		t.Fatalf("renew: %v", err)
+	}
+	if err := env.jobs.SaveProgress(ctx, claimed, claimed.LeaseOwner, now); err != nil {
 		t.Fatalf("save progress: %v", err)
 	}
 
@@ -202,7 +212,7 @@ func TestPostgresStageResultsAreDurable(t *testing.T) {
 	}
 
 	// Retry scheduling, then exhaustion, are recorded.
-	if err := env.jobs.Reschedule(ctx, job.ID, "worker-recover", now, now.Add(time.Hour), "clamd down"); err != nil {
+	if err := env.jobs.Reschedule(ctx, job.ID, claimed.LeaseOwner, now, now.Add(time.Hour), "clamd down"); err != nil {
 		t.Fatal(err)
 	}
 	for _, j := range mustClaimJobs(t, env, now.Add(30*time.Minute)) {
@@ -211,7 +221,13 @@ func TestPostgresStageResultsAreDurable(t *testing.T) {
 		}
 	}
 	again := mustClaimJobs(t, env, now.Add(2*time.Hour))
-	if err := env.jobs.Finish(ctx, job.ID, "worker-recover", now.Add(2*time.Hour), model.ProcessingExhausted, "clamd down"); err != nil {
+	var reclaimed model.ProcessingJob
+	for _, j := range again {
+		if j.ID == job.ID {
+			reclaimed = j
+		}
+	}
+	if err := env.jobs.Finish(ctx, job.ID, reclaimed.LeaseOwner, now.Add(2*time.Hour), model.ProcessingExhausted, "clamd down"); err != nil {
 		t.Fatalf("finish: %v (claimed %d)", err, len(again))
 	}
 	var state string

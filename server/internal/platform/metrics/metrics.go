@@ -5,8 +5,13 @@
 package metrics
 
 import (
+	"context"
+	"errors"
 	"expvar"
+	"log/slog"
+	"net/http"
 	"sync"
+	"time"
 )
 
 type Registry struct {
@@ -56,4 +61,40 @@ func (r *Registry) Snapshot() map[string]int64 {
 // process.
 func (r *Registry) Publish(name string) {
 	expvar.Publish(name, expvar.Func(func() any { return r.Snapshot() }))
+}
+
+// Serve serves a worker's operational endpoints at addr in the
+// background: the published registries (/debug/vars), liveness (/health:
+// the process answers) and readiness (/ready: ready, usually a database
+// ping, answers within two seconds). stop shuts the listener down and
+// lets a request in progress finish.
+func Serve(addr string, ready func(context.Context) error, log *slog.Logger) (stop func()) {
+	mux := http.NewServeMux()
+	mux.Handle("/debug/vars", expvar.Handler())
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok\n"))
+	})
+	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := ready(ctx); err != nil {
+			http.Error(w, "not ready: database unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("ok\n"))
+	})
+	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("metrics listener stopped", "error", err)
+		}
+	}()
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+		<-done
+	}
 }

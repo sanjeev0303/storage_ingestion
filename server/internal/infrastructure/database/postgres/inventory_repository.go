@@ -25,13 +25,13 @@ func NewInventoryRepository(db *DB) *InventoryRepository {
 
 const scanColumns = `
 	id, bucket, prefix, status, COALESCE(cursor, ''), pages, objects_seen, candidates_marked,
-	errors, COALESCE(last_error, ''), started_at, updated_at, completed_at, storage_connection_id
+	errors, COALESCE(last_error, ''), started_at, updated_at, completed_at, storage_connection_id, kind
 `
 
 func scanInventoryScan(row pgx.Row) (model.InventoryScan, error) {
 	var s model.InventoryScan
 	err := row.Scan(&s.ID, &s.Bucket, &s.Prefix, &s.Status, &s.Cursor, &s.Pages, &s.ObjectsSeen, &s.CandidatesMarked,
-		&s.Errors, &s.LastError, &s.StartedAt, &s.UpdatedAt, &s.CompletedAt, &s.ConnectionID)
+		&s.Errors, &s.LastError, &s.StartedAt, &s.UpdatedAt, &s.CompletedAt, &s.ConnectionID, &s.Kind)
 	return s, err
 }
 
@@ -43,16 +43,16 @@ func connectionOrPlatform(id string) string {
 	return id
 }
 
-func (r *InventoryRepository) OpenScan(ctx context.Context, connectionID, bucket, prefix, owner, newID string, now time.Time, lease time.Duration) (model.InventoryScan, bool, error) {
+func (r *InventoryRepository) OpenScan(ctx context.Context, kind, connectionID, bucket, prefix, owner, newID string, now time.Time, lease time.Duration) (model.InventoryScan, bool, error) {
 	connectionID = connectionOrPlatform(connectionID)
 	// Resume the running scan when its lease is free, expired or ours.
 	scan, err := scanInventoryScan(r.db.Pool.QueryRow(ctx, `
 		UPDATE inventory_scans
 		SET lease_owner = $3, lease_expires_at = $4::timestamptz + make_interval(secs => $5), updated_at = $4
-		WHERE bucket = $1 AND prefix = $2 AND status = 'RUNNING' AND storage_connection_id = $6
+		WHERE bucket = $1 AND prefix = $2 AND status = 'RUNNING' AND storage_connection_id = $6 AND kind = $7
 		  AND (lease_expires_at IS NULL OR lease_expires_at <= $4 OR lease_owner = $3)
 		RETURNING `+scanColumns,
-		bucket, prefix, owner, now, lease.Seconds(), connectionID))
+		bucket, prefix, owner, now, lease.Seconds(), connectionID, kind))
 	if err == nil {
 		return scan, true, nil
 	}
@@ -64,11 +64,11 @@ func (r *InventoryRepository) OpenScan(ctx context.Context, connectionID, bucket
 	// running one (the partial unique index decides).
 	scan, err = scanInventoryScan(r.db.Pool.QueryRow(ctx, `
 		INSERT INTO inventory_scans (id, bucket, prefix, status, lease_owner, lease_expires_at, started_at, updated_at,
-		                             storage_connection_id)
-		VALUES ($1, $2, $3, 'RUNNING', $4, $5::timestamptz + make_interval(secs => $6), $5, $5, $7)
-		ON CONFLICT (storage_connection_id, bucket, prefix) WHERE status = 'RUNNING' DO NOTHING
+		                             storage_connection_id, kind)
+		VALUES ($1, $2, $3, 'RUNNING', $4, $5::timestamptz + make_interval(secs => $6), $5, $5, $7, $8)
+		ON CONFLICT (storage_connection_id, bucket, prefix, kind) WHERE status = 'RUNNING' DO NOTHING
 		RETURNING `+scanColumns,
-		newID, bucket, prefix, owner, now, lease.Seconds(), connectionID))
+		newID, bucket, prefix, owner, now, lease.Seconds(), connectionID, kind))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.InventoryScan{}, false, nil
 	}
@@ -114,14 +114,14 @@ func (r *InventoryRepository) FinishScan(ctx context.Context, scan model.Invento
 	return nil
 }
 
-func (r *InventoryRepository) LastCompleted(ctx context.Context, connectionID, bucket, prefix string) (model.InventoryScan, bool, error) {
+func (r *InventoryRepository) LastCompleted(ctx context.Context, kind, connectionID, bucket, prefix string) (model.InventoryScan, bool, error) {
 	scan, err := scanInventoryScan(r.db.Pool.QueryRow(ctx, `
 		SELECT `+scanColumns+`
 		FROM inventory_scans
-		WHERE bucket = $1 AND prefix = $2 AND status = 'COMPLETED' AND storage_connection_id = $3
+		WHERE bucket = $1 AND prefix = $2 AND status = 'COMPLETED' AND storage_connection_id = $3 AND kind = $4
 		ORDER BY completed_at DESC
 		LIMIT 1
-	`, bucket, prefix, connectionOrPlatform(connectionID)))
+	`, bucket, prefix, connectionOrPlatform(connectionID), kind))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.InventoryScan{}, false, nil
 	}

@@ -35,6 +35,9 @@ type CycleStats struct {
 	Failed    int
 	Cancelled int
 	LeaseLost int
+	// WaitingForPack counts deletions waiting for a pack to let go of the
+	// asset's bytes.
+	WaitingForPack int
 	// DeletionReport describes, on a dry run, what each due deletion
 	// would do.
 	DeletionReport []string
@@ -232,6 +235,7 @@ const (
 	outcomeCancelled = "cancelled"
 	outcomeLeaseLost = "lease_lost"
 	outcomeStopped   = "stopped"
+	outcomeWaiting   = "waiting_for_pack"
 )
 
 func count(stats *CycleStats, outcome string) {
@@ -248,8 +252,14 @@ func count(stats *CycleStats, outcome string) {
 		stats.Cancelled++
 	case outcomeLeaseLost:
 		stats.LeaseLost++
+	case outcomeWaiting:
+		stats.WaitingForPack++
 	}
 }
+
+// errPackPending: the asset's bytes are still inside a pack that has not
+// been rewritten or retired yet. Not a failure: the deletion waits.
+var errPackPending = errors.New("a pack still holds the asset's bytes")
 
 func (s *Service) processDeletion(ctx context.Context, op model.DeletionOperation) string {
 	log := s.log.With("operation_id", op.ID, "tenant_id", op.TenantID, "asset_id", op.AssetID, "state", string(op.State))
@@ -275,6 +285,18 @@ func (s *Service) processDeletion(ctx context.Context, op model.DeletionOperatio
 	}
 
 	now := s.now()
+	if errors.Is(err, errPackPending) {
+		// The pack worker rewrites or retires the pack within
+		// PACKING_MAX_DELETION_DELAY; the deletion completes after it.
+		next := now.Add(s.cfg.RecheckInterval)
+		if retryErr := s.deps.Deletions.Wait(ctx, op.ID, s.cfg.Owner, now, next, "waiting for its pack to be rewritten or retired"); retryErr != nil {
+			log.Error("schedule deletion recheck", "error", retryErr)
+			return outcomeLeaseLost
+		}
+		s.deps.Metrics.Add("deletions_waiting_for_pack", 1)
+		log.Info("deletion waits for the asset's pack to be rewritten or retired", "next_attempt_at", next)
+		return outcomeWaiting
+	}
 	s.deps.Metrics.Add("storage_delete_failures", 1)
 	if retry.IsPermanent(err) || attempts >= op.MaxAttempts {
 		event := s.newEvent(op.TenantID, op.AssetID, op.ID, "deletion_failed", "FAILED", retry.Sanitize(err), s.actor())
@@ -545,6 +567,17 @@ func (s *Service) removeObjects(ctx context.Context, asset model.Asset) error {
 			return err
 		}
 	}
+	// A packed asset stops being served from its pack now. Its storage
+	// counts as deleted only once no pack holds its bytes any more.
+	if s.deps.Packs != nil {
+		holding, err := s.deps.Packs.ReleaseAsset(ctx, asset.TenantID, asset.ID, s.now())
+		if err != nil {
+			return err
+		}
+		if holding {
+			return errPackPending
+		}
+	}
 	return nil
 }
 
@@ -566,29 +599,31 @@ func (s *Service) removeExact(ctx context.Context, t target) error {
 	if err != nil {
 		return fmt.Errorf("inspect object before delete: %w", err)
 	}
-	if !present {
-		return nil
+	if present && t.versionID != "" {
+		if err := t.storage.DeleteObjectVersion(ctx, t.bucket, t.key, t.versionID); err != nil {
+			return fmt.Errorf("delete object version: %w", err)
+		}
 	}
-
-	if t.versionID != "" {
-		err = t.storage.DeleteObjectVersion(ctx, t.bucket, t.key, t.versionID)
-	} else {
-		err = t.storage.DeleteObject(ctx, t.bucket, t.key)
-	}
-	if err != nil {
+	// The key goes in full, even when it looks gone already: on a
+	// versioned bucket an earlier attempt, or older code, may have left
+	// its bytes behind a delete marker, and DeleteObject removes every
+	// version of the key.
+	if err := t.storage.DeleteObject(ctx, t.bucket, t.key); err != nil {
 		return fmt.Errorf("delete object: %w", err)
 	}
 
 	// Confirm with the provider; a deletion is recorded only once it is
 	// verified.
-	present, err = exists()
+	still, err := exists()
 	if err != nil {
 		return fmt.Errorf("confirm object deletion: %w", err)
 	}
-	if present {
+	if still {
 		return errors.New("object still present after delete")
 	}
-	s.deps.Metrics.Add("storage_objects_deleted", 1)
+	if present {
+		s.deps.Metrics.Add("storage_objects_deleted", 1)
+	}
 	return nil
 }
 

@@ -74,6 +74,8 @@ type Dependencies struct {
 	// Router reads members stored on tenants' storage connections; without
 	// it they are not examined.
 	Router interfaces.StorageRouter
+	// Packs finds members whose bytes were packed; nil when nothing is.
+	Packs interfaces.PackLocator
 	// Quotas, when set, lowers the manifest limits for tenants with
 	// smaller quotas.
 	Quotas  Quotas

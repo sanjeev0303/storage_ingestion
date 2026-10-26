@@ -79,12 +79,17 @@ var defaultRates = map[string]string{
 	"register":      "5/1h",
 	"upload_init":   "300/1m",
 	"upload_finish": "600/1m",
-	"manifest":      "60/1m",
-	"job_create":    "60/1m",
-	"download_url":  "600/1m",
-	"listing":       "600/1m",
-	"admin":         "120/1m",
-	"membership":    "120/1m",
+	// Bulk ingestion's per-entry calls (claims, part URLs, heartbeats,
+	// completions) have their own budget, kept apart from interactive
+	// uploads: 50 a second covers the 35-40 files a second one tenant's
+	// pipeline sustains and stays under QUOTA_MAX_REQUESTS_PER_MINUTE.
+	"ingestion_entry": "3000/1m",
+	"manifest":        "60/1m",
+	"job_create":      "60/1m",
+	"download_url":    "600/1m",
+	"listing":         "600/1m",
+	"admin":           "120/1m",
+	"membership":      "120/1m",
 	// Connection tests and credential rotations reach out to customer
 	// endpoints with customer credentials: kept low, so a test cannot be
 	// used to probe a network.

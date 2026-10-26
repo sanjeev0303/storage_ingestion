@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	containerpkg "github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/sas"
 
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
@@ -170,6 +171,55 @@ func TestAzuriteSignedUploadsAndReads(t *testing.T) {
 	}
 	if _, err := s.HeadObject(ctx, container, "published/t1/a1"); !errors.Is(err, interfaces.ErrObjectNotFound) {
 		t.Fatalf("deleted: %v", err)
+	}
+}
+
+// With account versioning on, a deleted blob stays as a previous version:
+// DeleteObject removes every version of exactly that name, and leaves a
+// name it only prefixes alone.
+func TestAzuriteDeleteRemovesEveryVersion(t *testing.T) {
+	s, container := azurite(t)
+	ctx := context.Background()
+	versions := func(name string) int {
+		pager := s.container(container).NewListBlobsFlatPager(&containerpkg.ListBlobsFlatOptions{
+			Prefix: &name, Include: containerpkg.ListBlobsInclude{Versions: true},
+		})
+		n := 0
+		for pager.More() {
+			page, err := pager.NextPage(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, item := range page.Segment.BlobItems {
+				if *item.Name == name && item.VersionID != nil {
+					n++
+				}
+			}
+		}
+		return n
+	}
+	for _, body := range []string{"one", "two"} {
+		if _, err := s.WriteObject(ctx, container, "published/t1/a1", strings.NewReader(body), 3, "text/plain"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.WriteObject(ctx, container, "published/t1/a10", strings.NewReader("other"), 5, "text/plain"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteObject(ctx, container, "published/t1/a1"); err != nil {
+		t.Fatalf("the versions listing must work even without versioning: %v", err)
+	}
+	if _, err := s.HeadObject(ctx, container, "published/t1/a1"); !errors.Is(err, interfaces.ErrObjectNotFound) {
+		t.Fatalf("deleted: %v", err)
+	}
+	if _, err := s.HeadObject(ctx, container, "published/t1/a10"); err != nil {
+		t.Fatalf("a name sharing the prefix was touched: %v", err)
+	}
+	if versions("published/t1/a10") == 0 {
+		t.Skip("unverified: Azurite keeps no blob versions, so removing them is not exercised")
+	}
+	if n := versions("published/t1/a1"); n != 0 {
+		t.Fatalf("%d versions remain", n)
 	}
 }
 

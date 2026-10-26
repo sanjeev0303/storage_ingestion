@@ -275,6 +275,38 @@ func TestHTTPDownloadAuthorization(t *testing.T) {
 	}
 }
 
+// Bulk ingestion's per-entry calls and interactive uploads draw on
+// separate budgets: a tenant's ingestion job can neither use up nor be
+// held back by its interactive limit, and each is still enforced. The
+// limit counts before the handler, so calls about missing jobs count too.
+func TestIngestionAndInteractiveUploadsHaveSeparateLimits(t *testing.T) {
+	s := openSecurityStack(t, map[string]string{"RATE_LIMIT_UPLOAD_FINISH": "2/1m", "RATE_LIMIT_INGESTION_ENTRY": "5/1m"})
+	acme := s.team(t, "rate-split")
+	tok := s.signIn(t, acme.devUser.Email, acme.devPW).AccessToken
+	limited := func(path string) bool {
+		return s.call(t, tok, "", http.MethodPost, path, "{}").status == http.StatusTooManyRequests
+	}
+
+	for i := 0; i < 2; i++ {
+		if limited("/api/v1/uploads/missing/complete") {
+			t.Fatalf("interactive call %d was limited", i+1)
+		}
+	}
+	if !limited("/api/v1/uploads/missing/complete") {
+		t.Fatal("the interactive limit must hold")
+	}
+	// The interactive budget is spent; ingestion entries still go through.
+	entry := []string{"/claims", "/entries/1/heartbeat", "/entries/1/complete", "/entries/2/parts/urls", "/entries/2/parts/confirm"}
+	for _, path := range entry {
+		if limited("/api/v1/ingestion/jobs/missing" + path) {
+			t.Fatalf("%s was limited by the interactive budget", path)
+		}
+	}
+	if !limited("/api/v1/ingestion/jobs/missing/entries/3/complete") {
+		t.Fatal("an abusive ingestion client must be limited too")
+	}
+}
+
 func TestHTTPRateLimits(t *testing.T) {
 	s := openSecurityStack(t, map[string]string{"RATE_LIMIT_LISTING": "3/1m", "AUTH_LOGIN_ATTEMPTS": "2"})
 	acme := s.team(t, "rate")

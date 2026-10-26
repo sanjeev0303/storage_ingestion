@@ -200,13 +200,9 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("load storage connection configuration: %w", err)
 	}
-	deliveryPrefix := "assets"
-	if dc, err := config.LoadDelivery(); err == nil && dc.Prefix != "" {
-		deliveryPrefix = dc.Prefix
-	}
 	storageMetrics := metrics.New()
 	connections := postgres.NewStorageConnectionRepository(db)
-	storageRegistry, err := storageregistry.ForProcess(storageCfg, objectStorage, bucket, deliveryBucket, deliveryPrefix, connections, storageMetrics)
+	storageRegistry, err := storageregistry.ForProcess(storageCfg, objectStorage, bucket, deliveryBucket, config.PromotionPrefix(), connections, storageMetrics)
 	if err != nil {
 		return fmt.Errorf("configure storage connections: %w", err)
 	}
@@ -246,7 +242,7 @@ func run() error {
 		Uploads: uploadRepository, Assets: postgres.NewAssetRepository(db),
 		Jobs: postgres.NewProcessingJobRepository(db), Deletions: postgres.NewDeletionRepository(db),
 		Holds: postgres.NewLegalHoldRepository(db), Ingestion: postgres.NewIngestionRepository(db),
-		Datasets: datasetRepo,
+		Datasets: datasetRepo, Packs: postgres.NewPackRepository(db),
 	})
 
 	rates := make(map[string]ratelimit.Rule, len(sec.Rates))
@@ -260,13 +256,18 @@ func run() error {
 	routes.Quarantine = processing.NewQuarantine(postgres.NewAssetRepository(db), postgres.NewProcessingJobRepository(db),
 		postgres.NewQuarantineRepository(db), postgres.NewProcessingEventRepository(db), auditService)
 	routes.Limiter, routes.Rates, routes.TrustProxyHeaders = limiter, rates, sec.Auth.TrustProxyHeaders
-	// The security and catalog counters join the expvar listener delivery
-	// starts.
+	// The security and catalog counters join the expvar listener started
+	// below.
 	securityMetrics.Publish("security")
 	catalogMetrics.Publish("catalog")
 	datasetMetrics.Publish("datasets")
 	storageMetrics.Publish("storage")
 
+	routes.Ready = db.Pool.Ping
+	if routes.MetricsAddr != "" {
+		stopMetrics := metrics.Serve(routes.MetricsAddr, db.Pool.Ping, log)
+		defer stopMetrics()
+	}
 	srv := &http.Server{
 		Addr:              ":" + cfg.HTTPPort,
 		Handler:           server.NewRouter(routes),
@@ -340,7 +341,7 @@ func lifecycleService(db *postgres.DB, storage *s3storage.ObjectStorage, quarant
 		Jobs: postgres.NewProcessingJobRepository(db), Quarantine: postgres.NewQuarantineRepository(db),
 		Policies: postgres.NewRetentionPolicyRepository(db), Holds: postgres.NewLegalHoldRepository(db),
 		Deletions: postgres.NewDeletionRepository(db), Events: postgres.NewLifecycleEventRepository(db),
-		Cursors: postgres.NewCursorRepository(db), Storage: storage,
+		Cursors: postgres.NewCursorRepository(db), Storage: storage, Packs: postgres.NewPackRepository(db),
 	}, assetservice.Config{
 		Owner: "api", QuarantineBucket: quarantineBucket, DeliveryBucket: deliveryBucket, DeliveryPrefix: prefix,
 		Platform: assetservice.PlatformRetention{
@@ -414,6 +415,7 @@ func deliveryRoutes(
 	if err != nil {
 		return server.Routes{}, err
 	}
+	service.Packed(postgres.NewPackRepository(db))
 
 	// Signing is local, so this proves the credentials and signer are
 	// usable before the first request needs them. The URL is discarded.
@@ -426,12 +428,6 @@ func deliveryRoutes(
 
 	if deliveryCfg.MetricsAddr != "" {
 		registry.Publish("delivery")
-		// expvar serves /debug/vars on the default mux.
-		go func() {
-			if err := http.ListenAndServe(deliveryCfg.MetricsAddr, nil); err != nil {
-				log.Error("metrics listener stopped", "error", err)
-			}
-		}()
 	}
 
 	lifecycle, err := lifecycleService(db, storage, quarantineBucket, bucket, deliveryCfg.Prefix, log)
@@ -448,6 +444,7 @@ func deliveryRoutes(
 			MaxStreams:   deliveryCfg.MaxStreams,
 			Metrics:      registry,
 		},
-		Log: log,
+		Log:         log,
+		MetricsAddr: deliveryCfg.MetricsAddr,
 	}, nil
 }

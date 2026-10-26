@@ -80,6 +80,7 @@ var catalog = map[string]spec{
 	TypeUploadProcessed:   {QueueIngestion, 1, []int{1}, func() payload { return &UploadProcessed{} }},
 	TypeImportQueued:      {QueueDatasets, 1, []int{1}, func() payload { return &ImportQueued{} }},
 	TypeValidationQueued:  {QueueDatasets, 1, []int{1}, func() payload { return &ValidationQueued{} }},
+	TypePackPlanned:       {QueuePacking, 1, []int{1}, func() payload { return &PackPlanned{} }},
 }
 
 // QueueOf returns the queue an event type is published to.

@@ -65,6 +65,19 @@ func CatalogHandlers(retireReplaced func(ctx context.Context, tenantID, objectID
 	}
 }
 
+// PackingHandlers are the packing queue's handler: building a planned pack.
+func PackingHandlers(buildPack work) map[string]Handler {
+	return map[string]Handler{
+		event.TypePackPlanned: func(ctx context.Context, env event.Envelope) (string, error) {
+			var p event.PackPlanned
+			if err := event.DecodePayload(env, &p); err != nil {
+				return "", retry.Permanent(err)
+			}
+			return buildPack(ctx, env.TenantID, p.PackID)
+		},
+	}
+}
+
 // IngestionHandlers are the ingestion queue's handlers: reading a staged
 // manifest, and recording the processing outcome of an entry's upload.
 func IngestionHandlers(readManifest, uploadProcessed work) map[string]Handler {
@@ -122,6 +135,8 @@ type Checks struct {
 	Ingestion interfaces.IngestionRepository
 	// Datasets, when set, judges dataset events, the same way.
 	Datasets interfaces.DatasetRepository
+	// Packs, when set, judges packing events, the same way.
+	Packs interfaces.PackRepository
 }
 
 // Stale returns why the event no longer applies, or "" when it still does.
@@ -221,6 +236,26 @@ func (c Checks) Stale(ctx context.Context, env event.Envelope) (string, error) {
 		}
 		if !entry.State.AwaitingProcessing() && entry.State != model.EntryRetryable {
 			return "the entry's outcome is recorded (" + string(entry.State) + ")", nil
+		}
+		return "", nil
+
+	case event.TypePackPlanned:
+		var p event.PackPlanned
+		if err := event.DecodePayload(env, &p); err != nil {
+			return "", err
+		}
+		if c.Packs == nil {
+			return "", nil
+		}
+		pack, err := c.Packs.GetPack(ctx, env.TenantID, p.PackID)
+		if errors.Is(err, model.ErrPackNotFound) {
+			return "the pack no longer exists", nil
+		}
+		if err != nil {
+			return "", err
+		}
+		if !pack.State.Building() {
+			return "the pack is " + string(pack.State), nil
 		}
 		return "", nil
 

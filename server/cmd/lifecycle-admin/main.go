@@ -292,6 +292,7 @@ func lifecycleService(ctx context.Context, db *postgres.DB) (*assetservice.Servi
 		Policies: postgres.NewRetentionPolicyRepository(db), Holds: postgres.NewLegalHoldRepository(db),
 		Deletions: postgres.NewDeletionRepository(db), Events: postgres.NewLifecycleEventRepository(db),
 		Cursors: postgres.NewCursorRepository(db), Storage: platformStorage, Router: router,
+		Packs: postgres.NewPackRepository(db),
 	}, assetservice.Config{
 		Owner: "lifecycle-admin", QuarantineBucket: bucket, DeliveryBucket: deliveryBucket, DeliveryPrefix: lc.PromotionPrefix,
 		Platform: assetservice.PlatformRetention{

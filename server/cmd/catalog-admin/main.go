@@ -131,6 +131,7 @@ func run(command string, args []string, out io.Writer) error {
 		}
 
 		auditService := audit.NewService(postgres.NewAuditRepository(db), log, nil, sec.Audit.Retention)
+		packs := postgres.NewPackRepository(db)
 		// Replaced versions of objects without versioning are deleted
 		// through the lifecycle, as the worker would.
 		lifecycle, err := assetservice.NewService(assetservice.Dependencies{
@@ -138,7 +139,7 @@ func run(command string, args []string, out io.Writer) error {
 			Jobs: postgres.NewProcessingJobRepository(db), Quarantine: postgres.NewQuarantineRepository(db),
 			Policies: postgres.NewRetentionPolicyRepository(db), Holds: postgres.NewLegalHoldRepository(db),
 			Deletions: postgres.NewDeletionRepository(db), Events: postgres.NewLifecycleEventRepository(db),
-			Cursors: postgres.NewCursorRepository(db), Storage: storage, Router: router,
+			Cursors: postgres.NewCursorRepository(db), Storage: storage, Router: router, Packs: packs,
 		}, assetservice.Config{
 			Owner: "catalog-admin", QuarantineBucket: bucket, DeliveryBucket: deliveryBucket, DeliveryPrefix: lc.PromotionPrefix,
 			Platform: assetservice.PlatformRetention{
@@ -167,7 +168,7 @@ func run(command string, args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		reconciler := catalog.NewReconciler(repo, catalogService, storage, deliveryBucket, lc.PromotionPrefix, auditService, nil, log).Route(router)
+		reconciler := catalog.NewReconciler(repo, catalogService, storage, deliveryBucket, lc.PromotionPrefix, auditService, nil, log).Route(router).Packed(packs)
 		report, err := reconciler.Reconcile(ctx, catalog.ReconcileOptions{
 			TenantID: *tenant, DryRun: !*repair, BatchSize: *batch, CheckStorage: *checkStorage, MaxStorageChecks: *maxChecks,
 		})

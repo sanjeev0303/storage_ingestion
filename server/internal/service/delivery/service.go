@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/sanjeev0303/object-storage-platform/internal/infrastructure/compaction"
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/metrics"
@@ -106,6 +107,8 @@ type Service struct {
 	// router reaches assets published on tenants' storage connections;
 	// nil serves only the platform's bucket.
 	router interfaces.StorageRouter
+	// packs finds assets whose bytes were packed; nil when nothing is.
+	packs interfaces.PackLocator
 }
 
 // Route lets delivery serve assets published on tenants' storage
@@ -113,6 +116,12 @@ type Service struct {
 // the organization's current default.
 func (s *Service) Route(router interfaces.StorageRouter) *Service {
 	s.router = router
+	return s
+}
+
+// Packed lets delivery serve assets whose bytes were packed (Phase 13).
+func (s *Service) Packed(packs interfaces.PackLocator) *Service {
+	s.packs = packs
 	return s
 }
 
@@ -125,6 +134,8 @@ type readyStorage struct {
 	platform bool
 	// presign: the connection can sign a download URL itself.
 	presign bool
+	// packed, when set, is the pack entry the bytes are read from.
+	packed *model.PackedLocation
 }
 
 func (s *Service) ready(ctx context.Context, asset model.Asset) (readyStorage, error) {
@@ -318,8 +329,8 @@ func (s *Service) CreateDownloadURL(ctx context.Context, principal model.Princip
 		return DownloadURL{}, err
 	}
 	if mode == ModeStorage && !r.presign {
-		// The connection cannot sign a URL (an Azure SAS-token connection):
-		// a token link streams through the API instead.
+		// The connection cannot sign a URL (an Azure SAS-token connection),
+		// or the asset is packed: a token link streams through the API.
 		if s.tokens == nil {
 			return DownloadURL{}, fmt.Errorf("%w: this asset's storage cannot sign download URLs", ErrInvalidRequest)
 		}
@@ -551,11 +562,16 @@ func (s *Service) open(ctx context.Context, principal model.Principal, asset mod
 		return Download{}, ErrAuditUnavailable
 	}
 
-	requestLast := last
-	if !partial {
-		requestLast = -1
+	var body io.ReadCloser
+	if r.packed != nil {
+		body, err = s.openPacked(ctx, asset, r, first, last, partial, cond)
+	} else {
+		requestLast := last
+		if !partial {
+			requestLast = -1
+		}
+		body, err = r.storage.OpenRange(ctx, r.bucket, asset.ObjectKey, first, requestLast, cond)
 	}
-	body, err := r.storage.OpenRange(ctx, r.bucket, asset.ObjectKey, first, requestLast, cond)
 	if err != nil {
 		return Download{}, s.storageError(ctx, principal, asset, operation, req.RequestID, err)
 	}
@@ -569,12 +585,51 @@ func (s *Service) open(ctx context.Context, principal model.Principal, asset mod
 	return d, nil
 }
 
+// openPacked reads bytes first to last of a packed asset: exactly that
+// range of its entry in the pack, never past the entry's end. A whole read
+// is checked against the asset's SHA-256 as it streams, and ends with an
+// error instead of a clean end if the bytes are not the asset's.
+func (s *Service) openPacked(ctx context.Context, asset model.Asset, r readyStorage, first, last int64, partial bool, cond interfaces.ReadCondition) (io.ReadCloser, error) {
+	if !partial {
+		first, last = 0, -1
+	}
+	start, end, err := r.packed.Range(first, last)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", model.ErrPackCorrupt, err)
+	}
+	body, err := r.storage.OpenRange(ctx, r.packed.Bucket, r.packed.ObjectKey, start, end, cond)
+	if err != nil {
+		return nil, err
+	}
+	s.cfg.Metrics.Add("downloads_packed", 1)
+	s.cfg.Metrics.Add("packed_read_bytes", end-start+1)
+	if partial {
+		return body, nil
+	}
+	return compaction.VerifiedEntry(body, asset.SizeBytes, asset.ChecksumSHA256), nil
+}
+
 // readCondition pins reads to the stored object the asset was published
 // as. Assets published before validators were recorded are checked
 // against a fresh HEAD (size must match), and that ETag is used for the
 // read, so one response never mixes versions. A HEAD request also checks
 // the stored object, so it answers like the GET would.
 func (s *Service) readCondition(ctx context.Context, principal model.Principal, asset model.Asset, r readyStorage, operation string, req DownloadRequest) (interfaces.ReadCondition, error) {
+	if r.packed != nil {
+		// A packed asset is read from its pack, pinned to the pack as written.
+		cond := interfaces.ReadCondition{IfMatch: r.packed.StorageETag, VersionID: r.packed.StorageVersionID}
+		if !req.HeadOnly {
+			return cond, nil
+		}
+		stored, err := r.storage.HeadObject(ctx, r.packed.Bucket, r.packed.ObjectKey)
+		if err != nil {
+			return cond, s.storageError(ctx, principal, asset, operation, req.RequestID, err)
+		}
+		if stored.SizeBytes != r.packed.PackBytes || (cond.IfMatch != "" && stored.ETag != cond.IfMatch) {
+			return cond, s.storageError(ctx, principal, asset, operation, req.RequestID, interfaces.ErrPreconditionFailed)
+		}
+		return cond, nil
+	}
 	cond := interfaces.ReadCondition{IfMatch: asset.StorageETag, VersionID: asset.StorageVersionID}
 	if cond.IfMatch != "" && !req.HeadOnly {
 		return cond, nil
@@ -689,7 +744,31 @@ func (s *Service) deliverable(ctx context.Context, principal model.Principal, as
 		s.deny(ctx, principal, assetID, operation, requestID, "key_mismatch")
 		return model.Asset{}, readyStorage{}, ErrNotAvailable
 	}
+	if s.packs != nil {
+		loc, packed, err := s.packs.PackedLocation(ctx, asset.TenantID, asset.ID)
+		switch {
+		case err != nil:
+			s.fail(ctx, principal, assetID, operation, requestID, "pack_lookup", err)
+			return model.Asset{}, readyStorage{}, ErrStorageUnavailable
+		case packed && (loc.ConnectionID != connectionOf(asset) || loc.Length != asset.SizeBytes):
+			s.log.Error("packed asset's entry disagrees with the asset; refusing delivery",
+				"asset_id", asset.ID, "tenant_id", asset.TenantID, "pack_id", loc.PackID)
+			s.deny(ctx, principal, assetID, operation, requestID, "pack_mismatch")
+			return model.Asset{}, readyStorage{}, ErrNotAvailable
+		case packed:
+			// A signed URL or the CDN could read the pack's other entries:
+			// a packed asset is only ever streamed, its own bytes only.
+			r.packed, r.presign, r.platform = &loc, false, false
+		}
+	}
 	return asset, r, nil
+}
+
+func connectionOf(asset model.Asset) string {
+	if asset.StorageConnectionID == "" {
+		return model.PlatformConnectionID
+	}
+	return asset.StorageConnectionID
 }
 
 func (s *Service) issueToken(ctx context.Context, principal model.Principal, asset model.Asset, filename string, expiresAt time.Time) (string, error) {

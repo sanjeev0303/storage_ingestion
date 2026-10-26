@@ -144,9 +144,9 @@ func (r *ProcessingJobRepository) Claim(ctx context.Context, owner string, now t
 	expires := now.Add(lease)
 	for i := range due {
 		started := now
-		due[i].LeaseOwner = owner
-		due[i].LeaseExpiresAt = &expires
 		due[i].AttemptCount++
+		due[i].LeaseOwner = fmt.Sprintf("%s#%d", owner, due[i].AttemptCount)
+		due[i].LeaseExpiresAt = &expires
 		if due[i].StartedAt == nil {
 			due[i].StartedAt = &started
 		}
@@ -172,8 +172,8 @@ func (r *ProcessingJobRepository) ClaimJob(ctx context.Context, jobID, owner str
 
 	expires := now.Add(lease)
 	started := now
-	job.LeaseOwner, job.LeaseExpiresAt = owner, &expires
 	job.AttemptCount++
+	job.LeaseOwner, job.LeaseExpiresAt = fmt.Sprintf("%s#%d", owner, job.AttemptCount), &expires
 	if job.StartedAt == nil {
 		job.StartedAt = &started
 	}
@@ -189,6 +189,13 @@ func (r *ProcessingJobRepository) SaveProgress(ctx context.Context, job model.Pr
 		*stored = job
 		stored.LeaseOwner, stored.LeaseExpiresAt = owner, lease
 		stored.AttemptCount, stored.StartedAt = attempts, started
+	})
+}
+
+func (r *ProcessingJobRepository) Renew(ctx context.Context, jobID, owner string, now time.Time, lease time.Duration) error {
+	return r.update(ctx, jobID, owner, now, func(stored *model.ProcessingJob) {
+		expires := now.Add(lease)
+		stored.LeaseExpiresAt = &expires
 	})
 }
 

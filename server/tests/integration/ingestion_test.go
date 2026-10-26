@@ -1183,6 +1183,58 @@ func TestIngestionCancellationDuringActiveUploads(t *testing.T) {
 	}
 }
 
+// Cancellation goes through waiting entries in position order and picks
+// up where the last pass stopped. An entry that fails back to waiting
+// behind that point is still found, the job ends CANCELLED with its
+// counters matching its entries, and another pass changes nothing.
+func TestIngestionCancellationResumesAndFindsStragglers(t *testing.T) {
+	e := openIngestEnv(t, func(c *config.Ingestion) { c.WorkerBatch = 2 }) // 40 entries a pass
+	ctx := context.Background()
+	d := e.dataset(t, "cancel-keyset", model.CompleteAll)
+	var files []file
+	for i := 1; i <= 50; i++ {
+		files = append(files, textFile(fmt.Sprintf("entry-%02d.txt", i), 100))
+	}
+	job := e.readyJob(t, d.ID, files...)
+	stored := e.upload(t, e.claim(t, job.ID, 1).Grants[0], files[0].data)
+	if _, err := e.svc.Cancel(ctx, e.p, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	waiting := func() int {
+		return e.count(t, `SELECT count(*) FROM ingestion_entries WHERE job_id = $1 AND state IN ('PENDING', 'FAILED_RETRYABLE')`, job.ID)
+	}
+
+	e.advanceCancellations(t)
+	if n := waiting(); n != 9 {
+		t.Fatalf("one pass cancels 40 waiting entries, %d left of 49", n)
+	}
+	// The stored upload fails retryably: waiting again, behind the cursor.
+	retryAt := time.Now().UTC()
+	if _, err := e.repo.Transition(ctx, interfaces.EntryChange{
+		JobID: job.ID, Position: 1, From: []model.EntryState{stored.State}, To: model.EntryRetryable,
+		Now: retryAt, UploadID: stored.UploadID, ErrorCode: "processing_failed", ErrorDetail: "test", NextAttemptAt: &retryAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	e.advanceCancellations(t) // the rest after the cursor, then the end
+	if n := waiting(); n != 1 {
+		t.Fatalf("only the straggler behind the cursor is left, got %d", n)
+	}
+	e.advanceCancellations(t) // starts over and finds it
+	j := e.job(t, job.ID)
+	if j.State != model.JobCancelled || j.Counters.Cancelled != 50 || j.Counters.Open() != 0 || waiting() != 0 {
+		t.Fatalf("job: %s %+v, %d waiting", j.State, j.Counters, waiting())
+	}
+	cancelled := e.count(t, `SELECT count(*) FROM ingestion_entries WHERE job_id = $1 AND state = 'CANCELLED'`, job.ID)
+	if int64(cancelled) != j.Counters.Cancelled {
+		t.Fatalf("counters %d against %d cancelled entries", j.Counters.Cancelled, cancelled)
+	}
+	e.advanceCancellations(t)
+	if again := e.job(t, job.ID); again.State != model.JobCancelled || again.Counters != j.Counters {
+		t.Fatalf("another pass changed a cancelled job: %+v", again.Counters)
+	}
+}
+
 func TestIngestionCountersStayAccurateUnderConcurrency(t *testing.T) {
 	// 23: many clients claim, upload, complete and process at once, with
 	// duplicate outcome deliveries; the counters match the entries.

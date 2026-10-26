@@ -25,7 +25,7 @@ import (
 )
 
 // Phase 5.4 against the local stack: PostgreSQL (TEST_DATABASE_URL with
-// migrations through 000007), MinIO (TEST_S3_BUCKET) and ClamAV
+// every migration, through 000015), MinIO (TEST_S3_BUCKET) and ClamAV
 // (TEST_CLAMAV_ADDRESS, e.g. 127.0.0.1:3310). Only the EICAR test string is
 // used as "malware"; it is harmless by design.
 
@@ -324,6 +324,43 @@ func (l *lostCopy) CopyObject(ctx context.Context, sourceBucket, sourceKey, dest
 		return errors.New("copy object: connection reset")
 	}
 	return nil
+}
+
+// An upload larger than one CopyObject call (lowered here to 6 MiB) is
+// verified, scanned and promoted through a copy in parts, and published
+// only once the copy matches the verified checksum.
+func TestLocalStackPromotesAboveTheSingleCopyLimitInParts(t *testing.T) {
+	stack := openContentStack(t)
+	stack.provider.SetCopyLimits(6<<20, 5<<20)
+	t.Cleanup(func() { stack.provider.SetCopyLimits(0, 0) })
+	line := []byte("id,name,amount\n1,parts,42\n")
+	data := bytes.Repeat(line, (13<<20)/len(line))
+	id := stack.upload(t, "large.csv", "text/csv", data[:8<<20], data[8<<20:])
+
+	if stats := runCycle(t, stack.service(t, serviceOptions{})); stats.Succeeded != 1 {
+		t.Fatalf("expected the upload promoted: %+v", stats)
+	}
+	asset, job := stack.assetFor(t, id)
+	t.Cleanup(func() { _ = stack.provider.DeleteObject(context.Background(), stack.bucket, asset.ObjectKey) })
+	if asset.Status != model.AssetStatusAvailable || job.ScanResult != model.ScanClean {
+		t.Fatalf("published after a clean scan: %s %s", asset.Status, job.ScanResult)
+	}
+	// Uploaded in two parts, copied in three of 5 MiB.
+	if !strings.HasSuffix(asset.StorageETag, `-3"`) {
+		t.Fatalf("the published copy was not made in parts: ETag %s", asset.StorageETag)
+	}
+	body, err := stack.provider.OpenObject(context.Background(), stack.bucket, asset.ObjectKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(body)
+	body.Close()
+	if !bytes.Equal(got, data) {
+		t.Fatalf("the published bytes differ: %d of %d", len(got), len(data))
+	}
+	if left, _ := stack.provider.ListMultipartUploads(context.Background(), stack.bucket, asset.ObjectKey); len(left) != 0 {
+		t.Fatalf("no copy upload is left: %v", left)
+	}
 }
 
 func TestLocalStackCrashAfterCopyResumesWithoutCopyingAgain(t *testing.T) {

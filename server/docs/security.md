@@ -185,8 +185,9 @@ Each repair is audited as `quota.reconcile`.
 | sign-in throttling | email and address, address | `POST /api/v1/auth/login` |
 | `refresh` | address | `POST /api/v1/auth/refresh` |
 | `credentials` | address / user | activation, reset, invitation acceptance; password change per user |
-| `upload_init` | organization | upload and multipart start, ingestion claims |
-| `upload_finish` | organization | parts, complete, abort, delete, restore, other ingestion writes |
+| `upload_init` | organization | upload and multipart start |
+| `upload_finish` | organization | parts, complete, abort, delete, restore; ingestion job finalize, retry and cancel |
+| `ingestion_entry` | organization | bulk ingestion's per-entry calls: claims, upload URL refresh, part URLs and confirmation, heartbeat, complete. 3000/min by default, apart from `upload_finish` so a bulk job and interactive uploads never use up each other's budget |
 | `manifest`, `job_create` | organization | manifests; jobs and datasets |
 | `download_url` | organization / address | download URLs, content, token links |
 | `listing` | organization | reads and listings |
@@ -244,6 +245,15 @@ Reading the log needs `audit.read` (your organization's chain) or a platform rol
 - **Queue messages** carry tenant and resource IDs, never credentials. Workers look everything up again with the message's tenant (see isolation, item 8).
 - **Dead-letter administration over the API** needs the platform `ADMIN` role and a reason, and every attempt is audited, allowed or not. This covers list, inspect, retry, replay, resolve and discard. A replay redoes work in some tenant with the platform's authority, so tenant roles are never enough.
 - **The `event-admin` CLI** runs with direct database access, which is a platform operator's by definition.
+
+## Health and readiness
+
+Two unauthenticated endpoints, which reveal nothing about the deployment:
+
+- `GET /health` is liveness: the process answers. It checks no dependency, so a database outage never gets a healthy process restarted.
+- `GET /ready` is readiness: PostgreSQL answers a ping within two seconds. Otherwise it answers 503 with `{"status":"not_ready","checks":{"database":"unavailable"}}`; the cause is only in the server's logs. Route traffic by this one.
+
+The API serves both on its HTTP port. Every worker started with `METRICS_ADDR` serves both, with `/debug/vars`, on that listener. On SIGINT or SIGTERM the listener shuts down with the worker, letting a request in progress finish.
 
 ## Configuration
 

@@ -346,30 +346,94 @@ func TestDisableDefaultAndDelete(t *testing.T) {
 	if _, err := f.repo.Credential(ctx, "t1", c.ID, 1); err == nil {
 		t.Fatal("no credential survives deletion")
 	}
-	if _, err := f.svc.Update(ctx, admin, model.PlatformConnectionID, 1, UpdateInput{}); !errors.Is(err, ErrInvalidRequest) {
+	if _, _, err := f.svc.Update(ctx, admin, model.PlatformConnectionID, 1, UpdateInput{}); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("the platform connection is not the tenant's to change: %v", err)
 	}
 	f.leaks(t)
 }
 
-func TestUpdatePointingElsewhereNeedsANewTest(t *testing.T) {
+// An active connection keeps serving what it holds through whatever it
+// points at, so a change of where it points is tested first, against an
+// object it holds, and refused if the test fails: the old settings stay.
+func TestUpdatePointingElsewhereIsTestedFirst(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	c, _ := f.svc.Create(ctx, admin, minioInput())
 	c, _, _ = f.svc.Test(ctx, admin, c.ID, false)
+	f.repo.Held[c.ID] = "assets/t1/a1"
+	f.clients.storage.PutObject("assets/t1/a1", []byte("published bytes"))
+
 	endpoint := "http://127.0.0.1:9100"
-	updated, err := f.svc.Update(ctx, admin, c.ID, c.Revision, UpdateInput{Endpoint: &endpoint})
-	if err != nil || updated.Status != model.ConnectionPending {
-		t.Fatalf("a new endpoint returns it to pending: %+v %v", updated, err)
+	updated, result, err := f.svc.Update(ctx, admin, c.ID, c.Revision, UpdateInput{Endpoint: &endpoint})
+	if err != nil || !result.OK || updated.Status != model.ConnectionActive || updated.Endpoint != endpoint {
+		t.Fatalf("a change that passes its test keeps the connection active: %+v %+v %v", updated, result, err)
+	}
+
+	// Another endpoint has a bucket of that name, but not what the
+	// connection holds.
+	f.repo.Held[c.ID] = "assets/t1/elsewhere"
+	other := "http://127.0.0.1:9200"
+	if _, result, err := f.svc.Update(ctx, admin, c.ID, updated.Revision, UpdateInput{Endpoint: &other}); !errors.Is(err, ErrTestFailed) || result.Category != CategoryNotFound {
+		t.Fatalf("a change that loses existing objects is refused: %+v %v", result, err)
+	}
+	f.clients.fail = interfaces.ErrStorageAccessDenied
+	if _, result, err := f.svc.Update(ctx, admin, c.ID, updated.Revision, UpdateInput{Endpoint: &other}); !errors.Is(err, ErrTestFailed) || result.Category != CategoryAccessDenied {
+		t.Fatalf("a change the credentials cannot use is refused: %+v %v", result, err)
+	}
+	stored, _ := f.repo.GetConnection(ctx, "t1", c.ID)
+	if stored.Endpoint != endpoint || stored.Status != model.ConnectionActive || stored.Revision != updated.Revision {
+		t.Fatalf("a refused change stores nothing: %+v", stored)
+	}
+	name := "Renamed"
+	if renamed, _, err := f.svc.Update(ctx, admin, c.ID, stored.Revision, UpdateInput{Name: &name}); err != nil || renamed.Status != model.ConnectionActive {
+		t.Fatalf("a rename needs no test: %+v %v", renamed, err)
+	}
+	f.clients.fail = nil
+
+	// A pending connection holds nothing yet: it changes untested and
+	// still needs a passing test.
+	in := minioInput()
+	in.Name = "Pending bucket"
+	pending, _ := f.svc.Create(ctx, admin, in)
+	built := f.clients.stored
+	moved, _, err := f.svc.Update(ctx, admin, pending.ID, pending.Revision, UpdateInput{Endpoint: &endpoint})
+	if err != nil || moved.Status != model.ConnectionPending || f.clients.stored != built {
+		t.Fatalf("a pending connection changes untested: %+v %v", moved, err)
 	}
 	private := "https://10.1.2.3"
-	if _, err := f.svc.Update(ctx, admin, c.ID, updated.Revision, UpdateInput{Endpoint: &private}); err != nil {
+	if _, _, err := f.svc.Update(ctx, admin, pending.ID, moved.Revision, UpdateInput{Endpoint: &private}); err != nil {
 		t.Fatalf("the development policy admits a private address: %v", err)
 	}
 	f.svc.policy.AllowPrivate = false
-	again, _ := f.repo.GetConnection(ctx, "t1", c.ID)
-	if _, err := f.svc.Update(ctx, admin, c.ID, again.Revision, UpdateInput{Endpoint: &private}); !errors.Is(err, model.ErrEndpointRejected) {
+	again, _ := f.repo.GetConnection(ctx, "t1", pending.ID)
+	if _, _, err := f.svc.Update(ctx, admin, pending.ID, again.Revision, UpdateInput{Endpoint: &private}); !errors.Is(err, model.ErrEndpointRejected) {
 		t.Fatalf("the production policy refuses it: %v", err)
+	}
+}
+
+// Enabling tests the connection while it is still disabled: a failing
+// test leaves it disabled, still serving what it holds, never pending.
+func TestEnableTestsWhileDisabled(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	c, _ := f.svc.Create(ctx, admin, minioInput())
+	c, _, _ = f.svc.Test(ctx, admin, c.ID, false)
+	if _, err := f.svc.Disable(ctx, admin, c.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	f.clients.fail = interfaces.ErrStorageAccessDenied
+	stored, result, err := f.svc.Enable(ctx, admin, c.ID)
+	if err != nil || result.OK || stored.Status != model.ConnectionDisabled || !stored.HoldsWork() {
+		t.Fatalf("a failing test leaves it disabled: %+v %+v %v", stored, result, err)
+	}
+	f.clients.fail = nil
+	stored, result, err = f.svc.Enable(ctx, admin, c.ID)
+	if err != nil || !result.OK || stored.Status != model.ConnectionActive {
+		t.Fatalf("a passing test activates it: %+v %+v %v", stored, result, err)
+	}
+	if _, _, err := f.svc.Enable(ctx, admin, c.ID); !errors.Is(err, model.ErrConnectionNotActive) {
+		t.Fatalf("only a disabled connection is enabled: %v", err)
 	}
 }
 

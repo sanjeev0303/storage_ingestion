@@ -288,9 +288,10 @@ func (r *ReconciliationRepository) Finish(
 func (r *ReconciliationRepository) RecordFinding(ctx context.Context, f model.ReconciliationFinding) error {
 	_, err := r.db.Pool.Exec(ctx, `
 		INSERT INTO reconciliation_findings
-			(id, kind, tenant_id, upload_id, object_key, storage_upload_id, action, outcome, reason, created_at)
-		VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''), $7, $8, $9, $10)
-	`, f.ID, f.Kind, f.TenantID, f.UploadID, f.ObjectKey, f.StorageUploadID, f.Action, f.Outcome, f.Reason, f.CreatedAt)
+			(id, kind, tenant_id, upload_id, object_key, storage_upload_id, action, outcome, reason, created_at, storage_connection_id)
+		VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''), $7, $8, $9, $10, $11)
+	`, f.ID, f.Kind, f.TenantID, f.UploadID, f.ObjectKey, f.StorageUploadID, f.Action, f.Outcome, f.Reason, f.CreatedAt,
+		connectionOrPlatform(f.ConnectionID))
 	if err != nil {
 		return fmt.Errorf("record reconciliation finding: %w", err)
 	}

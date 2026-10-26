@@ -16,7 +16,7 @@ Phase 10 turns a tenant's catalog objects into datasets for machine-learning and
 | JSONL reader | `internal/platform/jsonl` | the bounded line reader, shared with Phase 7's ingestion manifests |
 | HTTP | `internal/handler/http/dataset_handler.go` | `/api/v1/datasets...`, `/api/v1/validation-jobs`, `/api/v1/validation-reports`, `/api/v1/dataset-versions`, `/api/v1/validation-profiles` |
 | Events | `internal/dto/event/dataset_event.go`, `internal/service/events/handlers.go` | `dataset.import_queued`, `dataset.validation_queued` on the `datasets` queue |
-| Worker | `cmd/dataset-worker`, `internal/worker/dataset` | imports, validations, recovery, gauges, `/health` |
+| Worker | `cmd/dataset-worker`, `internal/worker/dataset` | imports, validations, recovery, gauges, `/health` and `/ready` |
 | Fixture | `testdata/datasets` | six small text files, a manifest, a profile and an upload script |
 
 ## Repository inspection (what existed, what was added)
@@ -302,7 +302,7 @@ All routes need a bearer token and an organization; the service scopes every cal
   - **Recovery:** `dataset_stuck_released`.
 - **Gauges.** `dataset_imports_state_*`, `dataset_validations_state_*`, `dataset_jobs_oldest_due_seconds` (queue age) and `dataset_jobs_stuck` (running jobs whose lease ran out).
 - **Logs.** Logs are structured, with `tenant_id`, `dataset_id`, `import_id` / `job_id` and `version_id`; errors are sanitized. Manifests, metadata values, object content and URLs are never logged.
-- **Health.** The worker answers `GET /health` (database ping) on `DATASET_METRICS_ADDR`; the API keeps its `GET /health`.
+- **Health.** The worker answers `GET /health` (liveness) and `GET /ready` (database ping) on `DATASET_METRICS_ADDR`, like every worker's metrics listener; the API answers both on its HTTP port (`docs/security.md`).
 
 ## Configuration
 

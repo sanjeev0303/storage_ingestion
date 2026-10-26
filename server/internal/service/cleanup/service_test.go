@@ -362,7 +362,7 @@ func TestScanResumesFromItsCheckpoint(t *testing.T) {
 	if !slices.Equal(seen, []int{2, 2, 1}) {
 		t.Fatalf("objects per run %v; the scan must resume, not restart", seen)
 	}
-	last, ok, _ := e.inventory.LastCompleted(context.Background(), "", "bucket", "assets/t1/")
+	last, ok, _ := e.inventory.LastCompleted(context.Background(), model.ScanObjects, "", "bucket", "assets/t1/")
 	if !ok || last.ObjectsSeen != 5 || last.Pages != 3 {
 		t.Fatalf("the completed scan must cover every object once: %+v", last)
 	}

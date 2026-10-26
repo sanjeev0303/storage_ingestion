@@ -13,7 +13,6 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -116,7 +115,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("load storage connection configuration: %w", err)
 	}
-	router, err := storageregistry.ForProcess(storageCfg, storage, bucket, bucket, "assets",
+	router, err := storageregistry.ForProcess(storageCfg, storage, bucket, bucket, config.PromotionPrefix(),
 		postgres.NewStorageConnectionRepository(db), registry)
 	if err != nil {
 		return fmt.Errorf("configure storage connections: %w", err)
@@ -176,11 +175,8 @@ func run() error {
 
 	if ic.MetricsAddr != "" {
 		registry.Publish("ingestion")
-		go func() {
-			if err := http.ListenAndServe(ic.MetricsAddr, nil); err != nil {
-				log.Error("metrics listener stopped", "error", err)
-			}
-		}()
+		stopMetrics := metrics.Serve(ic.MetricsAddr, db.Pool.Ping, log)
+		defer stopMetrics()
 	}
 	// The consumer is waited for on shutdown, so no handler is cut off while
 	// the database it uses is closed.
