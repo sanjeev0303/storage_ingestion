@@ -27,7 +27,7 @@ import (
 	uploadservice "github.com/sanjeev0303/object-storage-platform/internal/service/upload"
 )
 
-// Phase 5.6 against the local stack. Needs migrations through 000009.
+// Phase 5.6 against the local stack. Needs every migration (through 000015).
 
 var lifecycleLog = slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -286,11 +286,11 @@ func TestPostgresInventoryObservations(t *testing.T) {
 	prefix := "assets/" + env.tenant + "/"
 	now := time.Now().UTC().Truncate(time.Microsecond)
 
-	scan1, ok, err := repo.OpenScan(ctx, "", "it-bucket", prefix, "worker-a", env.tenant+"-s1", now, time.Minute)
+	scan1, ok, err := repo.OpenScan(ctx, model.ScanObjects, "", "it-bucket", prefix, "worker-a", env.tenant+"-s1", now, time.Minute)
 	if err != nil || !ok {
 		t.Fatalf("open: %v %v", ok, err)
 	}
-	if _, ok, _ := repo.OpenScan(ctx, "", "it-bucket", prefix, "worker-b", env.tenant+"-s1b", now, time.Minute); ok {
+	if _, ok, _ := repo.OpenScan(ctx, model.ScanObjects, "", "it-bucket", prefix, "worker-b", env.tenant+"-s1b", now, time.Minute); ok {
 		t.Fatal("a second worker must not open a leased scan")
 	}
 
@@ -308,11 +308,11 @@ func TestPostgresInventoryObservations(t *testing.T) {
 	if err := repo.FinishScan(ctx, scan1, "worker-a", now, model.ScanCompleted); err != nil {
 		t.Fatal(err)
 	}
-	if last, ok, _ := repo.LastCompleted(ctx, "", "it-bucket", prefix); !ok || last.ObjectsSeen != 1 {
+	if last, ok, _ := repo.LastCompleted(ctx, model.ScanObjects, "", "it-bucket", prefix); !ok || last.ObjectsSeen != 1 {
 		t.Fatalf("last completed scan %+v", last)
 	}
 
-	scan2, _, _ := repo.OpenScan(ctx, "", "it-bucket", prefix, "worker-a", env.tenant+"-s2", now.Add(time.Hour), time.Minute)
+	scan2, _, _ := repo.OpenScan(ctx, model.ScanObjects, "", "it-bucket", prefix, "worker-a", env.tenant+"-s2", now.Add(time.Hour), time.Minute)
 	marked, _ := repo.Mark(ctx, candidate, scan2.ID, now.Add(time.Hour))
 	if marked.Observations != 2 || !marked.FirstSeenAt.Equal(now) {
 		t.Fatalf("second sighting: %+v", marked)
@@ -329,7 +329,7 @@ func TestPostgresInventoryObservations(t *testing.T) {
 	}
 
 	// A different ETag is a different object: the count starts over.
-	scan3, _, _ := repo.OpenScan(ctx, "", "it-bucket", prefix, "worker-a", env.tenant+"-s3", now.Add(2*time.Hour), time.Minute)
+	scan3, _, _ := repo.OpenScan(ctx, model.ScanObjects, "", "it-bucket", prefix, "worker-a", env.tenant+"-s3", now.Add(2*time.Hour), time.Minute)
 	candidate.ETag = `"e2"`
 	if replaced, _ := repo.Mark(ctx, candidate, scan3.ID, now.Add(2*time.Hour)); replaced.Observations != 1 || !replaced.FirstSeenAt.Equal(now.Add(2*time.Hour)) {
 		t.Fatalf("replaced object: %+v", replaced)
@@ -709,5 +709,62 @@ func TestProviderVersionedDelete(t *testing.T) {
 	current, err := storage.HeadObject(ctx, bucket, key)
 	if err != nil || current.VersionID != versions[0] {
 		t.Fatalf("the earlier version must be current again: %+v %v", current, err)
+	}
+
+	// Deleting by key removes every version of exactly that key, delete
+	// markers included; a key it only prefixes keeps its version.
+	kept := func(k string) int {
+		out, err := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{Bucket: aws.String(bucket), Prefix: aws.String(k)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for _, v := range out.Versions {
+			if aws.ToString(v.Key) == k {
+				n++
+			}
+		}
+		for _, m := range out.DeleteMarkers {
+			if aws.ToString(m.Key) == k {
+				n++
+			}
+		}
+		return n
+	}
+	put := func(k, body string) {
+		if _, err := client.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(bucket), Key: aws.String(k), Body: bytes.NewReader([]byte(body))}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	whole, sibling, hidden := key+"-whole", key+"-whole0", key+"-hidden"
+	put(whole, "one")
+	put(whole, "two")
+	put(sibling, "another record")
+	t.Cleanup(func() { _ = storage.DeleteObject(context.Background(), bucket, sibling) })
+	if err := storage.DeleteObject(ctx, bucket, whole); err != nil {
+		t.Fatal(err)
+	}
+	if n := kept(whole); n != 0 {
+		t.Fatalf("%d versions or markers of the deleted key remain", n)
+	}
+	if n := kept(sibling); n != 1 {
+		t.Fatalf("a key sharing the prefix must keep its version, has %d", n)
+	}
+	// A retry finds the key gone and leaves no marker either.
+	if err := storage.DeleteObject(ctx, bucket, whole); err != nil || kept(whole) != 0 {
+		t.Fatalf("a repeated delete: %v, %d left", err, kept(whole))
+	}
+
+	// What a key-only delete (older code) left, a marker hiding a version,
+	// goes on the next delete.
+	put(hidden, "hidden bytes")
+	if _, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(hidden)}); err != nil {
+		t.Fatal(err)
+	}
+	if kept(hidden) != 2 {
+		t.Fatalf("a key-only delete keeps the version behind a marker: %d", kept(hidden))
+	}
+	if err := storage.DeleteObject(ctx, bucket, hidden); err != nil || kept(hidden) != 0 {
+		t.Fatalf("the hidden version must go: %v, %d left", err, kept(hidden))
 	}
 }

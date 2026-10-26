@@ -60,6 +60,42 @@ func (s *ObjectStorage) DeleteObjectVersion(ctx context.Context, bucket, objectK
 	return nil
 }
 
+// deleteVersions removes every version and delete marker of exactly key.
+// The listing starts over after each round instead of paging on, because
+// its markers would name versions just deleted; the key's own versions
+// sort before any longer key it prefixes.
+func (s *ObjectStorage) deleteVersions(ctx context.Context, bucket, key string) error {
+	for round := 0; round < 100; round++ {
+		out, err := s.client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
+			Bucket: aws.String(bucket),
+			Prefix: aws.String(key),
+		})
+		if err != nil {
+			return classify("list object versions", err)
+		}
+		var ids []string
+		for _, v := range out.Versions {
+			if aws.ToString(v.Key) == key {
+				ids = append(ids, aws.ToString(v.VersionId))
+			}
+		}
+		for _, m := range out.DeleteMarkers {
+			if aws.ToString(m.Key) == key {
+				ids = append(ids, aws.ToString(m.VersionId))
+			}
+		}
+		if len(ids) == 0 {
+			return nil
+		}
+		for _, id := range ids {
+			if err := s.DeleteObjectVersion(ctx, bucket, key, id); err != nil {
+				return err
+			}
+		}
+	}
+	return errors.New("object versions remain after deleting them")
+}
+
 var _ interfaces.CapabilityReporter = (*ObjectStorage)(nil)
 
 // Capabilities asks the provider what the bucket does. S3-compatible

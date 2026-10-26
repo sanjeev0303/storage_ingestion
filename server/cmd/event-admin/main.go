@@ -70,7 +70,7 @@ func run(command string, args []string) error {
 		Uploads: postgres.NewUploadRepository(db), Assets: postgres.NewAssetRepository(db),
 		Jobs: postgres.NewProcessingJobRepository(db), Deletions: postgres.NewDeletionRepository(db),
 		Holds: postgres.NewLegalHoldRepository(db), Ingestion: postgres.NewIngestionRepository(db),
-		Datasets: postgres.NewDatasetRepository(db),
+		Datasets: postgres.NewDatasetRepository(db), Packs: postgres.NewPackRepository(db),
 	})
 
 	flags := flag.NewFlagSet(command, flag.ExitOnError)

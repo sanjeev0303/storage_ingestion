@@ -229,17 +229,23 @@ type UpdateInput struct {
 }
 
 // Update changes a connection's settings at the revision the caller read.
-// A change of where it points returns it to PENDING until tested again.
-func (s *Service) Update(ctx context.Context, p model.Principal, connectionID string, revision int64, in UpdateInput) (model.StorageConnection, error) {
+// Uploads and assets stay bound to the connection, not to its settings,
+// so they are read through whatever it points at next. On a connection
+// that holds work (active or disabled), a change of where it points
+// (region, endpoint, path style) is therefore tested first, with the
+// stored credentials and against an object it already holds, and refused
+// with ErrTestFailed if the test fails; the old settings stay. The status
+// never changes here: a pending connection still needs a passing test.
+func (s *Service) Update(ctx context.Context, p model.Principal, connectionID string, revision int64, in UpdateInput) (model.StorageConnection, TestResult, error) {
 	if err := audit.Require(ctx, s.deps.Audit, p, model.PermStorageManage, "storage_connection.update", "storage_connection", connectionID); err != nil {
-		return model.StorageConnection{}, err
+		return model.StorageConnection{}, TestResult{}, err
 	}
 	if revision <= 0 {
-		return model.StorageConnection{}, fmt.Errorf("%w: the connection's revision is required (If-Match)", ErrInvalidRequest)
+		return model.StorageConnection{}, TestResult{}, fmt.Errorf("%w: the connection's revision is required (If-Match)", ErrInvalidRequest)
 	}
 	current, err := s.ownConnection(ctx, p, connectionID)
 	if err != nil {
-		return model.StorageConnection{}, err
+		return model.StorageConnection{}, TestResult{}, err
 	}
 	changed := current
 	if in.Name != nil {
@@ -260,18 +266,34 @@ func (s *Service) Update(ctx context.Context, p model.Principal, connectionID st
 		changed.StagingMode = *in.StagingMode
 	}
 	if err := s.validate(changed); err != nil {
-		return model.StorageConnection{}, err
+		return model.StorageConnection{}, TestResult{}, err
 	}
+	var result TestResult
+	moved := changed.Region != current.Region || changed.Endpoint != current.Endpoint || changed.ForcePathStyle != current.ForcePathStyle
+	if moved && current.HoldsWork() {
+		if err := s.enabled(); err != nil {
+			return model.StorageConnection{}, TestResult{}, err
+		}
+		if result, err = s.check(ctx, changed, s.stored(changed), false); err != nil {
+			return model.StorageConnection{}, TestResult{}, err
+		}
+		if !result.OK {
+			s.record(ctx, p, "storage_connection.update", current, map[string]any{"outcome": "refused", "category": result.Category})
+			return current, result, ErrTestFailed
+		}
+	}
+	// The revision check makes the tested settings the ones stored: a
+	// change made meanwhile fails this with a conflict.
 	stored, err := s.deps.Connections.UpdateConnection(ctx, p.TenantID, connectionID, revision, interfaces.ConnectionChange{
 		Name: in.Name, Region: in.Region, Endpoint: in.Endpoint, ForcePathStyle: in.ForcePathStyle, StagingMode: in.StagingMode,
 		Actor: p.UserID, At: s.now(),
 	})
 	if err != nil {
-		return model.StorageConnection{}, err
+		return model.StorageConnection{}, TestResult{}, err
 	}
 	s.deps.Clients.Invalidate(connectionID)
-	s.record(ctx, p, "storage_connection.update", stored, map[string]any{"status": string(stored.Status)})
-	return stored, nil
+	s.record(ctx, p, "storage_connection.update", stored, map[string]any{"status": string(stored.Status), "tested": result.OK})
+	return stored, result, nil
 }
 
 // ownConnection reads one of the tenant's own connections; the platform
@@ -310,7 +332,10 @@ func (s *Service) RotateCredentials(ctx context.Context, p model.Principal, conn
 		return model.StorageConnection{}, TestResult{}, err
 	}
 
-	result := s.runTest(ctx, c, secrets, false)
+	result, err := s.runTest(ctx, c, secrets, false)
+	if err != nil {
+		return model.StorageConnection{}, TestResult{}, err
+	}
 	if !result.OK {
 		s.record(ctx, p, "storage_connection.rotate", c, map[string]any{"outcome": "refused", "category": result.Category})
 		return c, result, ErrTestFailed
@@ -360,15 +385,7 @@ func (s *Service) Disable(ctx context.Context, p model.Principal, connectionID s
 	if _, err := s.ownConnection(ctx, p, connectionID); err != nil {
 		return model.StorageConnection{}, err
 	}
-	defaultID, err := s.deps.Connections.DefaultConnection(ctx, p.TenantID)
-	if err != nil {
-		return model.StorageConnection{}, err
-	}
-	if defaultID == connectionID {
-		return model.StorageConnection{}, fmt.Errorf("%w: it is the organization's default; set another default first", model.ErrConnectionInUse)
-	}
-	stored, err := s.deps.Connections.SetStatus(ctx, p.TenantID, connectionID,
-		[]model.ConnectionStatus{model.ConnectionActive, model.ConnectionPending}, model.ConnectionDisabled, p.UserID, s.now())
+	stored, err := s.deps.Connections.Disable(ctx, p.TenantID, connectionID, p.UserID, s.now())
 	if err != nil {
 		return model.StorageConnection{}, err
 	}
@@ -377,8 +394,9 @@ func (s *Service) Disable(ctx context.Context, p model.Principal, connectionID s
 	return stored, nil
 }
 
-// Enable returns a disabled connection to PENDING and tests it; a passing
-// test makes it active again.
+// Enable tests a disabled connection and makes it active again if the
+// test passes. It stays disabled while tested and when the test fails, so
+// what it holds is still served; a pending connection would serve nothing.
 func (s *Service) Enable(ctx context.Context, p model.Principal, connectionID string) (model.StorageConnection, TestResult, error) {
 	if err := audit.Require(ctx, s.deps.Audit, p, model.PermStorageManage, "storage_connection.enable", "storage_connection", connectionID); err != nil {
 		return model.StorageConnection{}, TestResult{}, err
@@ -386,17 +404,26 @@ func (s *Service) Enable(ctx context.Context, p model.Principal, connectionID st
 	if err := s.enabled(); err != nil {
 		return model.StorageConnection{}, TestResult{}, err
 	}
-	if _, err := s.ownConnection(ctx, p, connectionID); err != nil {
-		return model.StorageConnection{}, TestResult{}, err
-	}
-	stored, err := s.deps.Connections.SetStatus(ctx, p.TenantID, connectionID,
-		[]model.ConnectionStatus{model.ConnectionDisabled}, model.ConnectionPending, p.UserID, s.now())
+	c, err := s.ownConnection(ctx, p, connectionID)
 	if err != nil {
 		return model.StorageConnection{}, TestResult{}, err
 	}
-	s.deps.Clients.Invalidate(connectionID)
-	s.record(ctx, p, "storage_connection.enable", stored, nil)
-	return s.test(ctx, p, stored, false)
+	if c.Status != model.ConnectionDisabled {
+		return model.StorageConnection{}, TestResult{}, fmt.Errorf("%w: it is %s, not disabled", model.ErrConnectionNotActive, c.Status)
+	}
+	result, err := s.check(ctx, c, s.stored(c), false)
+	if err != nil {
+		return model.StorageConnection{}, TestResult{}, err
+	}
+	if result.OK {
+		active, err := s.deps.Connections.SetStatus(ctx, p.TenantID, connectionID,
+			[]model.ConnectionStatus{model.ConnectionDisabled}, model.ConnectionActive, p.UserID, s.now())
+		if err != nil {
+			return model.StorageConnection{}, TestResult{}, err
+		}
+		s.record(ctx, p, "storage_connection.enable", active, nil)
+	}
+	return s.recordTest(ctx, p, c, result, false)
 }
 
 // Delete removes a disabled or never-activated connection that nothing

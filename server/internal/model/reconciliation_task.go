@@ -75,6 +75,10 @@ const (
 	// FindingStaleParts: part rows left on a finished (aborted, failed or
 	// expired) session.
 	FindingStaleParts = "STALE_PARTS"
+	// FindingUnverifiable: something under a tenant connection's staging
+	// prefix whose key names no upload, so no record can vouch for it. It
+	// is only ever reported.
+	FindingUnverifiable = "UNVERIFIABLE_ITEM"
 )
 
 // Actions a finding calls for.
@@ -96,8 +100,11 @@ const (
 
 // ReconciliationFinding records one discrepancy and what was done about it.
 type ReconciliationFinding struct {
-	ID              string
-	Kind            string
+	ID   string
+	Kind string
+	// ConnectionID is the storage connection the item is on ("" reads as
+	// the platform's).
+	ConnectionID    string
 	TenantID        string
 	UploadID        string
 	ObjectKey       string

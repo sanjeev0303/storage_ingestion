@@ -47,6 +47,12 @@ func Load() (Config, error) {
 	if err != nil || cfg.UploadMaxSize <= 0 {
 		return Config{}, fmt.Errorf("UPLOAD_MAX_SIZE_BYTES must be a positive number of bytes")
 	}
+	// The largest object an S3-family or GCS bucket holds, and so the
+	// largest any adapter can promote; refused here rather than after an
+	// upload that size.
+	if cfg.UploadMaxSize > 5<<40 {
+		return Config{}, fmt.Errorf("UPLOAD_MAX_SIZE_BYTES must be at most 5 TiB (%d bytes)", int64(5<<40))
+	}
 	seconds := []struct {
 		key, fallback string
 		target        *time.Duration
@@ -156,10 +162,14 @@ func LoadReconciliation() (Reconciliation, error) {
 
 // Processing contains the processing worker's settings.
 type Processing struct {
-	PollInterval    time.Duration
-	BatchSize       int
-	Concurrency     int
-	LeaseDuration   time.Duration
+	PollInterval  time.Duration
+	BatchSize     int
+	Concurrency   int
+	LeaseDuration time.Duration
+	// RenewEvery renews a claimed job's lease; MaxJobDuration bounds how
+	// long renewal keeps one job, from its claim.
+	RenewEvery      time.Duration
+	MaxJobDuration  time.Duration
 	MaxAttempts     int
 	BackoffBase     time.Duration
 	BackoffMax      time.Duration
@@ -192,7 +202,7 @@ func LoadProcessing() (Processing, error) {
 		ClamAVAddress:   getEnv("CLAMAV_ADDRESS", "127.0.0.1:3310"),
 		ScanPolicy:      strings.ToLower(getEnv("SCAN_UNAVAILABLE_POLICY", "hold")),
 		PromotionBucket: getEnv("PROMOTION_BUCKET", ""),
-		PromotionPrefix: getEnv("PROMOTION_PREFIX", "assets"),
+		PromotionPrefix: PromotionPrefix(),
 		UnknownType:     strings.ToLower(getEnv("PROCESSING_UNKNOWN_TYPE_ACTION", "allow")),
 
 		ArchiveInspection: strings.EqualFold(getEnv("ARCHIVE_INSPECTION_ENABLED", "false"), "true"),
@@ -205,7 +215,8 @@ func LoadProcessing() (Processing, error) {
 		target        *time.Duration
 	}{
 		{"PROCESSING_POLL_INTERVAL", "10s", &cfg.PollInterval},
-		{"PROCESSING_LEASE_DURATION", "15m", &cfg.LeaseDuration},
+		{"PROCESSING_LEASE_DURATION", "1m", &cfg.LeaseDuration},
+		{"PROCESSING_MAX_JOB_DURATION", "30m", &cfg.MaxJobDuration},
 		{"PROCESSING_BACKOFF_BASE", "30s", &cfg.BackoffBase},
 		{"PROCESSING_BACKOFF_MAX", "30m", &cfg.BackoffMax},
 		{"CLAMAV_TIMEOUT", "2m", &cfg.ClamAVTimeout},
@@ -253,8 +264,20 @@ func LoadProcessing() (Processing, error) {
 	if cfg.UnknownType != "allow" && cfg.UnknownType != "reject" {
 		return Processing{}, fmt.Errorf("PROCESSING_UNKNOWN_TYPE_ACTION must be allow or reject")
 	}
-	if cfg.ClamAVTimeout >= cfg.LeaseDuration {
-		return Processing{}, fmt.Errorf("CLAMAV_TIMEOUT must be shorter than PROCESSING_LEASE_DURATION")
+	cfg.RenewEvery = cfg.LeaseDuration / 3
+	if raw := getEnv("PROCESSING_LEASE_RENEW_INTERVAL", ""); raw != "" {
+		if cfg.RenewEvery, err = time.ParseDuration(raw); err != nil || cfg.RenewEvery <= 0 {
+			return Processing{}, fmt.Errorf("PROCESSING_LEASE_RENEW_INTERVAL must be a positive duration such as 20s")
+		}
+	}
+	if 2*cfg.RenewEvery > cfg.LeaseDuration {
+		return Processing{}, fmt.Errorf("PROCESSING_LEASE_RENEW_INTERVAL must be at most half of PROCESSING_LEASE_DURATION")
+	}
+	if cfg.MaxJobDuration < cfg.LeaseDuration {
+		return Processing{}, fmt.Errorf("PROCESSING_MAX_JOB_DURATION must not be shorter than PROCESSING_LEASE_DURATION")
+	}
+	if cfg.ClamAVTimeout >= cfg.MaxJobDuration {
+		return Processing{}, fmt.Errorf("CLAMAV_TIMEOUT must be shorter than PROCESSING_MAX_JOB_DURATION")
 	}
 
 	if cfg.Scanner != "none" && cfg.Scanner != "clamav" {
@@ -308,7 +331,7 @@ type Delivery struct {
 func LoadDelivery() (Delivery, error) {
 	cfg := Delivery{
 		Bucket:            getEnv("PROMOTION_BUCKET", ""),
-		Prefix:            getEnv("PROMOTION_PREFIX", "assets"),
+		Prefix:            PromotionPrefix(),
 		ProxyEnabled:      strings.EqualFold(getEnv("DELIVERY_PROXY_ENABLED", "true"), "true"),
 		CDNEnabled:        strings.EqualFold(getEnv("DELIVERY_CDN_ENABLED", "false"), "true"),
 		CDNBaseURL:        getEnv("DELIVERY_CDN_BASE_URL", ""),
@@ -356,6 +379,17 @@ func splitList(value string) []string {
 		}
 	}
 	return out
+}
+
+// PromotionPrefix is where the platform publishes objects in its delivery
+// bucket (PROMOTION_PREFIX, "assets" by default). Every process that
+// reaches platform objects reads it here, so none can disagree.
+func PromotionPrefix() string {
+	prefix := strings.Trim(getEnv("PROMOTION_PREFIX", "assets"), "/")
+	if prefix == "" {
+		return "assets"
+	}
+	return prefix
 }
 
 func getEnv(key, fallback string) string {

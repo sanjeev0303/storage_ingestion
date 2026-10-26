@@ -16,27 +16,30 @@ type LifecycleStorage interface {
 	HeadObject(ctx context.Context, bucket, objectKey string) (ObjectMetadata, error)
 	// HeadObjectVersion checks one version of an object (versioned buckets).
 	HeadObjectVersion(ctx context.Context, bucket, objectKey, versionID string) (ObjectMetadata, error)
+	// DeleteObject removes the object and, on a bucket that keeps
+	// versions, every version of exactly that key (see ObjectStorage).
 	DeleteObject(ctx context.Context, bucket, objectKey string) error
 	// DeleteObjectVersion removes exactly one version of an object
-	// (versioned buckets); deleting by key there only adds a delete marker.
+	// (versioned buckets).
 	DeleteObjectVersion(ctx context.Context, bucket, objectKey, versionID string) error
 }
 
 // InventoryRepository stores inventory scans and orphan candidates.
 type InventoryRepository interface {
-	// OpenScan leases the RUNNING scan of the connection's bucket prefix to
-	// owner, or starts a new one with newID. ok is false while another
-	// worker holds a live lease on the running scan.
-	OpenScan(ctx context.Context, connectionID, bucket, prefix, owner, newID string, now time.Time, lease time.Duration) (scan model.InventoryScan, ok bool, err error)
+	// OpenScan leases the RUNNING scan of this kind (model.ScanObjects,
+	// ...) of the connection's bucket prefix to owner, or starts a new one
+	// with newID. ok is false while another worker holds a live lease on
+	// the running scan.
+	OpenScan(ctx context.Context, kind, connectionID, bucket, prefix, owner, newID string, now time.Time, lease time.Duration) (scan model.InventoryScan, ok bool, err error)
 	// SaveProgress records the scan's cursor and counters and extends the
 	// lease. model.ErrLeaseLost when owner no longer holds it.
 	SaveProgress(ctx context.Context, scan model.InventoryScan, owner string, now time.Time, lease time.Duration) error
 	// FinishScan records the scan's final counters, ends it as COMPLETED
 	// or FAILED and releases it.
 	FinishScan(ctx context.Context, scan model.InventoryScan, owner string, now time.Time, status string) error
-	// LastCompleted returns the latest completed scan of the connection's
-	// bucket prefix.
-	LastCompleted(ctx context.Context, connectionID, bucket, prefix string) (model.InventoryScan, bool, error)
+	// LastCompleted returns the latest completed scan of this kind of the
+	// connection's bucket prefix.
+	LastCompleted(ctx context.Context, kind, connectionID, bucket, prefix string) (model.InventoryScan, bool, error)
 	RecentScans(ctx context.Context, limit int) ([]model.InventoryScan, error)
 
 	// Mark records a sighting of an unowned object (on the candidate's

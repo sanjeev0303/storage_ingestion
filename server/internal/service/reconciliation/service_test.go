@@ -63,10 +63,13 @@ func (r *scriptedResolver) VerifyIntegrity(context.Context, string, string) (mod
 }
 
 // The scans find nothing here; scan behaviour is tested with real services.
-func (r *scriptedResolver) ScanOrphanSessions(context.Context, string, uploadservice.ScanOptions) ([]model.ReconciliationFinding, string, error) {
+func (r *scriptedResolver) PlatformPlace() uploadservice.ScanPlace {
+	return uploadservice.ScanPlace{ConnectionID: model.PlatformConnectionID, Prefix: "quarantine"}
+}
+func (r *scriptedResolver) ScanSessionsAt(context.Context, uploadservice.ScanPlace, string, uploadservice.ScanOptions) ([]model.ReconciliationFinding, string, error) {
 	return nil, "", nil
 }
-func (r *scriptedResolver) ScanOrphanObjects(context.Context, string, uploadservice.ScanOptions) ([]model.ReconciliationFinding, string, error) {
+func (r *scriptedResolver) ScanObjectsAt(context.Context, uploadservice.ScanPlace, string, uploadservice.ScanOptions) ([]model.ReconciliationFinding, string, error) {
 	return nil, "", nil
 }
 func (r *scriptedResolver) CleanStaleParts(context.Context, []model.UploadRef, bool) ([]model.ReconciliationFinding, error) {

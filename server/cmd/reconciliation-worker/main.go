@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -104,8 +103,9 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("load storage connection configuration: %w", err)
 	}
-	router, err := storageregistry.ForProcess(storageCfg, platformStorage, bucket, bucket, "assets",
-		postgres.NewStorageConnectionRepository(db), registry)
+	connections := postgres.NewStorageConnectionRepository(db)
+	router, err := storageregistry.ForProcess(storageCfg, platformStorage, bucket, bucket, config.PromotionPrefix(),
+		connections, registry)
 	if err != nil {
 		return fmt.Errorf("configure storage connections: %w", err)
 	}
@@ -113,12 +113,8 @@ func run() error {
 
 	if workerCfg.MetricsAddr != "" {
 		registry.Publish("reconciliation")
-		// expvar serves /debug/vars on the default mux.
-		go func() {
-			if err := http.ListenAndServe(workerCfg.MetricsAddr, nil); err != nil {
-				log.Error("metrics listener stopped", "error", err)
-			}
-		}()
+		stopMetrics := metrics.Serve(workerCfg.MetricsAddr, db.Pool.Ping, log)
+		defer stopMetrics()
 	}
 
 	service, err := reconciliationservice.NewService(
@@ -150,6 +146,9 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("create reconciliation service: %w", err)
 	}
+	// The listing scans cover every connection uploads land on, each with
+	// its progress kept in inventory_scans.
+	service.Route(connections, router, postgres.NewInventoryRepository(db))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

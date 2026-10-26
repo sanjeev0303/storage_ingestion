@@ -595,6 +595,14 @@ func (r *DeletionRepository) Retry(ctx context.Context, id, owner string, now, n
 	})
 }
 
+func (r *DeletionRepository) Wait(ctx context.Context, id, owner string, now, next time.Time, reason string) error {
+	return r.leased(ctx, id, owner, now, []model.DeletionState{model.DeletionInProgress}, func(op *model.DeletionOperation) {
+		op.State, op.NextAttemptAt, op.LastError = model.DeletionRetryWait, next, reason
+		op.AttemptCount = max(op.AttemptCount-1, 0)
+		release(op)
+	})
+}
+
 func (r *DeletionRepository) Fail(ctx context.Context, id, owner string, now time.Time, lastError string, event model.LifecycleEvent) error {
 	err := r.leased(ctx, id, owner, now, liveStates, func(op *model.DeletionOperation) {
 		op.State, op.LastError = model.DeletionFailed, lastError
@@ -719,7 +727,7 @@ func connectionOrPlatform(id string) string {
 	return id
 }
 
-func (r *InventoryRepository) OpenScan(ctx context.Context, connectionID, bucket, prefix, owner, newID string, now time.Time, lease time.Duration) (model.InventoryScan, bool, error) {
+func (r *InventoryRepository) OpenScan(ctx context.Context, kind, connectionID, bucket, prefix, owner, newID string, now time.Time, lease time.Duration) (model.InventoryScan, bool, error) {
 	connectionID = connectionOrPlatform(connectionID)
 	if err := ctx.Err(); err != nil {
 		return model.InventoryScan{}, false, err
@@ -728,7 +736,7 @@ func (r *InventoryRepository) OpenScan(ctx context.Context, connectionID, bucket
 	defer r.mu.Unlock()
 
 	for id, scan := range r.scans {
-		if scan.ConnectionID != connectionID || scan.Bucket != bucket || scan.Prefix != prefix || scan.Status != model.ScanRunning {
+		if scan.Kind != kind || scan.ConnectionID != connectionID || scan.Bucket != bucket || scan.Prefix != prefix || scan.Status != model.ScanRunning {
 			continue
 		}
 		held := r.leases[id]
@@ -739,7 +747,7 @@ func (r *InventoryRepository) OpenScan(ctx context.Context, connectionID, bucket
 		return scan, true, nil
 	}
 
-	scan := model.InventoryScan{ID: newID, ConnectionID: connectionID, Bucket: bucket, Prefix: prefix, Status: model.ScanRunning, StartedAt: now, UpdatedAt: now}
+	scan := model.InventoryScan{ID: newID, Kind: kind, ConnectionID: connectionID, Bucket: bucket, Prefix: prefix, Status: model.ScanRunning, StartedAt: now, UpdatedAt: now}
 	r.scans[newID] = scan
 	r.leases[newID] = scanLease{owner: owner, expires: now.Add(lease)}
 	return scan, true, nil
@@ -781,7 +789,7 @@ func (r *InventoryRepository) FinishScan(ctx context.Context, scan model.Invento
 	return nil
 }
 
-func (r *InventoryRepository) LastCompleted(ctx context.Context, connectionID, bucket, prefix string) (model.InventoryScan, bool, error) {
+func (r *InventoryRepository) LastCompleted(ctx context.Context, kind, connectionID, bucket, prefix string) (model.InventoryScan, bool, error) {
 	connectionID = connectionOrPlatform(connectionID)
 	if err := ctx.Err(); err != nil {
 		return model.InventoryScan{}, false, err
@@ -791,7 +799,7 @@ func (r *InventoryRepository) LastCompleted(ctx context.Context, connectionID, b
 	var last model.InventoryScan
 	found := false
 	for _, scan := range r.scans {
-		if scan.ConnectionID == connectionID && scan.Bucket == bucket && scan.Prefix == prefix && scan.Status == model.ScanCompleted &&
+		if scan.Kind == kind && scan.ConnectionID == connectionID && scan.Bucket == bucket && scan.Prefix == prefix && scan.Status == model.ScanCompleted &&
 			(!found || scan.CompletedAt.After(*last.CompletedAt)) {
 			last, found = scan, true
 		}

@@ -24,7 +24,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/service/delivery"
 )
 
-// Phase 5.5 against the local stack. Needs migrations through 000008.
+// Phase 5.5 against the local stack. Needs every migration (through 000015).
 
 func TestProviderConditionalRangeReads(t *testing.T) {
 	storage, bucket := openTestProvider(t)

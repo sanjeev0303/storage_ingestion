@@ -390,8 +390,10 @@ func TestCrashAfterStorageDeletionResumes(t *testing.T) {
 	if e.objects("a1") != 0 || e.status("a1") != model.AssetStatusDeleted {
 		t.Fatal("recovery must finish the deletion")
 	}
-	if extra := e.storage.DeleteCalls - calls; extra != 1 {
-		t.Fatalf("recovery must delete only what is left, made %d calls", extra)
+	// What is left, and the gone object's key once more, which is a no-op
+	// here and clears versions a crashed step left on a versioned bucket.
+	if extra := e.storage.DeleteCalls - calls; extra != 2 {
+		t.Fatalf("recovery must delete what is left and clear the other key, made %d calls", extra)
 	}
 }
 
@@ -739,6 +741,41 @@ func TestCrossTenantRequestsSeeNothing(t *testing.T) {
 	e.clock = e.clock.Add(grace)
 	if stats := e.run(e.service("worker-b", func(c *Config) { c.TenantID = "tenant-2" })); stats.Claimed != 0 || e.objects("a1") != 2 {
 		t.Fatalf("a tenant-scoped worker claimed another tenant's deletion: %+v", stats)
+	}
+}
+
+// In a versioned bucket no version of the asset's keys survives: the
+// recorded one goes by its ID, the rest (a second copy, a source an
+// earlier attempt only hid behind a delete marker) with the key. A key
+// that only shares a prefix is left alone.
+func TestVersionedBucketsKeepNoVersionOfADeletedAsset(t *testing.T) {
+	e := newEnv(t)
+	e.storage.Versioning = true
+	e.published("a1", e.clock)
+	recorded := e.storage.Versions("assets/tenant-1/a1")[0]
+	e.assets.Update("a1", func(a *model.Asset) { a.StorageVersionID = recorded })
+	e.storage.PutObject("assets/tenant-1/a1", []byte("a second copy"))
+	e.storage.HideObject("quarantine/tenant-1/up-a1")
+	e.storage.PutObject("quarantine/tenant-1/up-a10", []byte("another upload"))
+
+	svc := e.service("worker-a")
+	if _, err := svc.RequestDeletion(context.Background(), owner, "a1"); err != nil {
+		t.Fatal(err)
+	}
+	e.clock = e.clock.Add(grace)
+	if stats := e.run(svc); stats.Completed != 1 {
+		t.Fatalf("%+v", stats)
+	}
+	for _, key := range []string{"assets/tenant-1/a1", "quarantine/tenant-1/up-a1"} {
+		if left := e.storage.Versions(key); len(left) != 0 {
+			t.Fatalf("%s keeps versions %v", key, left)
+		}
+	}
+	if !slices.Contains(e.storage.DeletedVersions, recorded) {
+		t.Fatalf("the recorded version is deleted: %v", e.storage.DeletedVersions)
+	}
+	if len(e.storage.Versions("quarantine/tenant-1/up-a10")) != 1 {
+		t.Fatal("another upload's key was touched")
 	}
 }
 

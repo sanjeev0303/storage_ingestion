@@ -42,7 +42,7 @@ import (
 )
 
 // Phase 8 against PostgreSQL: TEST_DATABASE_URL with every migration
-// through 000012 applied. Accounts, organizations and their data are
+// through 000015 applied. Accounts, organizations and their data are
 // removed after each test. Events in the platform audit chain stay: the
 // chain is append-only and shared, and removing events from its middle
 // would break it.
@@ -281,7 +281,7 @@ var tenantTables = []string{
 	"dataset_manifest_imports", "dataset_version_members", "dataset_versions", "dataset_members", "validation_profiles",
 	"download_tokens", "delivery_audit_events", "deletion_operations", "lifecycle_events", "legal_holds",
 	"retention_policies", "orphan_candidates", "quarantine_records", "processing_events", "processing_jobs",
-	"ingestion_entries", "ingestion_jobs", "datasets", "ingestion_tenant_usage", "assets", "reconciliation_findings",
+	"ingestion_entries", "ingestion_jobs", "datasets", "ingestion_tenant_usage", "pack_entries", "packs", "assets", "reconciliation_findings",
 	"reconciliation_tasks", "upload_parts", "upload_sessions", "outbox_events", "event_inbox", "dead_letters",
 	"event_discrepancies", "tenant_content_policies", "tenant_quotas", "tenant_usage",
 }
@@ -413,6 +413,7 @@ func (s *securityStack) newDatasetService(t *testing.T, change func(*config.Data
 	svc, err := datasetservice.NewService(datasetservice.Dependencies{
 		Repo: s.datasetDB, Manifests: s.ie.storage, ManifestBucket: s.ie.bucket,
 		Content: s.ie.storage, ContentBucket: s.ie.bucket, Quotas: s.quotas, Audit: s.audit, Log: s.log,
+		Packs: postgres.NewPackRepository(s.db),
 	}, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -435,6 +436,8 @@ func openSecurityStack(t *testing.T, settings map[string]string) *securityStack 
 		t.Fatal(err)
 	}
 	deliverer.Guard(e.identity.PrincipalFor, e.audit)
+	packs := postgres.NewPackRepository(e.db)
+	deliverer.Packed(packs)
 
 	ingest, err := ingestion.NewService(ingestion.Dependencies{
 		Repo: ie.repo, Uploads: ie.single, Multipart: ie.multi, Sessions: ie.uploads, Assets: ie.assets, Jobs: ie.processingEnv.jobs,
@@ -464,6 +467,7 @@ func openSecurityStack(t *testing.T, settings map[string]string) *securityStack 
 		Quarantine: postgres.NewQuarantineRepository(e.db), Policies: postgres.NewRetentionPolicyRepository(e.db),
 		Holds: postgres.NewLegalHoldRepository(e.db), Deletions: postgres.NewDeletionRepository(e.db),
 		Events: postgres.NewLifecycleEventRepository(e.db), Cursors: postgres.NewCursorRepository(e.db), Storage: ie.storage,
+		Packs: packs,
 	}, assetservice.Config{
 		Owner: "it-lifecycle", QuarantineBucket: ie.bucket, DeliveryBucket: ie.bucket, DeliveryPrefix: "published",
 		Platform:  assetservice.PlatformRetention{DefaultQuarantineRetention: time.Hour, QuarantineRetentionFloor: time.Hour},
@@ -486,7 +490,7 @@ func openSecurityStack(t *testing.T, settings map[string]string) *securityStack 
 	if err != nil {
 		t.Fatal(err)
 	}
-	reconciler := catalog.NewReconciler(catalogDB, catalogService, ie.storage, ie.bucket, "published", e.audit, nil, e.log)
+	reconciler := catalog.NewReconciler(catalogDB, catalogService, ie.storage, ie.bucket, "published", e.audit, nil, e.log).Packed(packs)
 
 	s := &securityStack{securityEnv: e, ie: ie, delivery: deliverer, lifecycle: lifecycle, catalog: catalogService,
 		reconciler: reconciler, catalogDB: catalogDB, dead: dead, datasetDB: postgres.NewDatasetRepository(e.db)}

@@ -39,6 +39,8 @@ type Dependencies struct {
 	// Without them only the platform's buckets are cleaned.
 	Router      interfaces.StorageRouter
 	Connections interfaces.ConnectionLister
+	// Packs finds assets whose bytes were packed; nil when nothing is.
+	Packs interfaces.PackLocator
 }
 
 type Config struct {
@@ -227,7 +229,7 @@ func (s *Service) Scan(ctx context.Context, stats *CycleStats) error {
 }
 
 func (s *Service) scanArea(ctx context.Context, a area, stats *CycleStats) error {
-	scan, ok, err := s.deps.Inventory.OpenScan(ctx, a.connectionID, a.bucket, a.prefix, s.cfg.Owner, newID(), s.now(), s.cfg.Lease)
+	scan, ok, err := s.deps.Inventory.OpenScan(ctx, model.ScanObjects, a.connectionID, a.bucket, a.prefix, s.cfg.Owner, newID(), s.now(), s.cfg.Lease)
 	if err != nil {
 		return fmt.Errorf("open inventory scan: %w", err)
 	}
@@ -537,6 +539,17 @@ func (s *Service) checkAsset(ctx context.Context, asset model.Asset, stats *Cycl
 	bucket, key := place.StagingBucket, place.StagingKey(asset.TenantID, asset.UploadID)
 	if asset.Status == model.AssetStatusAvailable {
 		bucket, key = place.ReadyBucket, asset.ObjectKey
+		// A packed asset's bytes are in its pack, not at its own key.
+		if s.deps.Packs != nil {
+			loc, packed, err := s.deps.Packs.PackedLocation(ctx, asset.TenantID, asset.ID)
+			if err != nil {
+				s.deps.Metrics.Add("missing_check_errors", 1)
+				return nil
+			}
+			if packed {
+				bucket, key = loc.Bucket, loc.ObjectKey
+			}
+		}
 	}
 
 	_, err = storage.HeadObject(ctx, bucket, key)

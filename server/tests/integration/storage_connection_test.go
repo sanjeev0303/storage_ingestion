@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -123,6 +124,111 @@ func TestConnectionDeletionWaitsForUnprocessedUploads(t *testing.T) {
 		next.ID, waiting.ID).Scan(&processed, &stranded)
 	if err != nil || processed != 1 || stranded != 0 {
 		t.Fatalf("the next upload is processed (%d) and the stranded one is skipped (%d): %v", processed, stranded, err)
+	}
+}
+
+// Two administrators disable a connection and make it the default at the
+// same moment. Whichever wins, the default is never a disabled connection.
+func TestDisableAndSetDefaultNeverLeaveADisabledDefault(t *testing.T) {
+	e := openSecurityEnv(t, nil)
+	ctx := context.Background()
+	owner, _ := e.account(t, "conn-race")
+	org := e.organization(t, "conn-race", owner)
+	repo := postgres.NewStorageConnectionRepository(e.db)
+	keyring := testKeyring(t)
+
+	outcomes := map[string]int{}
+	for round := 0; round < 40; round++ {
+		c := activeConnection(t, repo, org.ID, fmt.Sprintf("race %d", round), keyring)
+		if err := repo.SetDefault(ctx, org.ID, model.PlatformConnectionID); err != nil {
+			t.Fatal(err)
+		}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		var disableErr, defaultErr error
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, disableErr = repo.Disable(ctx, org.ID, c.ID, "admin-1", time.Now().UTC())
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			defaultErr = repo.SetDefault(ctx, org.ID, c.ID)
+		}()
+		close(start)
+		wg.Wait()
+
+		current, err := repo.DefaultConnection(ctx, org.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stored, err := repo.GetConnection(ctx, org.ID, c.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if current == c.ID && stored.Status != model.ConnectionActive {
+			t.Fatalf("round %d: the default is %s (disable: %v, set default: %v)", round, stored.Status, disableErr, defaultErr)
+		}
+		if (disableErr == nil) == (defaultErr == nil) {
+			t.Fatalf("round %d: exactly one may win (disable: %v, set default: %v)", round, disableErr, defaultErr)
+		}
+		if disableErr == nil {
+			outcomes["disabled"]++
+		} else {
+			outcomes["made default"]++
+		}
+	}
+	t.Logf("outcomes over 40 rounds: %v", outcomes)
+}
+
+// Reconciliation's scans of a tenant connection keep their own progress
+// beside the cleanup worker's scan of the same prefix, and resume with the
+// cursor and failure they saved. A finding names its connection.
+func TestReconciliationScansKeepTheirOwnProgressInPostgres(t *testing.T) {
+	e := openSecurityEnv(t, nil)
+	ctx := context.Background()
+	owner, _ := e.account(t, "scan-kinds")
+	org := e.organization(t, "scan-kinds", owner)
+	c := activeConnection(t, postgres.NewStorageConnectionRepository(e.db), org.ID, "Scanned bucket", testKeyring(t))
+	inventory := postgres.NewInventoryRepository(e.db)
+	now := time.Now().UTC()
+	prefix := "stage/" + org.ID + "/"
+
+	objects, ok1, err1 := inventory.OpenScan(ctx, model.ScanObjects, c.ID, "b", prefix, "w1", "kind-o-"+e.run, now, time.Minute)
+	sessions, ok2, err2 := inventory.OpenScan(ctx, model.ScanUploadSessions, c.ID, "b", prefix, "w1", "kind-s-"+e.run, now, time.Minute)
+	t.Cleanup(func() {
+		_, _ = e.db.Pool.Exec(context.Background(), `DELETE FROM inventory_scans WHERE id = ANY($1)`, []string{objects.ID, sessions.ID})
+	})
+	if err := errors.Join(err1, err2); err != nil || !ok1 || !ok2 || objects.ID == sessions.ID || sessions.Kind != model.ScanUploadSessions {
+		t.Fatalf("two kinds over one prefix run side by side: %+v %+v %v", objects, sessions, err)
+	}
+	sessions.Cursor, sessions.Pages, sessions.Errors, sessions.LastError = "after-key", 3, 1, "list provider sessions: 503"
+	if err := inventory.SaveProgress(ctx, sessions, "w1", now, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	resumed, ok, err := inventory.OpenScan(ctx, model.ScanUploadSessions, c.ID, "b", prefix, "w1", "kind-s2-"+e.run, now.Add(time.Second), time.Minute)
+	if err != nil || !ok || resumed.ID != sessions.ID || resumed.Cursor != "after-key" || resumed.Errors != 1 || resumed.LastError != sessions.LastError {
+		t.Fatalf("a restart resumes the saved scan: %+v %v", resumed, err)
+	}
+	if _, ok, _ := inventory.OpenScan(ctx, model.ScanUploadSessions, c.ID, "b", prefix, "w2", "kind-s3-"+e.run, now, time.Minute); ok {
+		t.Fatal("another worker does not take a leased scan")
+	}
+
+	finding := model.ReconciliationFinding{
+		ID: "finding-" + e.run, Kind: model.FindingOrphanObject, ConnectionID: c.ID, TenantID: org.ID, ObjectKey: prefix + "up-1",
+		Action: model.ActionDeleteObject, Outcome: model.FindingDone, Reason: "upload session is ABORTED", CreatedAt: now,
+	}
+	if err := postgres.NewReconciliationRepository(e.db).RecordFinding(ctx, finding); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = e.db.Pool.Exec(context.Background(), `DELETE FROM reconciliation_findings WHERE id = $1`, finding.ID)
+	})
+	var stored string
+	if err := e.db.Pool.QueryRow(ctx, `SELECT storage_connection_id FROM reconciliation_findings WHERE id = $1`, finding.ID).Scan(&stored); err != nil || stored != c.ID {
+		t.Fatalf("the finding names its connection: %q %v", stored, err)
 	}
 }
 
@@ -252,8 +358,8 @@ func TestStorageConnectionsInPostgres(t *testing.T) {
 	// Inventory scans are per connection.
 	inventory := postgres.NewInventoryRepository(e.db)
 	now := time.Now().UTC()
-	s1, ok1, err1 := inventory.OpenScan(ctx, "", "shared-bucket", "published/"+e.run+"/", "w1", "scan-p-"+e.run, now, time.Minute)
-	s2, ok2, err2 := inventory.OpenScan(ctx, b.ID, "shared-bucket", "published/"+e.run+"/", "w1", "scan-b-"+e.run, now, time.Minute)
+	s1, ok1, err1 := inventory.OpenScan(ctx, model.ScanObjects, "", "shared-bucket", "published/"+e.run+"/", "w1", "scan-p-"+e.run, now, time.Minute)
+	s2, ok2, err2 := inventory.OpenScan(ctx, model.ScanObjects, b.ID, "shared-bucket", "published/"+e.run+"/", "w1", "scan-b-"+e.run, now, time.Minute)
 	if err1 != nil || err2 != nil || !ok1 || !ok2 || s1.ConnectionID != model.PlatformConnectionID || s2.ConnectionID != b.ID {
 		t.Fatalf("one running scan per connection: %+v %+v %v %v", s1, s2, err1, err2)
 	}
@@ -551,4 +657,156 @@ func TestBringYourOwnStorageEndToEnd(t *testing.T) {
 	if strings.Contains(s.logs.String(), secretKey) || strings.Contains(s.logs.String(), "wrong-secret-xyz") {
 		t.Fatal("a credential reached the logs")
 	}
+}
+
+// Edits, a refused edit, a credential rotation and a disable/enable
+// cycle, made while readers keep reading a published asset and an upload
+// is in flight: none of them interrupts existing work, and a change that
+// fails its test changes nothing.
+func TestConnectionChangesKeepExistingWorkReachable(t *testing.T) {
+	s := openBYOSStack(t)
+	ctx := context.Background()
+	tm := s.team(t, "byos-change")
+	owner := s.signIn(t, tm.ownerUser.Email, tm.ownerPW).AccessToken
+	admin := s.signIn(t, tm.adminUser.Email, tm.adminPW).AccessToken
+	dev := s.signIn(t, tm.devUser.Email, tm.devPW).AccessToken
+	org := tm.org.ID
+	bucket := os.Getenv("TEST_S3_COMPATIBLE_BUCKET")
+	if bucket == "" {
+		bucket = "object-storage-it"
+	}
+	endpoint := os.Getenv("TEST_S3_COMPATIBLE_ENDPOINT")
+	accessKey, secretKey := os.Getenv("TEST_S3_COMPATIBLE_ACCESS_KEY"), os.Getenv("TEST_S3_COMPATIBLE_SECRET_KEY")
+	run := strings.TrimPrefix(s.run, "r")
+	staging, ready := "stc"+run[len(run)-8:], "pubc"+run[len(run)-8:]
+	path := "/api/v1/storage-connections/"
+
+	create := fmt.Sprintf(`{"name":"MinIO","provider":"S3_COMPATIBLE","auth_method":"ACCESS_KEY","bucket":%q,
+		"endpoint":%q,"force_path_style":true,"staging_prefix":%q,"ready_prefix":%q,
+		"credentials":{"access_key_id":%q,"secret_access_key":%q}}`,
+		bucket, endpoint, staging, ready, accessKey, secretKey)
+	var conn response.StorageConnectionResponse
+	s.expect(t, admin, org, http.MethodPost, "/api/v1/storage-connections", create, http.StatusCreated, &conn)
+	t.Cleanup(func() { s.removePrefix(t, org, conn.ID, staging+"/", ready+"/") })
+	s.expect(t, admin, org, http.MethodPost, path+conn.ID+"/test", "", http.StatusOK, nil)
+	s.expect(t, admin, org, http.MethodPost, path+conn.ID+"/set-default", "", http.StatusOK, nil)
+
+	data := []byte("still here after every change\n")
+	publish := func(name string) *model.Asset {
+		t.Helper()
+		var upload response.CreateUploadResponse
+		body, _ := json.Marshal(uploadOf(name, data))
+		s.expect(t, dev, org, http.MethodPost, "/api/v1/uploads", string(body), http.StatusCreated, &upload)
+		put(t, upload.UploadURL, map[string]string{"Content-Type": "text/plain"}, data)
+		s.expect(t, dev, org, http.MethodPost, "/api/v1/uploads/"+upload.UploadID+"/complete", "", http.StatusOK, nil)
+		if _, err := s.ie.proc.Intake(ctx, org, upload.UploadID); err != nil {
+			t.Fatalf("processing: %v", err)
+		}
+		asset, err := s.ie.assets.GetByUpload(ctx, org, upload.UploadID)
+		if err != nil || asset.Status != model.AssetStatusAvailable || asset.StorageConnectionID != conn.ID {
+			t.Fatalf("published on the connection: %+v %v", asset, err)
+		}
+		return asset
+	}
+	asset := publish("change-first")
+
+	// Readers resolve the connection and read the asset throughout.
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	reads, failures := 0, []string{}
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				loc, err := s.registry.Locate(ctx, org, conn.ID)
+				if err == nil {
+					_, err = loc.Storage.HeadObject(ctx, loc.ReadyBucket, asset.ObjectKey)
+				}
+				mu.Lock()
+				reads++
+				if err != nil {
+					failures = append(failures, err.Error())
+				}
+				mu.Unlock()
+				time.Sleep(5 * time.Millisecond)
+			}
+		}()
+	}
+
+	// An upload granted before the changes finishes after them.
+	var inFlight response.CreateUploadResponse
+	body, _ := json.Marshal(uploadOf("change-in-flight", data))
+	s.expect(t, dev, org, http.MethodPost, "/api/v1/uploads", string(body), http.StatusCreated, &inFlight)
+
+	current := func() response.StorageConnectionResponse {
+		var c response.StorageConnectionResponse
+		s.expect(t, admin, org, http.MethodGet, path+conn.ID, "", http.StatusOK, &c)
+		return c
+	}
+	edit := func(revision int64, to string, want int) {
+		t.Helper()
+		var out response.StorageTestResponse
+		r := s.expect(t, admin, org, http.MethodPatch, path+conn.ID, fmt.Sprintf(`{"revision":%d,"endpoint":%q}`, revision, to), want, nil)
+		if want == http.StatusUnprocessableEntity {
+			if err := json.Unmarshal(r.body, &out); err != nil || out.OK || out.Category == "" {
+				t.Fatalf("a sanitized refusal: %s", r.body)
+			}
+		}
+	}
+
+	// The same MinIO under another name: tested, applied, still active.
+	alternate := strings.Replace(endpoint, "127.0.0.1", "localhost", 1)
+	if alternate == endpoint {
+		alternate = strings.Replace(endpoint, "localhost", "127.0.0.1", 1)
+	}
+	if alternate != endpoint {
+		edit(current().Revision, alternate, http.StatusOK)
+		if c := current(); c.Status != "ACTIVE" || c.Endpoint != alternate {
+			t.Fatalf("a tested edit keeps the connection active: %+v", c)
+		}
+	} else {
+		t.Logf("no alternate name for %s; the applied edit is not exercised", endpoint)
+	}
+	before := current()
+	edit(before.Revision, "http://127.0.0.1:1", http.StatusUnprocessableEntity)
+	if c := current(); c.Status != "ACTIVE" || c.Endpoint != before.Endpoint || c.Revision != before.Revision {
+		t.Fatalf("a refused edit changes nothing: %+v", c)
+	}
+
+	rotate := fmt.Sprintf(`{"revision":%d,"credentials":{"access_key_id":%q,"secret_access_key":%q}}`, current().Revision, accessKey, secretKey)
+	s.expect(t, admin, org, http.MethodPost, path+conn.ID+"/rotate-credentials", rotate, http.StatusOK, nil)
+	if c := current(); c.CredentialRotation != 2 {
+		t.Fatalf("rotated: %+v", c)
+	}
+
+	s.expect(t, owner, org, http.MethodPost, path+"platform/set-default", "", http.StatusOK, nil)
+	s.expect(t, admin, org, http.MethodPost, path+conn.ID+"/disable", "", http.StatusOK, nil)
+	var enabled response.StorageTestResponse
+	s.expect(t, admin, org, http.MethodPost, path+conn.ID+"/enable", "", http.StatusOK, &enabled)
+	if !enabled.OK || enabled.Connection == nil || enabled.Connection.Status != "ACTIVE" {
+		t.Fatalf("enabled after a passing test: %+v", enabled)
+	}
+
+	put(t, inFlight.UploadURL, map[string]string{"Content-Type": "text/plain"}, data)
+	s.expect(t, dev, org, http.MethodPost, "/api/v1/uploads/"+inFlight.UploadID+"/complete", "", http.StatusOK, nil)
+	if _, err := s.ie.proc.Intake(ctx, org, inFlight.UploadID); err != nil {
+		t.Fatalf("processing the in-flight upload: %v", err)
+	}
+	if a, err := s.ie.assets.GetByUpload(ctx, org, inFlight.UploadID); err != nil || a.Status != model.AssetStatusAvailable || a.StorageConnectionID != conn.ID {
+		t.Fatalf("the in-flight upload is published where it was bound: %+v %v", a, err)
+	}
+
+	close(stop)
+	wg.Wait()
+	if reads == 0 || len(failures) > 0 {
+		t.Fatalf("%d of %d reads failed during the changes, first: %v", len(failures), reads, failures[:min(1, len(failures))])
+	}
+	t.Logf("%d reads, none failed", reads)
 }

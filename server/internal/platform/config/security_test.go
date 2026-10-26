@@ -62,6 +62,23 @@ func TestInvalidSecuritySettingsFailStartup(t *testing.T) {
 	}
 }
 
+// Bulk ingestion has its own default budget, enough for the 35-40 files a
+// second the pipeline sustains, inside the organization's request quota.
+func TestIngestionEntryLimitFitsThePipelineAndTheQuota(t *testing.T) {
+	s, err := LoadSecurity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule, ok := s.Rates["ingestion_entry"]
+	perSecond := float64(rule.Requests) / rule.Window.Seconds()
+	if !ok || perSecond < 40 || rule.Requests > s.Quotas.MaxRequestsPerMinute {
+		t.Fatalf("ingestion_entry %+v against a quota of %d/min", rule, s.Quotas.MaxRequestsPerMinute)
+	}
+	if s.Rates["upload_finish"].Requests != 600 {
+		t.Fatalf("the interactive limit is unchanged: %+v", s.Rates["upload_finish"])
+	}
+}
+
 func TestSecurityValidateNeedsEveryRateLimit(t *testing.T) {
 	s, err := LoadSecurity()
 	if err != nil {

@@ -58,7 +58,7 @@ A record bound to a connection that cannot be reached (an outage, BYOS turned of
 | Direct (presigned) upload | ✓ (≤ 5 GiB) | ✓ | ✓ | ✓ V4 signed URL | ✓ SAS (`ACCOUNT_KEY` only; send `x-ms-blob-type: BlockBlob`) |
 | Large uploads | S3 multipart (5 MiB min part, ≤ 10 000 parts) | S3 multipart | S3 multipart | parallel composite: parts are objects, composed 32 at a time, in levels | block blob: `Put Block` per part, `Put Block List` to complete |
 | Part check | ETag (content) | ETag | ETag | MD5 (content) | block ID + size (no content validator; SHA-256 after upload proves the bytes) |
-| Copy inside the provider | ✓ | ✓ | ✓ | ✓ (rewrite) | ✓ (`Copy Blob`, waited for) |
+| Copy inside the provider | ✓ one `CopyObject` up to 5 GiB; above, a multipart copy (`UploadPartCopy`) to 5 TiB | as AWS S3 | as AWS S3 | ✓ (rewrite, any size to 5 TiB) | ✓ (`Copy Blob`, waited for) |
 | Range and conditional reads | ✓ | ✓ | ✓ | ✓ (generation-pinned) | ✓ (ETag / version) |
 | Presigned download | ✓ | ✓ | ✓ | ✓ | ✓ with `ACCOUNT_KEY`; a `SAS_TOKEN` connection serves downloads as API token links |
 | Version identifiers | S3 version ID (versioned buckets) | none | S3 version ID if supported | **generation**, kept as the provider's own decimal ID, never mapped to an S3 version | Azure version ID when account versioning is on |
@@ -66,13 +66,15 @@ A record bound to a connection that cannot be reached (an outage, BYOS turned of
 
 The platform never trusts a provider checksum or ETag as content proof. Every upload's SHA-256 is computed from the stored bytes before it can be promoted.
 
+**Large objects.** `UPLOAD_MAX_SIZE_BYTES` (5 GiB by default) is refused at startup above 5 TiB, the largest object an S3-family or GCS bucket holds. Promotion within one S3-family connection copies inside the provider: one `CopyObject` up to 5 GiB, and above that a multipart copy of 128 MiB parts (raised so they fit in 10,000), four parts at a time. Every copy names the source's ETag read first (`x-amz-copy-source-if-match`), so a source replaced mid-copy fails the copy instead of mixing bytes. A failed or cancelled copy aborts its multipart upload. The destination key, derived from the asset, is the only record of a copy in progress: a retry after a crash first aborts any upload left on that key, then copies again. A copy whose completion answer was lost is found by the check that follows: size, then a streamed SHA-256 against the verified checksum, before anything is published. Between connections, promotion streams with bounded memory, one part at a time; the part size grows to fit the provider's part limit (10,000 for S3, 50,000 blocks for Azure), so one transfer holds at most 525 MiB at 5 TiB. Measured locally: a 5.06 GiB copy on MinIO took 65.6 s in 41 parts, and hashing it took 141 s. MinIO accepts a single `CopyObject` above 5 GiB, so the 5 GiB refusal itself was not reproduced locally; it is AWS's documented limit. Objects above clamd's stream limit (`StreamMaxLength`, 4 GiB at most) are held unscanned, never promoted, unless the development policy allows unscanned files: with malware scanning on, nothing above that limit reaches promotion.
+
 ## Required provider permissions
 
 Grant the platform these, scoped to the one bucket or container (and ideally to the staging and ready prefixes).
 
 **AWS S3**: `s3:ListBucket`, `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, `s3:AbortMultipartUpload`, `s3:ListMultipartUploadParts`, `s3:ListBucketMultipartUploads`. Optionally:
 - `s3:GetBucketVersioning`: without it versioning is reported `UNKNOWN`;
-- `s3:GetObjectVersion` and `s3:DeleteObjectVersion`: for versioned buckets.
+- `s3:GetObjectVersion`, `s3:DeleteObjectVersion` and `s3:ListBucketVersions`: for versioned buckets, where deleting an object removes every version of its key.
 
 For `ASSUME_ROLE`, the role's trust policy must allow the platform's AWS principal and require the connection's `external_id`:
 
@@ -137,17 +139,21 @@ Every route needs a signed-in member of the organization. The `storage.*` permis
 | `POST /api/v1/storage-connections` | `storage.manage` | creates `PENDING`; credentials in `credentials` |
 | `GET /api/v1/storage-connections` | `storage.read` | the platform connection, the organization's own, `default_connection_id` |
 | `GET /api/v1/storage-connections/{id}` | `storage.read` | `ETag` is the revision |
-| `PATCH /api/v1/storage-connections/{id}` | `storage.manage` | name, region, endpoint, path style, staging mode; `If-Match` or `revision`; a new endpoint, region or path style returns it to `PENDING` |
-| `POST /api/v1/storage-connections/{id}/test` | `storage.manage` | `{"write_probe": true}` also writes, reads back and deletes one small object of its own under the ready prefix; a pass activates a `PENDING` connection |
+| `PATCH /api/v1/storage-connections/{id}` | `storage.manage` | name, region, endpoint, path style, staging mode; `If-Match` or `revision`; on an `ACTIVE` or `DISABLED` connection a new endpoint, region or path style is tested first and refused with 422 and the test result if it fails (see below) |
+| `POST /api/v1/storage-connections/{id}/test` | `storage.manage` | `{"write_probe": true}` also writes, reads back and deletes one small object of its own under the ready prefix; also reads the metadata of one published object the connection holds, if any; a pass activates a `PENDING` connection |
 | `POST /api/v1/storage-connections/{id}/rotate-credentials` | `storage.manage` | tested before stored; 422 with the test result when refused |
 | `POST /api/v1/storage-connections/{id}/set-default` | `storage.manage` | `ACTIVE` connections or `platform` |
 | `POST /api/v1/storage-connections/{id}/disable` | `storage.manage` | not the default; existing work keeps draining |
-| `POST /api/v1/storage-connections/{id}/enable` | `storage.manage` | back to `PENDING`, then tested |
+| `POST /api/v1/storage-connections/{id}/enable` | `storage.manage` | tested while still `DISABLED`; `ACTIVE` if it passes, otherwise stays `DISABLED` |
 | `DELETE /api/v1/storage-connections/{id}` | `storage.manage` | only disabled or pending, with nothing depending on it; 409 lists active uploads, live assets, datasets and default; erases the credential |
 
-Statuses: `PENDING` (created or repointed, not yet tested) → `ACTIVE` (tested; takes new uploads) → `DISABLED` (no new uploads; reads, processing and deletion continue) → `DELETED` (tombstone, credential erased; nothing can bind to it).
+Statuses: `PENDING` (created, not yet tested) → `ACTIVE` (tested; takes new uploads) → `DISABLED` (no new uploads; reads, processing and deletion continue) → `DELETED` (tombstone, credential erased; nothing can bind to it).
 
 A test answers a category, never the provider's message. The categories are `ACCESS_DENIED`, `NOT_FOUND`, `THROTTLED`, `NETWORK`, `ENDPOINT_REJECTED`, `TLS`, `INVALID_CREDENTIALS`, `UNSUPPORTED` and `PROVIDER_ERROR`. A test never creates or deletes customer data; the optional write probe touches only `<ready>/<tenant>/.connection-test/<random>` and removes it, including its version where versioning is on.
+
+**Changing where a connection points.** Uploads, assets and jobs are bound to the connection, not to a copy of its settings: after an edit they are read, processed and deleted through the new endpoint, region or path style. There is one configuration per connection and no versioned copy of the old one, so an edit is accepted only if the new settings provably still reach the same bucket. While the connection keeps its status, the platform tests the changed settings with the stored credentials: the endpoint against the network policy, the bucket, a listing, and a `HEAD` of one object it already holds. A bucket of the same name behind another endpoint or account fails that last check. If any check fails, nothing is stored and the old settings stay in use. A passing edit takes effect at once in the process that made it; other processes pick it up when their connection cache expires (`STORAGE_CONNECTION_CACHE_TTL`), because cached clients are keyed by the connection's revision. To move data to a different bucket or provider, create a new connection: an edit cannot do it. A `PENDING` connection holds nothing yet, so its edits are stored untested and it still needs a passing test.
+
+**Disable, enable and the default.** `disable` and `set-default` both lock the organization's row, so neither can leave a disabled connection as the default, however they interleave. `enable` tests a disabled connection without changing its status first. A failing test leaves it `DISABLED`, where it still serves what it holds; it never becomes `PENDING`, which would serve nothing.
 
 Audit events, all without credentials: `storage_connection.create`, `.update`, `.test`, `.rotate`, `.set_default`, `.disable`, `.enable`, `.delete`, and denied attempts.
 
@@ -208,13 +214,13 @@ The upload response names `storage_connection_id`. A single upload also returns 
 
 ## Lifecycle, cleanup and reconciliation
 
-- **Deletion and retention** delete each target on the connection that holds it, and delete by version ID where one was recorded. Legal holds and the deletion state machine are unchanged.
+- **Deletion and retention** delete each target on the connection that holds it: by version ID where one was recorded, then every remaining version of exactly that key where the bucket keeps versions (`docs/lifecycle.md`). Legal holds and the deletion state machine are unchanged.
 - **Orphan cleanup** scans every connection that still holds data:
   - On a tenant connection, an object that **no record claims** is only reported, whatever `LIFECYCLE_ORPHAN_UNRECORDED` says: it may be the customer's own.
   - An object whose record proves it unowned (a deleted asset's copy, a rejected promotion copy) is deleted through that connection, after the usual observations and safety interval.
   - A record bound to another connection neither claims nor disowns an object, so the same key on two connections is never confused.
 - **Missing-object checks** head each asset's object where its binding says.
-- **Multipart reconciliation** inspects, completes and aborts each session through its own staging connection.
+- **Multipart reconciliation** inspects, completes and aborts each session through its own staging connection. Its listing scans (provider sessions, and staging objects of aborted or expired uploads) cover every connection that stages in its own bucket, each with its own saved cursor; unrecorded items there are only reported (`docs/multipart-reliability.md`).
 - **Connections and deletion.**
   - Deleting a connection is refused while anything depends on it: active uploads, assets that are not deleted (including soft-deleted ones awaiting purge), datasets that chose it, or being the default.
   - There is no reassignment workflow. An organization drains a connection by deleting or letting expire what is on it; the objects themselves stay in the customer's bucket.
@@ -332,5 +338,5 @@ Without their variables the adapter and end-to-end tests skip and say so.
   - GCS multipart cleanup relies on the parts being under the upload's own prefix; aborted uploads are cleaned by abort and reconciliation.
   - Azure uncommitted blocks of an abandoned upload expire after seven days if abort never ran.
 - **No reassignment.** Objects are not moved between connections, and a connection with live assets cannot be deleted.
-- **Platform-only scans.** The catalog reconciler's unreferenced-object report and the multipart prefix scans cover the platform's bucket only. Tenant buckets are swept by the cleanup worker, which only reports unrecorded objects there.
+- **Platform-only scan.** The catalog reconciler's unreferenced-object report covers the platform's bucket only. Tenant buckets are swept by the cleanup worker and by multipart reconciliation, which only report unrecorded objects there.
 - **No management UI.** `client/` holds no frontend, so the screens for choosing, testing and rotating connections are a separate product task. This phase delivers the API, DTOs, documentation and end-to-end API tests.

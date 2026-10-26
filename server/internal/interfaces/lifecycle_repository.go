@@ -67,6 +67,10 @@ type DeletionRepository interface {
 
 	// Protect parks the operation as PROTECTED until next and releases it.
 	Protect(ctx context.Context, operationID, owner string, now, next time.Time, reason string) error
+	// Wait parks a started operation until next and gives back the attempt
+	// Start counted: waiting for a pack to let go of the asset's bytes is
+	// not a failure.
+	Wait(ctx context.Context, operationID, owner string, now, next time.Time, reason string) error
 	// Start moves the operation to IN_PROGRESS and counts an attempt, but
 	// only while the asset is still SOFT_DELETED and no active legal hold
 	// covers it; the check and the change are one statement. started is

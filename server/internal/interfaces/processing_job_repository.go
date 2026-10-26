@@ -22,6 +22,8 @@ type ProcessingJobRepository interface {
 
 	// Claim leases up to `limit` due jobs to owner until now+lease and
 	// counts the attempt. A job whose lease expired can be claimed again.
+	// Each claim's lease owner is owner#attempt, so a worker that lost a
+	// job cannot write to it even if the same worker claims it again.
 	Claim(ctx context.Context, owner string, now time.Time, lease time.Duration, limit int) ([]model.ProcessingJob, error)
 	// ClaimJob leases one job the same way, by ID. ok is false when the job
 	// is finished, not due yet or leased by another worker.
@@ -30,6 +32,11 @@ type ProcessingJobRepository interface {
 	// SaveProgress writes the job's stage and stage results while owner
 	// still holds the lease, keeping the lease. model.ErrLeaseLost otherwise.
 	SaveProgress(ctx context.Context, job model.ProcessingJob, owner string, now time.Time) error
+
+	// Renew extends owner's unexpired lease to now+lease.
+	// model.ErrLeaseLost when the lease expired, the job ended or another
+	// claim holds it.
+	Renew(ctx context.Context, jobID, owner string, now time.Time, lease time.Duration) error
 
 	// Reschedule releases the lease and keeps the job PENDING until next.
 	Reschedule(ctx context.Context, jobID string, owner string, now time.Time, next time.Time, lastError string) error

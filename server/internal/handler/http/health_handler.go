@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -11,8 +12,9 @@ type healthResponse struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
-// HealthHandler reports whether the api process is responding.
-// Database and storage checks will be added separately later.
+// HealthHandler reports liveness: the api process is responding. It checks
+// no dependency, so a database outage never gets the process restarted;
+// ReadinessHandler is the one to route traffic by.
 type HealthHandler struct{}
 
 func NewHealthHandler() *HealthHandler {
@@ -46,4 +48,33 @@ func (h *HealthHandler) ServeHTTP(
 		// The server logger will be wired into handlers later.
 		return
 	}
+}
+
+// ReadinessHandler reports whether the api can serve: the database answers
+// within two seconds. The cause of a failure stays in the server's logs.
+type ReadinessHandler struct {
+	check func(context.Context) error
+}
+
+func NewReadinessHandler(check func(context.Context) error) *ReadinessHandler {
+	return &ReadinessHandler{check: check}
+}
+
+type readinessResponse struct {
+	Status string            `json:"status"`
+	Checks map[string]string `json:"checks"`
+}
+
+func (h *ReadinessHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	status, out := http.StatusOK, readinessResponse{Status: "ready", Checks: map[string]string{"database": "ok"}}
+	if err := h.check(ctx); err != nil {
+		status, out = http.StatusServiceUnavailable, readinessResponse{Status: "not_ready", Checks: map[string]string{"database": "unavailable"}}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(out)
 }

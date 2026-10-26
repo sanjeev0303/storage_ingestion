@@ -190,13 +190,32 @@ func (s *Storage) HeadObjectVersion(ctx context.Context, bucket, key, versionID 
 }
 
 // DeleteObject removes the live object; deleting one that is gone is not
-// an error, as with S3.
+// an error, as with S3. With versioning on, the bucket keeps the deleted
+// object as a noncurrent generation, so every generation of exactly this
+// key is removed too. Names are listed in order: the key's own
+// generations come before any longer name it prefixes.
 func (s *Storage) DeleteObject(ctx context.Context, bucket, key string) error {
 	err := s.object(bucket, key).Delete(ctx)
 	if err != nil && !errors.Is(err, storage.ErrObjectNotExist) {
 		return classify("delete object", err)
 	}
-	return nil
+	it := s.client.Bucket(bucket).Objects(ctx, &storage.Query{Prefix: key, Versions: true})
+	for {
+		a, err := it.Next()
+		if errors.Is(err, iterator.Done) {
+			return nil
+		}
+		if err != nil {
+			return classify("list object generations", err)
+		}
+		if a.Name != key {
+			return nil
+		}
+		err = s.object(bucket, key).Generation(a.Generation).Delete(ctx)
+		if err != nil && !errors.Is(err, storage.ErrObjectNotExist) {
+			return classify("delete object generation", err)
+		}
+	}
 }
 
 func (s *Storage) DeleteObjectVersion(ctx context.Context, bucket, key, versionID string) error {

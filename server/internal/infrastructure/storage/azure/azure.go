@@ -201,10 +201,34 @@ func (s *Storage) HeadObjectVersion(ctx context.Context, bucket, key, versionID 
 
 // DeleteObject removes the blob; deleting one that is gone is not an
 // error, as with S3.
+// DeleteObject removes the blob. With account versioning on, the deleted
+// blob stays as a previous version, so every version of exactly this key
+// is removed too. Blobs are listed in name order: the key's own versions
+// come before any longer name it prefixes.
 func (s *Storage) DeleteObject(ctx context.Context, bucket, key string) error {
 	_, err := s.blob(bucket, key).Delete(ctx, nil)
 	if err != nil && !bloberror.HasCode(err, bloberror.BlobNotFound) {
 		return classify("delete object", err)
+	}
+	pager := s.container(bucket).NewListBlobsFlatPager(&container.ListBlobsFlatOptions{
+		Prefix: &key, Include: container.ListBlobsInclude{Versions: true},
+	})
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return classify("list blob versions", err)
+		}
+		for _, item := range page.Segment.BlobItems {
+			if item.Name == nil || *item.Name != key {
+				return nil
+			}
+			if item.VersionID == nil {
+				continue
+			}
+			if err := s.DeleteObjectVersion(ctx, bucket, key, *item.VersionID); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -345,8 +369,10 @@ func (s *Storage) WriteObject(ctx context.Context, bucket, key string, body io.R
 	if bucket == "" || key == "" || size < 0 {
 		return interfaces.ObjectMetadata{}, errors.New("bucket, object key and size are required")
 	}
+	// A blob holds at most 50,000 blocks: larger objects get larger ones.
+	blockSize := max(s.partBytes, (size+49999)/50000)
 	_, err := s.blob(bucket, key).UploadStream(ctx, &exactReader{r: body, left: size}, &blockblob.UploadStreamOptions{
-		BlockSize: s.partBytes, Concurrency: 1,
+		BlockSize: blockSize, Concurrency: 1,
 		HTTPHeaders: &blob.HTTPHeaders{BlobContentType: &contentType},
 	})
 	if err != nil {

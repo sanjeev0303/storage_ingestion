@@ -93,6 +93,32 @@ loses nothing: the next cycle creates it. Claims are leases
 again when its lease expires. Every write checks the lease, so a stale
 worker cannot overwrite newer state.
 
+The lease is short (`PROCESSING_LEASE_DURATION`, 1 min) and renewed from the
+claim until the job ends, every `PROCESSING_LEASE_RENEW_INTERVAL` (a third
+of the lease by default), also while a claimed job waits for one of the
+worker's `PROCESSING_CONCURRENCY` slots. A crashed worker's jobs are picked
+up within about a minute, and a long scan or copy still keeps its job.
+Renewal works as fencing:
+
+- Each claim is its own owner token, `worker#attempt`. A renewal, a saved
+  stage or an outcome must name the token of the current claim, so a worker
+  that lost its job (paused past its lease, then reclaimed by another)
+  cannot write, even when the same worker claimed the job again since.
+- A renewal that finds the lease taken cancels the job's work at once:
+  content reads, the malware scan and the copy stop, and nothing is recorded
+  (`lease_renewals_lost`).
+- Promotion renews once more just before it publishes, so a worker that
+  lost the job never makes the asset `AVAILABLE`.
+- A renewal that fails for another reason (the database is briefly down)
+  is retried; the job is stopped only once a whole lease has passed without
+  one, since by then another worker may hold it (`lease_renewal_errors`).
+- Renewal ends with the job, and no job holds its claim longer than
+  `PROCESSING_MAX_JOB_DURATION` (30 min, counted from the claim): it is
+  stopped, gives its lease back and waits for its retry, so an unhealthy
+  worker cannot keep a job forever.
+
+Retries and EXHAUSTED/HELD are unchanged.
+
 ## Operating it locally
 
 ```powershell

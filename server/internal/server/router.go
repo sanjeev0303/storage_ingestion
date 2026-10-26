@@ -67,12 +67,22 @@ type Routes struct {
 	// TrustProxyHeaders takes client addresses from X-Forwarded-For.
 	TrustProxyHeaders bool
 	Log               *slog.Logger
+
+	// Ready, when set, serves GET /ready: a dependency check (the
+	// database), apart from the liveness of GET /health.
+	Ready func(context.Context) error
+	// MetricsAddr is where the process serves its metrics; the caller
+	// starts that listener (metrics.Serve), not the router.
+	MetricsAddr string
 }
 
 // NewRouter connects HTTP routes to their handlers.
 func NewRouter(rt Routes) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /health", httpapi.NewHealthHandler())
+	if rt.Ready != nil {
+		mux.Handle("GET /ready", httpapi.NewReadinessHandler(rt.Ready))
+	}
 	if rt.Limiter == nil {
 		rt.Limiter = ratelimit.New()
 	}
@@ -205,7 +215,8 @@ func NewRouter(rt Routes) http.Handler {
 }
 
 // ingestionOperation names the rate limit an ingestion route counts
-// against.
+// against. Per-entry calls have their own limit, so a bulk job neither
+// starves nor is starved by interactive uploads.
 func ingestionOperation(pattern string) string {
 	switch pattern {
 	case "POST /api/v1/ingestion/jobs", "POST /api/v1/datasets":
@@ -213,9 +224,15 @@ func ingestionOperation(pattern string) string {
 	case "PUT /api/v1/ingestion/jobs/{id}/manifest", "POST /api/v1/ingestion/jobs/{id}/manifest/staged-url",
 		"POST /api/v1/ingestion/jobs/{id}/manifest/staged":
 		return "manifest"
-	case "POST /api/v1/ingestion/jobs/{id}/claims":
-		return "upload_init"
-	case "GET /api/v1/ingestion/jobs", "GET /api/v1/ingestion/jobs/{id}/entries", "GET /api/v1/ingestion/jobs/{id}/failures":
+	case "POST /api/v1/ingestion/jobs/{id}/claims",
+		"POST /api/v1/ingestion/jobs/{id}/entries/{position}/upload-url",
+		"POST /api/v1/ingestion/jobs/{id}/entries/{position}/parts/urls",
+		"POST /api/v1/ingestion/jobs/{id}/entries/{position}/parts/confirm",
+		"POST /api/v1/ingestion/jobs/{id}/entries/{position}/heartbeat",
+		"POST /api/v1/ingestion/jobs/{id}/entries/{position}/complete":
+		return "ingestion_entry"
+	}
+	if strings.HasPrefix(pattern, "GET ") {
 		return "listing"
 	}
 	return "upload_finish"

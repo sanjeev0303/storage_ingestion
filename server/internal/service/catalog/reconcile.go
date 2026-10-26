@@ -33,6 +33,8 @@ type Reconciler struct {
 	// router checks versions stored on tenants' connections; without it
 	// they are skipped.
 	router  interfaces.StorageRouter
+	// packs finds versions whose bytes were packed; nil when nothing is.
+	packs   interfaces.PackLocator
 	audit   interfaces.AuditRecorder
 	metrics *metrics.Registry
 	log     *slog.Logger
@@ -46,6 +48,12 @@ func NewReconciler(repo interfaces.CatalogMaintenance, catalog *Service, storage
 	}
 	return &Reconciler{repo: repo, catalog: catalog, storage: storage, bucket: bucket, prefix: strings.Trim(prefix, "/"),
 		audit: recorder, metrics: registry, log: log, now: func() time.Time { return time.Now().UTC() }}
+}
+
+// Packed lets the storage checks find packed versions in their packs.
+func (r *Reconciler) Packed(packs interfaces.PackLocator) *Reconciler {
+	r.packs = packs
+	return r
 }
 
 // ReconcileOptions bound a run.
@@ -290,25 +298,44 @@ func (r *Reconciler) published(ctx context.Context, tenant string, opts Reconcil
 				r.log.Warn("catalog storage check skipped", "tenant_id", tenant, "asset_id", v.ID, "error", err)
 				continue
 			}
+			// A packed version's bytes are its entry in the pack: the pack must
+			// be there, as large as recorded.
+			key, versionID, wantSize := v.ObjectKey, v.StorageVersionID, v.SizeBytes
+			if r.packs != nil {
+				loc, packed, err := r.packs.PackedLocation(ctx, tenant, v.ID)
+				if err != nil {
+					report.StorageErrors++
+					r.log.Warn("catalog pack lookup failed", "tenant_id", tenant, "asset_id", v.ID, "error", err)
+					continue
+				}
+				if packed {
+					if loc.Length != v.SizeBytes {
+						report.add(model.CatalogFinding{Kind: model.FindingSizeMismatch, TenantID: tenant, ObjectID: v.ObjectID,
+							AssetID: v.ID, Key: loc.ObjectKey, Detail: fmt.Sprintf("catalog %d bytes, pack entry %d", v.SizeBytes, loc.Length)})
+						continue
+					}
+					bucket, key, versionID, wantSize = loc.Bucket, loc.ObjectKey, loc.StorageVersionID, loc.PackBytes
+				}
+			}
 			var meta interfaces.ObjectMetadata
-			if v.StorageVersionID != "" {
-				meta, err = storage.HeadObjectVersion(ctx, bucket, v.ObjectKey, v.StorageVersionID)
+			if versionID != "" {
+				meta, err = storage.HeadObjectVersion(ctx, bucket, key, versionID)
 			} else {
-				meta, err = storage.HeadObject(ctx, bucket, v.ObjectKey)
+				meta, err = storage.HeadObject(ctx, bucket, key)
 			}
 			switch {
 			case errors.Is(err, interfaces.ErrObjectNotFound):
 				r.metrics.Add("catalog_missing_objects", 1)
 				report.add(model.CatalogFinding{Kind: model.FindingObjectMissing, TenantID: tenant, ObjectID: v.ObjectID,
-					AssetID: v.ID, Key: v.ObjectKey, Detail: fmt.Sprintf("version %d", v.Version)})
+					AssetID: v.ID, Key: key, Detail: fmt.Sprintf("version %d", v.Version)})
 			case err != nil:
 				// Not a finding: an unreachable store says nothing about the
 				// object. Counted, and the run goes on.
 				report.StorageErrors++
 				r.log.Warn("catalog storage check failed", "tenant_id", tenant, "asset_id", v.ID, "error", err)
-			case meta.SizeBytes != v.SizeBytes:
+			case meta.SizeBytes != wantSize:
 				report.add(model.CatalogFinding{Kind: model.FindingSizeMismatch, TenantID: tenant, ObjectID: v.ObjectID, AssetID: v.ID,
-					Key: v.ObjectKey, Detail: fmt.Sprintf("catalog %d bytes, stored %d", v.SizeBytes, meta.SizeBytes)})
+					Key: key, Detail: fmt.Sprintf("expected %d bytes, stored %d", wantSize, meta.SizeBytes)})
 			}
 		}
 		if len(versions) == 0 || len(versions) < opts.BatchSize {
@@ -356,15 +383,22 @@ func (r *Reconciler) unreferenced(ctx context.Context, tenant string, opts Recon
 			r.log.Warn("catalog storage listing failed", "tenant_id", tenant, "error", err)
 			return nil
 		}
+		// Pack objects belong to pack records, which the pack worker checks.
+		objects := page.Objects[:0:0]
 		ids := make([]string, 0, len(page.Objects))
 		for _, o := range page.Objects {
-			ids = append(ids, strings.TrimPrefix(o.ObjectKey, prefix))
+			id := strings.TrimPrefix(o.ObjectKey, prefix)
+			if strings.HasPrefix(id, "packs/") {
+				continue
+			}
+			objects = append(objects, o)
+			ids = append(ids, id)
 		}
 		known, err := r.repo.ExistingAssets(ctx, tenant, ids)
 		if err != nil {
 			return err
 		}
-		for i, o := range page.Objects {
+		for i, o := range objects {
 			listed++
 			report.StoredListed++
 			if !known[ids[i]] {

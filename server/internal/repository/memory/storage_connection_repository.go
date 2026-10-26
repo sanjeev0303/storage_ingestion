@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -21,6 +22,8 @@ type StorageConnectionRepository struct {
 	datasets    map[string]string // tenant/dataset -> connection
 	// Dependents is what Dependents and Delete report, per connection.
 	Blocking map[string]interfaces.ConnectionDependents
+	// Held is the key of an object each connection holds, for tests.
+	Held map[string]string
 	// Reads counts GetConnection calls.
 	Reads int
 }
@@ -40,6 +43,7 @@ func NewStorageConnectionRepository() *StorageConnectionRepository {
 		defaults:    map[string]string{},
 		datasets:    map[string]string{},
 		Blocking:    map[string]interfaces.ConnectionDependents{},
+		Held:        map[string]string{},
 	}
 }
 
@@ -133,24 +137,20 @@ func (r *StorageConnectionRepository) UpdateConnection(_ context.Context, tenant
 	if err != nil {
 		return c, err
 	}
-	moved := false
 	if change.Name != nil {
 		c.Name = *change.Name
 	}
-	if change.Region != nil && *change.Region != c.Region {
-		c.Region, moved = *change.Region, true
+	if change.Region != nil {
+		c.Region = *change.Region
 	}
-	if change.Endpoint != nil && *change.Endpoint != c.Endpoint {
-		c.Endpoint, moved = *change.Endpoint, true
+	if change.Endpoint != nil {
+		c.Endpoint = *change.Endpoint
 	}
-	if change.ForcePathStyle != nil && *change.ForcePathStyle != c.ForcePathStyle {
-		c.ForcePathStyle, moved = *change.ForcePathStyle, true
+	if change.ForcePathStyle != nil {
+		c.ForcePathStyle = *change.ForcePathStyle
 	}
 	if change.StagingMode != nil {
 		c.StagingMode = *change.StagingMode
-	}
-	if moved && c.Status == model.ConnectionActive {
-		c.Status = model.ConnectionPending
 	}
 	c.Revision++
 	c.UpdatedBy, c.UpdatedAt = change.Actor, change.At
@@ -233,6 +233,26 @@ func (r *StorageConnectionRepository) SetStatus(_ context.Context, tenantID, con
 	return c, nil
 }
 
+func (r *StorageConnectionRepository) Disable(_ context.Context, tenantID, connectionID, actor string, at time.Time) (model.StorageConnection, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.defaults[tenantID] == connectionID {
+		return model.StorageConnection{}, fmt.Errorf("%w: it is the organization's default; set another default first", model.ErrConnectionInUse)
+	}
+	c, err := r.own(tenantID, connectionID, 0)
+	if err != nil {
+		return c, err
+	}
+	if c.Status != model.ConnectionActive && c.Status != model.ConnectionPending {
+		return c, model.ErrConnectionNotActive
+	}
+	c.Status, c.DisabledAt = model.ConnectionDisabled, &at
+	c.Revision++
+	c.UpdatedBy, c.UpdatedAt = actor, at
+	r.connections[c.ID] = c
+	return c, nil
+}
+
 func (r *StorageConnectionRepository) Dependents(_ context.Context, tenantID, connectionID string) (interfaces.ConnectionDependents, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -284,6 +304,12 @@ func (r *StorageConnectionRepository) SetDefault(_ context.Context, tenantID, co
 	}
 	r.defaults[tenantID] = connectionID
 	return nil
+}
+
+func (r *StorageConnectionRepository) HeldObject(_ context.Context, _, connectionID string) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.Held[connectionID], nil
 }
 
 func (r *StorageConnectionRepository) DatasetConnection(_ context.Context, tenantID, dataset string) (string, error) {

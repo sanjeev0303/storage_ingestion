@@ -34,18 +34,30 @@ a provider call.
 | Worker crash | Its leases expire; another worker claims the task. A stale worker's writes are refused. |
 | Retries | Exponential backoff with jitter up to `RECONCILIATION_MAX_ATTEMPTS`, then EXHAUSTED (kept for an operator, never re-run). Permanent provider errors exhaust at once. |
 
-Discrepancy scans (each bounded per cycle, resuming from a cursor):
+Discrepancy scans (each bounded per cycle, resuming from a cursor). The two
+listing scans run on every place uploads land: the platform's `quarantine/`,
+and the staging prefix (`<staging>/<tenant>/`) of every tenant connection
+that holds work (active or disabled) and stages uploads in its own bucket.
+A connection that cannot be reached is recorded and skipped for that cycle;
+it never falls back to the platform, and the others go on.
 
 | Scan | Action |
 |---|---|
 | Provider sessions with no live owner | aborted (`RECONCILIATION_SESSION_SCAN=provider` lists them by prefix, AWS S3; `database` checks recently finished sessions key by key, MinIO) |
-| Quarantine objects of ABORTED or EXPIRED sessions | deleted (FAILED objects are kept as evidence) |
+| Staging objects of ABORTED or EXPIRED sessions | deleted, every version of the key on a versioned bucket (FAILED objects are kept as evidence) |
 | Part rows of ABORTED, FAILED or EXPIRED sessions | deleted |
-| Items with no upload session at all | **reported only**, unless `RECONCILIATION_UNRECORDED_ACTION=delete` |
+| Items with no upload session at all | **reported only**, unless `RECONCILIATION_UNRECORDED_ACTION=delete`; on a tenant's own bucket always reported only, since they may be the customer's |
+| Items under a tenant's staging prefix whose key names no upload | reported only (`UNVERIFIABLE_ITEM`) |
 | Sessions stuck longer than `RECONCILIATION_STUCK_AFTER` | logged and counted |
 
 Nothing younger than `RECONCILIATION_ORPHAN_MIN_AGE` is touched. Actions taken
-are stored in `reconciliation_findings`.
+are stored in `reconciliation_findings`, with the connection they were taken
+on. Each listing scan of each place keeps its progress in `inventory_scans`
+(kind `UPLOAD_SESSIONS` or `UPLOAD_OBJECTS`, migration 000016): cursor, pages,
+findings, and the sanitized last error, under a lease. A restarted worker
+resumes from the saved cursor; a scan that fails five pages in a row ends
+`FAILED` and the next one starts over. A session lookup that fails stops the
+page: nothing is deleted on a database error.
 
 ## Environment
 
@@ -133,11 +145,38 @@ the upload ends COMPLETED with a single provider completion and the leftover
 session is aborted and recorded. `TestLocalStackCleansUpInitiationWhoseIDWasNotSaved`
 covers initiation whose ID could not be saved.
 
+## Migration 000016
+
+`000016_reconciliation_scans.sql` is additive: `inventory_scans.kind`
+(existing rows become `OBJECTS`, the cleanup worker's scans) with the
+running-scan index extended by it, and
+`reconciliation_findings.storage_connection_id` (existing rows: `platform`).
+Apply it with `scripts/migrate.ps1`. To roll back, stop the reconciliation
+workers, then:
+
+```sql
+BEGIN;
+DELETE FROM inventory_scans WHERE kind <> 'OBJECTS';
+DROP INDEX IF EXISTS ux_inventory_scans_running;
+ALTER TABLE inventory_scans DROP COLUMN kind;
+CREATE UNIQUE INDEX ux_inventory_scans_running
+    ON inventory_scans (storage_connection_id, bucket, prefix) WHERE status = 'RUNNING';
+ALTER TABLE reconciliation_findings DROP COLUMN storage_connection_id;
+DELETE FROM schema_migrations WHERE version = '000016_reconciliation_scans.sql';
+COMMIT;
+```
+
+Older workers then scan the platform's `quarantine/` only, as before.
+
 ## Provider limitations
 
 - **MinIO** lists multipart sessions only for an exact object key, not by
   prefix. Use `RECONCILIATION_SESSION_SCAN=database`; it checks finished
   sessions from the last `RECONCILIATION_SESSION_LOOKBACK`. A provider
   session with no database row at all cannot be found this way: add a bucket
-  lifecycle rule (AbortIncompleteMultipartUpload) as the backstop.
-- Scan cursors live in the worker process; after a restart a scan starts over.
+  lifecycle rule (AbortIncompleteMultipartUpload) as the backstop. The same
+  holds for a tenant connection on MinIO or another provider that lists
+  sessions only by exact key: the provider scan finds nothing there, and the
+  database scan checks each finished session through its own connection.
+- GCS and Azure have no provider sessions to list: their adapters list the
+  markers of uploads in progress, which is what the provider scan sees.

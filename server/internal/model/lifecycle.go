@@ -173,6 +173,19 @@ const (
 	ScanFailed    = "FAILED"
 )
 
+// What a scan lists. Scans of different kinds over one prefix run side by
+// side, each with its own cursor.
+const (
+	// ScanObjects: the cleanup worker's object inventory.
+	ScanObjects = "OBJECTS"
+	// ScanUploadSessions: reconciliation's listing of provider multipart
+	// sessions under a staging prefix.
+	ScanUploadSessions = "UPLOAD_SESSIONS"
+	// ScanUploadObjects: reconciliation's listing of staging objects,
+	// for those of aborted and expired uploads.
+	ScanUploadObjects = "UPLOAD_OBJECTS"
+)
+
 // InventoryScan is one pass over a bucket prefix. Cursor is the provider's
 // continuation token where the scan resumes.
 type InventoryScan struct {
@@ -182,6 +195,7 @@ type InventoryScan struct {
 	ConnectionID     string
 	Bucket           string
 	Prefix           string
+	Kind             string
 	Status           string
 	Cursor           string
 	Pages            int

@@ -248,7 +248,9 @@ func (s *ObjectStorage) HeadObject(ctx context.Context, _ string, key string) (i
 	return interfaces.ObjectMetadata{SizeBytes: size, ETag: etag(data), VersionID: s.versions[key]}, nil
 }
 
-// DeleteObject removes an object. Like S3, deleting a missing key succeeds.
+// DeleteObject removes an object and, like the adapters on a versioned
+// bucket, every version of exactly that key. Like S3, deleting a missing
+// key succeeds.
 func (s *ObjectStorage) DeleteObject(ctx context.Context, _ string, key string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -261,7 +263,37 @@ func (s *ObjectStorage) DeleteObject(ctx context.Context, _ string, key string) 
 		return err
 	}
 	delete(s.objects, key)
+	delete(s.versions, key)
+	for id, v := range s.versionData {
+		if v.key == key {
+			delete(s.versionData, id)
+			s.DeletedVersions = append(s.DeletedVersions, id)
+		}
+	}
 	return take(&s.DeleteLost)
+}
+
+// HideObject removes only the current object and keeps its versions, as
+// an S3 delete by key on a versioned bucket does: what older code left.
+func (s *ObjectStorage) HideObject(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.objects, key)
+	delete(s.versions, key)
+}
+
+// Versions are the version IDs still kept for exactly key.
+func (s *ObjectStorage) Versions(key string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var ids []string
+	for id, v := range s.versionData {
+		if v.key == key {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // SetVersion makes key versioned with the given current version ID.

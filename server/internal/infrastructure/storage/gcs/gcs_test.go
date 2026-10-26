@@ -21,7 +21,9 @@ import (
 	"testing"
 	"time"
 
+	"cloud.google.com/go/storage"
 	"google.golang.org/api/googleapi"
+	"google.golang.org/api/iterator"
 
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
@@ -273,6 +275,73 @@ func TestEmulatorObjectsAndGenerations(t *testing.T) {
 	if err != nil || !strings.Contains(url, "X-Goog-Signature=") || !strings.Contains(url, "generation="+meta.VersionID) ||
 		!strings.Contains(url, "response-content-disposition=") {
 		t.Fatalf("signed download URL %s %v", url, err)
+	}
+}
+
+// With versioning on, a deleted object stays as a noncurrent generation:
+// DeleteObject removes every generation of exactly that name, and leaves a
+// name it only prefixes alone.
+func TestEmulatorDeleteRemovesEveryGeneration(t *testing.T) {
+	s, _ := emulator(t)
+	ctx := context.Background()
+	bucket := fmt.Sprintf("byos-gcs-v-%d", time.Now().UnixNano())
+	// The client retries what the emulator refuses; bound it.
+	createCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := s.client.Bucket(bucket).Create(createCtx, "test-project", &storage.BucketAttrs{VersioningEnabled: true}); err != nil {
+		t.Skipf("unverified: this fake-gcs-server does not create a versioned bucket: %v", err)
+	}
+	generations := func(name string) int {
+		it := s.client.Bucket(bucket).Objects(ctx, &storage.Query{Prefix: name, Versions: true})
+		n := 0
+		for {
+			a, err := it.Next()
+			if errors.Is(err, iterator.Done) {
+				return n
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if a.Name == name {
+				n++
+			}
+		}
+	}
+	for _, body := range []string{"one", "two"} {
+		if _, err := s.WriteObject(ctx, bucket, "published/t1/a1", strings.NewReader(body), 3, "text/plain"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.WriteObject(ctx, bucket, "published/t1/a10", strings.NewReader("other"), 5, "text/plain"); err != nil {
+		t.Fatal(err)
+	}
+	if generations("published/t1/a1") != 2 {
+		t.Skipf("unverified: this fake-gcs-server keeps %d generations of an overwritten object", generations("published/t1/a1"))
+	}
+	// fake-gcs-server keeps the generations of a deleted object but cannot
+	// delete them by generation once no live object has the name (404);
+	// GCS can.
+	probe := s.object(bucket, "probe")
+	first := probe.NewWriter(ctx)
+	_, _ = first.Write([]byte("1"))
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := probe.Delete(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := probe.Generation(first.Attrs().Generation).Delete(ctx); err != nil {
+		t.Skipf("unverified: this fake-gcs-server cannot delete a noncurrent generation: %v", err)
+	}
+
+	if err := s.DeleteObject(ctx, bucket, "published/t1/a1"); err != nil {
+		t.Fatal(err)
+	}
+	if n := generations("published/t1/a1"); n != 0 {
+		t.Fatalf("%d generations remain", n)
+	}
+	if generations("published/t1/a10") != 1 {
+		t.Fatal("a name sharing the prefix was touched")
 	}
 }
 

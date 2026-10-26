@@ -179,7 +179,7 @@ func (r *ProcessingJobRepository) Claim(ctx context.Context, owner string, now t
 			FOR UPDATE SKIP LOCKED
 		)
 		UPDATE processing_jobs AS j
-		SET lease_owner = $1,
+		SET lease_owner = $1 || '#' || (j.attempt_count + 1)::text,
 		    lease_expires_at = $2 + make_interval(secs => $3),
 		    attempt_count = j.attempt_count + 1,
 		    started_at = COALESCE(j.started_at, $2),
@@ -215,7 +215,7 @@ func (r *ProcessingJobRepository) ClaimJob(ctx context.Context, jobID, owner str
 	// re-checks the lease condition and matches nothing.
 	job, err := scanJob(r.db.Pool.QueryRow(ctx, `
 		UPDATE processing_jobs AS j
-		SET lease_owner = $2,
+		SET lease_owner = $2 || '#' || (j.attempt_count + 1)::text,
 		    lease_expires_at = $3::timestamptz + make_interval(secs => $4),
 		    attempt_count = j.attempt_count + 1,
 		    started_at = COALESCE(j.started_at, $3),
@@ -267,6 +267,24 @@ func (r *ProcessingJobRepository) SaveProgress(ctx context.Context, job model.Pr
 		job.ScanError, job.PromotionStatus)
 	if err != nil {
 		return fmt.Errorf("save processing progress: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return model.ErrLeaseLost
+	}
+	return nil
+}
+
+func (r *ProcessingJobRepository) Renew(ctx context.Context, jobID, owner string, now time.Time, lease time.Duration) error {
+	tag, err := r.db.Pool.Exec(ctx, `
+		UPDATE processing_jobs
+		SET lease_expires_at = $3::timestamptz + make_interval(secs => $4)
+		WHERE id = $1
+		  AND state = 'PENDING'
+		  AND lease_owner = $2
+		  AND lease_expires_at > $3
+	`, jobID, owner, now, lease.Seconds())
+	if err != nil {
+		return fmt.Errorf("renew processing lease: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return model.ErrLeaseLost

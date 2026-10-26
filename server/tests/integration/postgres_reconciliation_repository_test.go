@@ -15,8 +15,8 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
 )
 
-// These tests need TEST_DATABASE_URL pointing at a dedicated Neon test
-// database with every migration (including 000003) applied. They create
+// These tests need TEST_DATABASE_URL pointing at a dedicated test
+// database with every migration (through 000015) applied. They create
 // and delete their own rows; never point them at production.
 
 // farPast puts this run's tasks ahead of any other due task in the test

@@ -13,7 +13,6 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -103,7 +102,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("load storage connection configuration: %w", err)
 	}
-	router, err := storageregistry.ForProcess(storageCfg, storage, bucket, contentBucket, "assets",
+	router, err := storageregistry.ForProcess(storageCfg, storage, bucket, contentBucket, config.PromotionPrefix(),
 		postgres.NewStorageConnectionRepository(db), registry)
 	if err != nil {
 		return fmt.Errorf("configure storage connections: %w", err)
@@ -111,7 +110,7 @@ func run() error {
 	auditService := audit.NewService(postgres.NewAuditRepository(db), log, registry, sec.Audit.Retention)
 	svc, err := datasetservice.NewService(datasetservice.Dependencies{
 		Repo: postgres.NewDatasetRepository(db), Manifests: storage, ManifestBucket: bucket,
-		Content: storage, ContentBucket: contentBucket, Router: router,
+		Content: storage, ContentBucket: contentBucket, Router: router, Packs: postgres.NewPackRepository(db),
 		Quotas: quota.NewService(postgres.NewQuotaRepository(db), sec.Quotas, auditService, log),
 		Audit:  auditService, Metrics: registry, Log: log,
 	}, dc)
@@ -132,21 +131,8 @@ func run() error {
 
 	if dc.MetricsAddr != "" {
 		registry.Publish("datasets")
-		// /health answers 200 while the database answers.
-		http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-			pingCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-			defer cancel()
-			if err := db.Pool.Ping(pingCtx); err != nil {
-				http.Error(w, "database unavailable", http.StatusServiceUnavailable)
-				return
-			}
-			_, _ = w.Write([]byte("ok\n"))
-		})
-		go func() {
-			if err := http.ListenAndServe(dc.MetricsAddr, nil); err != nil {
-				log.Error("metrics listener stopped", "error", err)
-			}
-		}()
+		stopMetrics := metrics.Serve(dc.MetricsAddr, db.Pool.Ping, log)
+		defer stopMetrics()
 	}
 	// The consumer is waited for on shutdown, so no handler is cut off while
 	// the database it uses is closed.

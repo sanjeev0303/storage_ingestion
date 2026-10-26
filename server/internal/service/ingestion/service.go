@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sanjeev0303/object-storage-platform/internal/dto/event"
@@ -86,6 +87,11 @@ type Service struct {
 	storage *concurrency.Limiter
 	parsing *concurrency.Limiter
 	now     func() time.Time
+
+	// cancelledTo is, per cancelling job, the position its cancellation
+	// has reached in this process (sweeps.go).
+	cancelMu    sync.Mutex
+	cancelledTo map[string]int64
 }
 
 func NewService(deps Dependencies, cfg config.Ingestion) (*Service, error) {

@@ -83,8 +83,8 @@ A hold placed after removal has started (`IN_PROGRESS`) cannot stop that deletio
 
 Then:
 
-- **Objects removed:** exactly the asset's own objects, derived from its tenant and IDs, never from a client or a listing. They are its delivery copy (by recorded version ID where the bucket is versioned), its quarantine source, and any other promotion copy its job recorded.
-- **Confirmation:** each removal is confirmed with a HEAD (or version HEAD) that must answer not-found.
+- **Objects removed:** exactly the asset's own objects, derived from its tenant and IDs, never from a client or a listing. They are its delivery copy, its quarantine source, and any other promotion copy its job recorded. A recorded version ID is deleted by that ID first. Then each key is deleted in full: on a bucket that keeps versions, every version and delete marker of exactly that key goes too (S3 `ListObjectVersions`, GCS generations, Azure blob versions). This includes versions an earlier attempt, or code before Phase 12, only hid behind a delete marker, so the key is deleted even when a HEAD already answers not-found. Keys are generated per upload and per asset, so every version of one belongs to that record. A key that only shares a prefix is never touched.
+- **Confirmation:** each removal is confirmed with a HEAD (or version HEAD) that must answer not-found. The deletion is recorded as `STORAGE_DELETED` only after every key is confirmed; a failed version delete leaves it `IN_PROGRESS` for a retry.
 - **No prefix deletes:** there is never a prefix or bucket delete.
 
 **Crash recovery:**
@@ -275,7 +275,7 @@ TEST_CLAMAV_ADDRESS=127.0.0.1:3310 go test ./tests/integration/
 ## Limitations
 
 - Operator deletions stay CLI-only (`lifecycle-admin`). Policies and holds can also be set over the API by members with `retention.manage`.
-- Version-specific deletion works for objects whose version ID was recorded at promotion. On a versioned bucket, the quarantine source and other unrecorded keys are deleted by key, which adds a delete marker and leaves earlier versions to a provider lifecycle rule. The local bucket is unversioned.
+- Versioned buckets were verified only on MinIO (`TestProviderVersionedDelete`). Removing GCS generations and Azure blob versions is implemented but unverified: fake-gcs-server cannot delete a generation once its object is deleted, and Azurite keeps no blob versions. Both emulators do accept the listing that includes versions.
 - Datasets are fixed at upload; there is no API to move an asset between datasets.
 - Retention is by age since creation; there is no "last access" tracking.
 - Reconciliation's own `RECONCILIATION_UNRECORDED_ACTION=delete` still deletes unrecorded quarantine objects on one sighting. Keep it at `report` and let the cleanup worker's mark-and-sweep handle them.

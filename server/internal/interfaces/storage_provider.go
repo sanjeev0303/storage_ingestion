@@ -84,10 +84,18 @@ type StorageConnectionRepository interface {
 	Credential(ctx context.Context, tenantID, connectionID string, version int) (SealedCredential, error)
 	RecordTest(ctx context.Context, tenantID, connectionID string, result ConnectionTestRecord) (model.StorageConnection, error)
 	SetStatus(ctx context.Context, tenantID, connectionID string, from []model.ConnectionStatus, to model.ConnectionStatus, actor string, at time.Time) (model.StorageConnection, error)
+	// Disable moves an active or pending connection to DISABLED unless it
+	// is the organization's default (model.ErrConnectionInUse), checked
+	// and changed together so a concurrent SetDefault cannot leave a
+	// disabled default.
+	Disable(ctx context.Context, tenantID, connectionID, actor string, at time.Time) (model.StorageConnection, error)
 	// Dependents counts what still depends on the connection: unfinished
 	// uploads, live assets, datasets choosing it, and whether it is the
 	// default.
 	Dependents(ctx context.Context, tenantID, connectionID string) (ConnectionDependents, error)
+	// HeldObject is the key of one published object the connection holds
+	// in its bucket, "" when it holds none.
+	HeldObject(ctx context.Context, tenantID, connectionID string) (string, error)
 	// Delete tombstones the connection and erases its credentials, if
 	// nothing depends on it, in one transaction.
 	Delete(ctx context.Context, tenantID, connectionID, actor string, at time.Time) (model.StorageConnection, error)
@@ -107,8 +115,8 @@ type SealedCredential struct {
 }
 
 // ConnectionChange changes a connection's non-secret settings; nil leaves
-// a field as it is. A change of where the connection points returns it to
-// PENDING until it is tested again.
+// a field as it is. The status is left alone: a change of where a
+// connection that holds work points is tested before it is made.
 type ConnectionChange struct {
 	Name           *string
 	Region         *string

@@ -68,10 +68,10 @@ type TestResult struct {
 
 // Test checks a connection with its stored credentials: the endpoint
 // against the network policy, the bucket and its capabilities, listing
-// under the ready prefix, and, only when probe is asked for, writing,
-// reading and deleting one small object under the ready prefix. Nothing
-// else is created or deleted. A passing test activates a pending
-// connection.
+// under the ready prefix, reading the metadata of one object it already
+// holds, if any, and, only when probe is asked for, writing, reading and
+// deleting one small object under the ready prefix. Nothing else is
+// created or deleted. A passing test activates a pending connection.
 func (s *Service) Test(ctx context.Context, p model.Principal, connectionID string, probe bool) (model.StorageConnection, TestResult, error) {
 	if err := audit.Require(ctx, s.deps.Audit, p, model.PermStorageManage, "storage_connection.test", "storage_connection", connectionID); err != nil {
 		return model.StorageConnection{}, TestResult{}, err
@@ -90,10 +90,15 @@ func (s *Service) Test(ctx context.Context, p model.Principal, connectionID stri
 }
 
 func (s *Service) test(ctx context.Context, p model.Principal, c model.StorageConnection, probe bool) (model.StorageConnection, TestResult, error) {
-	build := func(ctx context.Context) (interfaces.StorageProvider, func(), error) {
-		return s.deps.Clients.BuildStored(ctx, c)
+	result, err := s.check(ctx, c, s.stored(c), probe)
+	if err != nil {
+		return model.StorageConnection{}, TestResult{}, err
 	}
-	result := s.check(ctx, c, build, probe)
+	return s.recordTest(ctx, p, c, result, probe)
+}
+
+// recordTest stores a test's outcome and audits it.
+func (s *Service) recordTest(ctx context.Context, p model.Principal, c model.StorageConnection, result TestResult, probe bool) (model.StorageConnection, TestResult, error) {
 	stored, err := s.deps.Connections.RecordTest(ctx, p.TenantID, c.ID, interfaces.ConnectionTestRecord{
 		OK: result.OK, ErrorCategory: result.Category, Capabilities: result.Capabilities, At: result.TestedAt,
 	})
@@ -105,15 +110,28 @@ func (s *Service) test(ctx context.Context, p model.Principal, c model.StorageCo
 	return stored, result, nil
 }
 
+// stored builds clients for c's settings from its stored credentials.
+func (s *Service) stored(c model.StorageConnection) func(context.Context) (interfaces.StorageProvider, func(), error) {
+	return func(ctx context.Context) (interfaces.StorageProvider, func(), error) {
+		return s.deps.Clients.BuildStored(ctx, c)
+	}
+}
+
 // runTest tests secrets that are not stored yet (a rotation).
-func (s *Service) runTest(ctx context.Context, c model.StorageConnection, secrets model.StorageSecrets, probe bool) TestResult {
+func (s *Service) runTest(ctx context.Context, c model.StorageConnection, secrets model.StorageSecrets, probe bool) (TestResult, error) {
 	build := func(ctx context.Context) (interfaces.StorageProvider, func(), error) {
 		return s.deps.Clients.Build(ctx, c, secrets)
 	}
 	return s.check(ctx, c, build, probe)
 }
 
-func (s *Service) check(ctx context.Context, c model.StorageConnection, build func(context.Context) (interfaces.StorageProvider, func(), error), probe bool) TestResult {
+// check runs a connection test. Its error is the platform's own failure
+// (the database); the provider's failures are in the result.
+func (s *Service) check(ctx context.Context, c model.StorageConnection, build func(context.Context) (interfaces.StorageProvider, func(), error), probe bool) (TestResult, error) {
+	held, err := s.deps.Connections.HeldObject(ctx, c.TenantID, c.ID)
+	if err != nil {
+		return TestResult{}, err
+	}
 	timeout := s.cfg.TestTimeout
 	if timeout <= 0 {
 		timeout = 20 * time.Second
@@ -135,47 +153,56 @@ func (s *Service) check(ctx context.Context, c model.StorageConnection, build fu
 	// a name that has since been pointed somewhere private is refused.
 	endpoint, err := endpointOf(c, s.policy)
 	if err != nil {
-		return fail("endpoint", err)
+		return fail("endpoint", err), nil
 	}
 	if host := hostOf(endpoint); host != "" {
 		if err := s.policy.Resolve(ctx, host); err != nil {
-			return fail("endpoint", err)
+			return fail("endpoint", err), nil
 		}
 	}
 	pass("endpoint")
 
 	client, closeClient, err := build(ctx)
 	if err != nil {
-		return fail("credentials", err)
+		return fail("credentials", err), nil
 	}
 	defer closeClient()
 
 	caps, err := client.ProviderCapabilities(ctx, c.Bucket)
 	if err != nil {
-		return fail("bucket", err)
+		return fail("bucket", err), nil
 	}
 	pass("bucket")
 
 	if _, err := client.ListObjectsPage(ctx, c.Bucket, c.ReadyPrefix+"/", "", 1); err != nil {
-		return fail("list", err)
+		return fail("list", err), nil
 	}
 	pass("list")
 
+	// A bucket of the same name behind another endpoint or account is not
+	// the same bucket: what the connection already holds must be there.
+	if held != "" {
+		if _, err := client.HeadObject(ctx, c.Bucket, held); err != nil {
+			return fail("existing_object", err), nil
+		}
+		pass("existing_object")
+	}
+
 	if probe {
 		if err := s.probe(ctx, c, client, &caps); err != nil {
-			return fail("write_probe", err)
+			return fail("write_probe", err), nil
 		}
 		pass("write_probe")
 	}
 
 	result.OK = true
 	result.Capabilities = &caps
-	return result
+	return result, nil
 }
 
 // probe writes, reads back and deletes one small object of its own under
 // the ready prefix. Where the write returns a version ID, versioning is
-// on; that version is deleted too, so nothing is left behind.
+// on; deleting the key removes that version too, so nothing is left.
 func (s *Service) probe(ctx context.Context, c model.StorageConnection, client interfaces.StorageProvider, caps *model.ProviderCapabilities) error {
 	body := []byte("object storage platform connection test\n")
 	key := c.ReadyPrefix + "/" + c.TenantID + "/.connection-test/" + s.newID()
@@ -184,11 +211,7 @@ func (s *Service) probe(ctx context.Context, c model.StorageConnection, client i
 		return err
 	}
 	defer func() {
-		cleanup := context.WithoutCancel(ctx)
-		_ = client.DeleteObject(cleanup, c.Bucket, key)
-		if meta.VersionID != "" {
-			_ = client.DeleteObjectVersion(cleanup, c.Bucket, key, meta.VersionID)
-		}
+		_ = client.DeleteObject(context.WithoutCancel(ctx), c.Bucket, key)
 	}()
 	reader, err := client.OpenObject(ctx, c.Bucket, key)
 	if err != nil {

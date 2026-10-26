@@ -55,7 +55,7 @@ type Lifecycle struct {
 func LoadLifecycle() (Lifecycle, error) {
 	cfg := Lifecycle{
 		PromotionBucket: getEnv("PROMOTION_BUCKET", ""),
-		PromotionPrefix: getEnv("PROMOTION_PREFIX", "assets"),
+		PromotionPrefix: PromotionPrefix(),
 		MetricsAddr:     getEnv("METRICS_ADDR", ""),
 	}
 

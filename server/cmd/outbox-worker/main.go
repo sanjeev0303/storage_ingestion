@@ -10,7 +10,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -67,7 +66,7 @@ func run() error {
 	}
 	defer db.Close()
 
-	queues := []string{event.QueueProcessing, event.QueueLifecycle, event.QueueIngestion, event.QueueDatasets}
+	queues := []string{event.QueueProcessing, event.QueueLifecycle, event.QueueIngestion, event.QueueDatasets, event.QueuePacking}
 	queue, err := sqsqueue.New(startupCtx, sqsqueue.Config{
 		Region: ec.SQSRegion, Endpoint: ec.SQSEndpoint,
 		AccessKeyID: ec.SQSAccessKeyID, SecretAccessKey: ec.SQSSecretAccessKey,
@@ -97,7 +96,7 @@ func run() error {
 		Uploads: postgres.NewUploadRepository(db), Assets: postgres.NewAssetRepository(db),
 		Jobs: postgres.NewProcessingJobRepository(db), Deletions: postgres.NewDeletionRepository(db),
 		Holds: postgres.NewLegalHoldRepository(db), Ingestion: postgres.NewIngestionRepository(db),
-		Datasets: postgres.NewDatasetRepository(db),
+		Datasets: postgres.NewDatasetRepository(db), Packs: postgres.NewPackRepository(db),
 	}
 	reconciler, err := events.NewReconciler(outbox, postgres.NewInboxRepository(db), postgres.NewDeadLetterRepository(db),
 		postgres.NewDiscrepancyRepository(db), postgres.NewCursorRepository(db), queue, checks,
@@ -131,12 +130,8 @@ func run() error {
 
 	if ec.MetricsAddr != "" {
 		registry.Publish("events")
-		// expvar serves /debug/vars on the default mux.
-		go func() {
-			if err := http.ListenAndServe(ec.MetricsAddr, nil); err != nil {
-				log.Error("metrics listener stopped", "error", err)
-			}
-		}()
+		stopMetrics := metrics.Serve(ec.MetricsAddr, db.Pool.Ping, log)
+		defer stopMetrics()
 	}
 
 	log.Info("outbox worker starting", "worker_id", owner, "tenant", *tenant, "reconcile_dry_run", *dryRun,

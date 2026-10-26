@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -95,11 +94,8 @@ func run() error {
 
 	if cc.MetricsAddr != "" {
 		registry.Publish("compaction")
-		go func() {
-			if err := http.ListenAndServe(cc.MetricsAddr, nil); err != nil {
-				log.Error("metrics listener stopped", "error", err)
-			}
-		}()
+		stopMetrics := metrics.Serve(cc.MetricsAddr, db.Pool.Ping, log)
+		defer stopMetrics()
 	}
 	compactionworker.Run(ctx, service, cc.PollInterval, log)
 	log.Info("compaction worker stopped")

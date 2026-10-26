@@ -40,6 +40,9 @@ type Dependencies struct {
 	// Router reaches assets on tenants' storage connections; without it
 	// only the platform's buckets are reachable.
 	Router interfaces.StorageRouter
+	// Packs takes deleted assets out of their packs; nil when nothing is
+	// packed.
+	Packs interfaces.PackReleaser
 }
 
 type Config struct {

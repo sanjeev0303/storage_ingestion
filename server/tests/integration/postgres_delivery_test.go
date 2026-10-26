@@ -14,7 +14,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/service/delivery"
 )
 
-// Needs TEST_DATABASE_URL with migrations through 000005 applied.
+// Needs TEST_DATABASE_URL with every migration (through 000015) applied.
 
 func TestPostgresDeliveryUsesCurrentStateAndIsAudited(t *testing.T) {
 	env := openReconcileEnv(t)

@@ -50,6 +50,11 @@ type ObjectStorage interface {
 		objectKey string,
 	) (ObjectMetadata, error)
 
+	// DeleteObject removes the object, and an object already gone is not
+	// an error. On a bucket that keeps versions, deleting by key alone
+	// would only hide the bytes behind a delete marker or a noncurrent
+	// version, so every version of exactly this key goes too. Keys are
+	// generated per upload or asset, so all of them are that record's.
 	DeleteObject(
 		ctx context.Context,
 		bucket string,

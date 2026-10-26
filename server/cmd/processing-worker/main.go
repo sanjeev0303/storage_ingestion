@@ -9,7 +9,6 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -182,11 +181,13 @@ func run() error {
 	}
 
 	service, err := processingservice.NewService(deps, processingservice.Config{
-		Owner:       owner,
-		Bucket:      bucket,
-		BatchSize:   workerCfg.BatchSize,
-		Concurrency: workerCfg.Concurrency,
-		Lease:       workerCfg.LeaseDuration,
+		Owner:          owner,
+		Bucket:         bucket,
+		BatchSize:      workerCfg.BatchSize,
+		Concurrency:    workerCfg.Concurrency,
+		Lease:          workerCfg.LeaseDuration,
+		RenewEvery:     workerCfg.RenewEvery,
+		MaxJobDuration: workerCfg.MaxJobDuration,
 		Policy: model.ContentPolicy{
 			AllowedTypes:      workerCfg.AllowedTypes,
 			DeniedTypes:       workerCfg.DeniedTypes,
@@ -276,12 +277,8 @@ func run() error {
 
 	if workerCfg.MetricsAddr != "" {
 		registry.Publish("processing")
-		// expvar serves /debug/vars on the default mux.
-		go func() {
-			if err := http.ListenAndServe(workerCfg.MetricsAddr, nil); err != nil {
-				log.Error("metrics listener stopped", "error", err)
-			}
-		}()
+		stopMetrics := metrics.Serve(workerCfg.MetricsAddr, db.Pool.Ping, log)
+		defer stopMetrics()
 	}
 
 	log.Info("processing worker starting",
