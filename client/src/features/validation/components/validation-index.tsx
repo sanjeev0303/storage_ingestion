@@ -91,7 +91,7 @@ function ProfilesSection() {
                     </Link>
                   </Td>
                   <Td>
-                    <span className="mono-data text-sm">{p.id}</span>
+                    <span className="mono-data text-sm whitespace-nowrap">{p.id}</span>
                   </Td>
                   <Td>{p.version}</Td>
                   <Td>

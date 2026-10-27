@@ -73,7 +73,13 @@ function mockApi(overrides: Partial<Mock> = {}) {
     http.get(`${API}/uploads/:id`, async ({ request }) => {
       await record(request);
       const status = mock.uploadStatuses.length > 1 ? mock.uploadStatuses.shift() : mock.uploadStatuses[0];
-      return HttpResponse.json({ upload_id: "mp1", status, file_name: "big.bin", size_bytes: 1, expires_at: "2099-01-01T00:00:00Z", multipart: true });
+      // Once verified, the upload reports its asset, step by step.
+      let asset;
+      if (status === "VERIFIED") {
+        const assetStatus = mock.catalog.length > 1 ? mock.catalog.shift() : mock.catalog[0];
+        asset = { asset_id: "as1", status: assetStatus, object_id: "obj1", version: 1, rejection_reason: assetStatus === "REJECTED" ? "contains a virus" : undefined };
+      }
+      return HttpResponse.json({ upload_id: "mp1", status, file_name: "big.bin", size_bytes: 1, expires_at: "2099-01-01T00:00:00Z", multipart: true, asset });
     }),
     http.get(`${API}/catalog/lookup`, async ({ request }) => {
       await record(request);
@@ -112,6 +118,38 @@ const okPut = async (_url: string, body: Blob) => ({ status: 200, etag: `"etag-$
 beforeEach(() => setActiveOrganization("org-1"));
 
 describe("multipart upload", () => {
+  it("hashes the file while its parts upload and sends the checksum with the completion", async () => {
+    const mock = mockApi();
+    let finishHash!: (sha: string) => void;
+    const hash = vi.fn(() => new Promise<string>((resolve) => (finishHash = resolve)));
+    const store = memoryStore();
+    const saved = vi.spyOn(store, "put");
+    const putsBeforeHash: string[] = [];
+    let hashed = false;
+    const put = vi.fn(async (url: string, body: Blob) => {
+      if (!hashed) putsBeforeHash.push(url);
+      return { status: 200, etag: `"etag-${body.size}"` };
+    });
+    const { upload } = makeUpload(bigFile(), put as never, { hash }, store);
+
+    const running = upload.run();
+    // Every part goes up while the checksum is still being read.
+    await vi.waitFor(() => expect(putsBeforeHash).toHaveLength(3));
+    expect(mock.log.some((l) => l.path.endsWith("/complete"))).toBe(false);
+    expect(upload.getSnapshot().state).toBe("finalizing");
+
+    hashed = true;
+    finishHash(SHA);
+    await running;
+    await upload.settled();
+
+    expect(upload.getSnapshot().state).toBe("available");
+    expect(hash).toHaveBeenCalledTimes(1);
+    expect(mock.log.find((l) => l.path === "/uploads/mp1/complete")?.body).toMatchObject({ checksum_sha256: SHA });
+    // Saved for a resume after a reload, so it is not read again.
+    expect(saved.mock.calls.some(([record]) => record.sha256 === SHA)).toBe(true);
+  });
+
   it("retries a failed part, confirms in batches, completes in order and waits for the catalog", async () => {
     const mock = mockApi();
     let failedOnce = false;
@@ -125,14 +163,18 @@ describe("multipart upload", () => {
     const { upload } = makeUpload(bigFile(), put as never);
 
     await upload.run();
+    await upload.settled();
 
     const snap = upload.getSnapshot();
     expect(snap.state).toBe("available");
     expect(snap.asset).toMatchObject({ objectId: "obj1", status: "AVAILABLE" });
     expect(put.mock.calls.filter(([url]) => String(url).includes("/part/2/"))).toHaveLength(2);
 
+    // The file is hashed while its parts upload, so the checksum goes with
+    // the completion rather than the start.
     const start = mock.log.find((l) => l.path === "/uploads/multipart");
-    expect(start?.body).toMatchObject({ checksum_sha256: SHA, size_bytes: 20 * MIB, idempotency_key: expect.any(String) });
+    expect(start?.body).toMatchObject({ size_bytes: 20 * MIB, idempotency_key: expect.any(String) });
+    expect(start?.body).not.toHaveProperty("checksum_sha256");
 
     const complete = mock.log.find((l) => l.path === "/uploads/mp1/complete");
     expect(complete?.body).toEqual({
@@ -141,6 +183,7 @@ describe("multipart upload", () => {
         { part_number: 2, etag: `"etag-${8 * MIB}"` },
         { part_number: 3, etag: `"etag-${4 * MIB}"` },
       ],
+      checksum_sha256: SHA,
     });
     expect(mock.log.filter((l) => l.path.endsWith("/parts/confirm"))).toHaveLength(1);
   });
@@ -158,6 +201,7 @@ describe("multipart upload", () => {
     const { upload } = makeUpload(bigFile(), put as never);
 
     await upload.run();
+    await upload.settled();
 
     expect(upload.getSnapshot().state).toBe("available");
     const presigns = mock.log.filter((l) => l.path.endsWith("/parts/urls")).map((l) => l.body);
@@ -209,6 +253,7 @@ describe("multipart upload", () => {
     const { upload } = makeUpload(file, put as never, { hash });
 
     await upload.run(saved);
+    await upload.settled();
 
     expect(hash).not.toHaveBeenCalled();
     expect(put).toHaveBeenCalledTimes(2);
@@ -239,6 +284,7 @@ describe("multipart upload", () => {
     const { upload } = makeUpload(file, okPut as never);
 
     await upload.run(saved);
+    await upload.settled();
 
     const start = mock.log.find((l) => l.path === "/uploads/multipart");
     expect((start?.body as { idempotency_key: string }).idempotency_key).not.toBe("old-key");
@@ -254,11 +300,13 @@ describe("multipart upload", () => {
     const { upload } = makeUpload(bigFile(), okPut as never);
 
     await upload.run();
+    await upload.settled();
     expect(upload.getSnapshot().state).toBe("failed");
     expect(upload.getSnapshot().failure?.kind).toBe("session_expired");
 
     expired = false;
     await upload.restart();
+    await upload.settled();
 
     const keys = mock.log.filter((l) => l.path === "/uploads/multipart").map((l) => (l.body as { idempotency_key: string }).idempotency_key);
     expect(keys).toHaveLength(2);
@@ -272,6 +320,7 @@ describe("multipart upload", () => {
     const { upload } = makeUpload(bigFile(), put as never);
 
     await upload.run();
+    await upload.settled();
 
     expect(upload.getSnapshot().failure?.kind).toBe("cors");
     expect(upload.getSnapshot().failure?.message).toMatch(/ExposeHeaders/);
@@ -286,6 +335,7 @@ describe("multipart upload", () => {
     const { upload, sleep } = makeUpload(bigFile(), okPut as never);
 
     await upload.run();
+    await upload.settled();
 
     expect(sleep).toHaveBeenCalledWith(7000, expect.anything());
     expect(upload.getSnapshot().state).toBe("available");
@@ -309,6 +359,7 @@ describe("single upload", () => {
     }));
 
     await upload.run();
+    await upload.settled();
 
     expect(put).toHaveBeenCalledWith("https://store.test/single", file, expect.objectContaining({ headers: { "x-ms-blob-type": "BlockBlob", "Content-Type": "text/csv" } }));
     expect(mock.log.find((l) => l.path === "/uploads/sg1/complete")?.body).toBe("");
@@ -322,8 +373,38 @@ describe("single upload", () => {
     const upload = new FileUpload(file, { file_name: "big.bin", content_type: "application/octet-stream" }, { put: (async () => ({ status: 200, etag: null })) as never, hash: async () => SHA, sleep: async () => undefined, store: memoryStore(), pollMs: 0 });
 
     await upload.run();
+    await upload.settled();
 
     expect(upload.getSnapshot().state).toBe("rejected");
     expect(upload.getSnapshot().asset?.rejectionReason).toBe("contains a virus");
+  });
+
+  it("frees the queue once stored and learns a rejection the catalog never lists from the upload", async () => {
+    const mock = mockApi({ uploadStatuses: ["VERIFIED"] });
+    // Rejected assets get no catalog version: the catalog has nothing to say.
+    server.use(http.get(`${API}/catalog/objects/:id/versions`, () => HttpResponse.json({ versions: [] })));
+    const reply: { asset?: object } = {};
+    server.use(
+      http.get(`${API}/uploads/:id`, () =>
+        HttpResponse.json({ upload_id: "sg1", status: "VERIFIED", file_name: "notes.txt", size_bytes: 1, expires_at: "2099-01-01T00:00:00Z", multipart: false, asset: reply.asset }),
+      ),
+    );
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const sleep = vi.fn(() => gate);
+    const upload = new FileUpload(new File(["x"], "notes.txt"), { file_name: "notes.txt", content_type: "text/plain" }, { put: (async () => ({ status: 200, etag: null })) as never, hash: async () => SHA, sleep, store: memoryStore(), pollMs: 3000 });
+
+    await upload.run();
+    // run() is back while the server is still deciding.
+    expect(["verifying", "processing"]).toContain(upload.getSnapshot().state);
+    reply.asset = { asset_id: "as1", status: "REJECTED", rejection_reason: "malware_detected" };
+    release();
+    await upload.settled();
+
+    expect(upload.getSnapshot().state).toBe("rejected");
+    expect(upload.getSnapshot().asset?.rejectionReason).toBe("malware_detected");
+    // The first check comes quickly, not after the full poll interval.
+    expect(sleep).toHaveBeenCalledWith(500, expect.anything());
+    expect(mock.log.some((l) => l.path === "/uploads/sg1/complete")).toBe(true);
   });
 });

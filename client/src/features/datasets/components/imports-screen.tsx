@@ -82,7 +82,7 @@ export function ImportsScreen({ id }: { id: string }) {
       </div>
 
       <Panel title="Manifest format" description="JSON Lines, schema version 1. One member per line.">
-        <pre className="mono-data neo-in-sm overflow-x-auto p-3 whitespace-pre" data-lenis-prevent>
+        <pre className="mono-data neo-in-sm overflow-x-auto p-3 whitespace-pre" data-lenis-prevent-horizontal>
           {example}
         </pre>
         <ul className="mt-4 grid gap-2 text-base">

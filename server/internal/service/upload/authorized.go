@@ -57,6 +57,21 @@ func (s *Service) GetFor(ctx context.Context, p model.Principal, uploadID string
 	return s.repository.GetByID(ctx, p.TenantID, uploadID)
 }
 
+// AssetOf returns the asset an upload became, or nil while there is none
+// yet (or no asset reader is set). Call it after GetFor has authorized the
+// same upload. A rejected upload never reaches the catalog, so this is the
+// only place a client can learn that, and why.
+func (s *Service) AssetOf(ctx context.Context, tenantID, uploadID string) (*model.Asset, error) {
+	if s.assets == nil {
+		return nil, nil
+	}
+	asset, err := s.assets.GetByUpload(ctx, tenantID, uploadID)
+	if errors.Is(err, model.ErrAssetNotFound) {
+		return nil, nil
+	}
+	return asset, err
+}
+
 func (s *Service) record(ctx context.Context, p model.Principal, action string, session *model.UploadSession, details map[string]any) {
 	if s.audit == nil || session == nil {
 		return

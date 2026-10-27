@@ -127,6 +127,7 @@ With `EVENT_QUEUE=sqs`, `pack.planned` events on the `packing` queue start build
 | Worker stops while `VERIFYING` | Another worker verifies the stored pack and publishes it as written. |
 | Lease lost (another worker took over) | The lease check refuses the step's write; the other worker carries on. |
 | A source's bytes do not match its recorded size or SHA-256 | The pack fails. That asset's entry is `EXCLUDED` and it is never packed again; the others are released and planned again. |
+| A source's object is missing or replaced while its asset still records it (`AVAILABLE`, same key, ETag and version) | Planned again it would fail again every cycle, so it is treated the same way: the pack fails, that entry is `EXCLUDED`, the others are planned again. |
 | A source is gone or replaced since planning | The pack fails at once, without retries. Its entries are released and planned again as they are now. |
 | The stored pack or manifest does not read back as written | The pack fails; its assets are planned again. |
 | Storage or database errors | Retried with backoff; after `PACKING_MAX_ATTEMPTS` the pack fails. |

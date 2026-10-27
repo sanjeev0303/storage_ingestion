@@ -131,7 +131,7 @@ export function VersionDetail({ id, versionId }: { id: string; versionId: string
         {config && (
           <div className="mt-5">
             <h3 className="text-sm text-muted">Configuration</h3>
-            <pre className="mono-data neo-in-sm mt-1 overflow-x-auto p-3" data-lenis-prevent>
+            <pre className="mono-data neo-in-sm mt-1 overflow-x-auto p-3" data-lenis-prevent-horizontal>
               {JSON.stringify(v.config, null, 2)}
             </pre>
           </div>

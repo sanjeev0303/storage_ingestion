@@ -439,6 +439,23 @@ func (s *MultipartService) Complete(
 	if session.StorageUploadID == "" {
 		return model.UploadSession{}, ErrMultipartNotStarted
 	}
+	// Recorded before the object is assembled, so the completion event,
+	// the asset and verification always find a checksum.
+	checksum, err := completionChecksum(session, input.ChecksumSHA256)
+	if err != nil {
+		return model.UploadSession{}, err
+	}
+	if session.ChecksumSHA256 == "" {
+		err := s.uploads.SetDeclaredChecksum(ctx, tenantID, uploadID, checksum, s.now())
+		if errors.Is(err, model.ErrInvalidUploadState) {
+			// Another completion got there first: answer as its retry.
+			return s.answerAsRetry(ctx, tenantID, uploadID)
+		}
+		if err != nil {
+			return model.UploadSession{}, fmt.Errorf("record declared checksum: %w", err)
+		}
+		session.ChecksumSHA256 = checksum
+	}
 
 	at, err := s.staging(ctx, session)
 	if err != nil {
@@ -676,16 +693,41 @@ func validateStartInput(input StartMultipartInput, maxSize int64) error {
 	if input.SizeBytes > maxSize {
 		return ErrUploadTooLarge
 	}
-	if len(input.ChecksumSHA256) != sha256.Size*2 {
-		return ErrInvalidRequest
-	}
-	if _, err := hex.DecodeString(input.ChecksumSHA256); err != nil {
+	// The SHA-256 may also come at completion (Complete), so a client can
+	// hash a large file while its parts upload instead of before.
+	if input.ChecksumSHA256 != "" && !validChecksum(input.ChecksumSHA256) {
 		return ErrInvalidRequest
 	}
 	if input.Dataset != "" && !model.ValidDataset(input.Dataset) {
 		return ErrInvalidRequest
 	}
 	return nil
+}
+
+func validChecksum(sum string) bool {
+	if len(sum) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(sum)
+	return err == nil
+}
+
+// completionChecksum is the SHA-256 the upload is verified against: the one
+// declared at start, or else the one declared now. One of them is needed,
+// and the two cannot disagree.
+func completionChecksum(session model.UploadSession, declared string) (string, error) {
+	declared = strings.ToLower(declared)
+	switch {
+	case declared != "" && !validChecksum(declared):
+		return "", ErrInvalidRequest
+	case session.ChecksumSHA256 == "" && declared == "":
+		return "", fmt.Errorf("%w: checksum_sha256 is required at completion when it was not given at start", ErrInvalidRequest)
+	case session.ChecksumSHA256 != "" && declared != "" && !strings.EqualFold(session.ChecksumSHA256, declared):
+		return "", fmt.Errorf("%w: checksum_sha256 differs from the one given at start", ErrInvalidRequest)
+	case declared == "":
+		return session.ChecksumSHA256, nil
+	}
+	return declared, nil
 }
 
 func sameMultipartRequest(
@@ -698,7 +740,9 @@ func sameMultipartRequest(
 		session.ContentType == input.ContentType &&
 		session.ExpectedSize == input.SizeBytes &&
 		session.Dataset == input.Dataset &&
-		strings.EqualFold(session.ChecksumSHA256, input.ChecksumSHA256) &&
+		// A start that left the checksum for completion may be retried
+		// after completion recorded it.
+		(input.ChecksumSHA256 == "" || strings.EqualFold(session.ChecksumSHA256, input.ChecksumSHA256)) &&
 		session.Path == multipartPath(input) &&
 		session.CreateOnly == input.CreateOnly &&
 		maps.Equal(session.Metadata, input.Metadata)

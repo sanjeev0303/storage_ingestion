@@ -33,6 +33,8 @@ type RecordPartsRequest struct {
 
 type CompleteMultipartUploadRequest struct {
 	Parts []CompletedPartRequest `json:"parts"`
+	// ChecksumSHA256 is required when the upload started without one.
+	ChecksumSHA256 string `json:"checksum_sha256,omitempty"`
 }
 
 type CompletedPartRequest struct {

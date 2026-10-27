@@ -28,10 +28,17 @@ import (
 
 type Dependencies struct {
 	Packs interfaces.PackRepository
+	// Assets tells a stale plan from a source that is gone for good.
+	Assets AssetReader
 	// Router reaches every connection, the platform's included.
 	Router  interfaces.StorageRouter
 	Metrics *metrics.Registry
 	Log     *slog.Logger
+}
+
+// AssetReader reads an asset as it is recorded now.
+type AssetReader interface {
+	GetByID(ctx context.Context, tenantID, assetID string) (*model.Asset, error)
 }
 
 type Config struct {
@@ -55,7 +62,7 @@ type Service struct {
 }
 
 func NewService(deps Dependencies, cfg Config) (*Service, error) {
-	if deps.Packs == nil || deps.Router == nil || deps.Log == nil {
+	if deps.Packs == nil || deps.Assets == nil || deps.Router == nil || deps.Log == nil {
 		return nil, errors.New("packing dependencies are required")
 	}
 	if cfg.Owner == "" {

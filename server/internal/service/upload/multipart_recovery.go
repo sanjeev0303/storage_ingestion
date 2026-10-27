@@ -7,6 +7,7 @@ import (
 
 	"github.com/sanjeev0303/object-storage-platform/internal/dto/event"
 	checksum "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/checksum/sha256"
+	"github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/rangeread"
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/correlation"
@@ -267,7 +268,9 @@ func (s *MultipartService) VerifyIntegrity(ctx context.Context, tenantID, upload
 		return s.finish(ctx, session, model.UploadStatusFailed, model.FailureObjectSizeMismatch)
 	}
 
-	body, err := at.storage.OpenObject(ctx, at.bucket, session.ObjectKey)
+	// Read in parallel ranges pinned to this ETag: a large object hashes at
+	// the provider's full bandwidth, and an overwrite meanwhile fails the read.
+	body, err := rangeread.OpenObject(ctx, at.storage, at.bucket, session.ObjectKey, metadata)
 	if err != nil {
 		return "", fmt.Errorf("open object for verification: %w", err)
 	}

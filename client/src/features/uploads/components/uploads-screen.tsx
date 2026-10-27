@@ -25,16 +25,19 @@ function sentBytes(snap: UploadSnapshot) {
   return ["finalizing", "verifying", "processing", "available", "rejected"].includes(snap.state) ? snap.fileSize : snap.sentBytes;
 }
 
-function Summary({ snapshots }: { snapshots: UploadSnapshot[] }) {
+function Summary({ snapshots, waiting, needFix }: { snapshots: UploadSnapshot[]; waiting: number; needFix: number }) {
   const total = snapshots.reduce((sum, s) => sum + s.fileSize, 0);
   const sent = snapshots.reduce((sum, s) => sum + sentBytes(s), 0);
   const count = (...states: string[]) => snapshots.filter((s) => states.includes(s.state)).length;
+  const ready = count("queued") - waiting - needFix;
 
   return (
     <div className="flex flex-col gap-4" aria-live="polite">
       <Meter label="All files uploaded" used={sent} limit={total} format={formatBytes} />
       <p className="text-sm text-muted">
-        {formatNumber(snapshots.length)} files: {count("queued")} queued, {count("hashing", "uploading", "finalizing")} uploading,{" "}
+        {formatNumber(snapshots.length)} {snapshots.length === 1 ? "file" : "files"}: {ready} ready to start, {waiting} waiting for a slot,{" "}
+        {needFix} {needFix === 1 ? "needs" : "need"} a fix,{" "}
+        {count("hashing", "uploading", "finalizing")} uploading,{" "}
         {count("verifying", "processing")} being checked by the server, {count("available")} available, {count("rejected")} rejected,{" "}
         {count("failed", "cancelled")} failed or cancelled.
       </p>
@@ -89,6 +92,9 @@ export function UploadsScreen() {
     maxObjectBytes: quota.data?.limits.max_object_bytes,
   });
   const { entries, snapshots } = queue;
+  const needFix = entries.filter(
+    (entry, i) => snapshots[i]?.state === "queued" && Object.values(queue.errors.get(entry.id) ?? {}).some(Boolean),
+  ).length;
 
   const canUpload = can("uploads.write");
   const anyLarge = snapshots.some((s) => s.fileSize > LARGE_BYTES);
@@ -129,7 +135,7 @@ export function UploadsScreen() {
             }
           >
             <div className="flex flex-col gap-5">
-              <Summary snapshots={snapshots} />
+              <Summary snapshots={snapshots} waiting={queue.waitingIds.length} needFix={needFix} />
               {(anyLarge || anyMultipart) && (
                 <p className="neo-in-sm p-3 text-sm">
                   {anyLarge ? "Large files take a while. " : ""}Files over {formatBytes(SINGLE_LIMIT_BYTES)} upload in parts, four at a
@@ -145,6 +151,7 @@ export function UploadsScreen() {
                 defaultConnectionId={defaultId}
                 onDraft={queue.updateDraft}
                 onRemove={queue.remove}
+                waitingIds={queue.waitingIds}
               />
             </div>
           </Panel>

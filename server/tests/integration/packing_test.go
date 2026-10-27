@@ -85,7 +85,7 @@ func (r *packingRig) worker(t *testing.T, owner string, registry *metrics.Regist
 	if change != nil {
 		change(&cfg)
 	}
-	svc, err := packing.NewService(packing.Dependencies{Packs: r.repo, Router: r.router, Metrics: registry, Log: r.s.log},
+	svc, err := packing.NewService(packing.Dependencies{Packs: r.repo, Assets: postgres.NewAssetRepository(r.s.db), Router: r.router, Metrics: registry, Log: r.s.log},
 		packing.Config{Packing: cfg, Owner: owner})
 	if err != nil {
 		t.Fatal(err)
@@ -345,6 +345,40 @@ func TestPackingExcludesAMismatchedSource(t *testing.T) {
 	}
 	if _, ok := rig.stateOf(t, next.ID)[bad.ID]; ok {
 		t.Fatal("the excluded asset is never packed again")
+	}
+}
+
+// An asset whose object vanished while the asset still records it is not
+// a stale plan: planned again it would fail again, every cycle, forever. It
+// is excluded once, and the others are packed without it.
+func TestPackingExcludesASourceWhoseObjectIsGone(t *testing.T) {
+	s := openSecurityStack(t, nil)
+	ctx := context.Background()
+	acme := s.team(t, "pack-gone")
+	assets, _ := s.smallAssets(t, acme.developer, "gone", 4)
+	gone := assets[1]
+	if err := s.ie.storage.DeleteObject(ctx, "", gone.ObjectKey); err != nil {
+		t.Fatal(err)
+	}
+	rig := s.packingRig(t)
+	w := rig.worker(t, "w1", nil, []string{acme.org.ID}, nil)
+
+	if stats := rig.run(t, w); stats.Failed != 1 || stats.Published != 0 {
+		t.Fatalf("the pack fails: %+v", stats)
+	}
+	failed := rig.packs(t, acme.org.ID)[0]
+	if states := rig.stateOf(t, failed.ID); states[gone.ID] != model.PackEntryExcluded || states[assets[0].ID] != model.PackEntryReleased {
+		t.Fatalf("failed pack: %v", states)
+	}
+
+	if stats := rig.run(t, w); stats.Published != 1 {
+		t.Fatalf("the rest are packed: %+v", stats)
+	}
+	if stats := rig.run(t, w); stats.Planned != 0 || stats.Failed != 0 {
+		t.Fatalf("nothing is planned again for the missing object: %+v", stats)
+	}
+	if n := len(rig.packs(t, acme.org.ID)); n != 2 {
+		t.Fatalf("%d packs, want the failed one and the published one", n)
 	}
 }
 
@@ -653,7 +687,26 @@ func TestPackingStaysOnEachConnection(t *testing.T) {
 		if err := s.ie.storage.DeleteObject(ctx, s.ie.bucket, a.ObjectKey); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.db.Pool.Exec(ctx, `UPDATE assets SET storage_connection_id = $2 WHERE id = $1`, a.ID, connectionID); err != nil {
+		// A binding never changes (migration 000015's trigger), and this
+		// stack only publishes on the platform. The trigger is set aside for
+		// this one statement, in its own transaction, to stand in for an
+		// asset published on the connection; every binding here belongs to
+		// the asset's own tenant, as the trigger would require.
+		tx, err := s.db.Pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
+		if _, err := tx.Exec(ctx, `ALTER TABLE assets DISABLE TRIGGER tr_assets_storage_tenant`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE assets SET storage_connection_id = $2 WHERE id = $1`, a.ID, connectionID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `ALTER TABLE assets ENABLE TRIGGER tr_assets_storage_tenant`); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Commit(ctx); err != nil {
 			t.Fatal(err)
 		}
 	}

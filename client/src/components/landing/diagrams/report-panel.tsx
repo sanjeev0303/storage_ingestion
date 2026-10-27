@@ -94,7 +94,7 @@ export function ReportPanel({ className }: { className?: string }) {
     <article
       ref={root}
       data-ui
-      data-lenis-prevent=""
+      data-lenis-prevent-horizontal=""
       aria-labelledby="report-panel-title"
       className={cn(
         "w-full max-w-[480px] justify-self-center overflow-x-auto bg-faint p-5 text-ink",

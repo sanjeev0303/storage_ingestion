@@ -2,8 +2,6 @@ package processing
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -88,8 +86,17 @@ type Config struct {
 	// narrow it: denied types are added, the size limit is the smaller one.
 	Policy     model.ContentPolicy
 	ScanPolicy ScanPolicy
-	// ScanTimeout bounds one scan; it must be shorter than MaxJobDuration.
+	// ScanTimeout bounds one scan (one segment of a large object); it must
+	// be shorter than MaxJobDuration.
 	ScanTimeout time.Duration
+	// Objects larger than ScanSegmentBytes (default 64 MiB) are scanned as
+	// overlapping segments, ScanParallelism (default 4) at a time.
+	ScanSegmentBytes int64
+	ScanParallelism  int
+	// MinThroughput, in bytes a second, gives a large object's job more
+	// time than MaxJobDuration: its size at this rate is added. Zero adds
+	// nothing.
+	MinThroughput int64
 	// QuarantineRetention is how long a rejected object is kept for
 	// investigation before it is purged.
 	QuarantineRetention time.Duration
@@ -122,6 +129,15 @@ func NewService(deps Dependencies, cfg Config, log *slog.Logger) (*Service, erro
 	}
 	if cfg.MaxJobDuration == 0 {
 		cfg.MaxJobDuration = 30 * time.Minute
+	}
+	if cfg.ScanSegmentBytes == 0 {
+		cfg.ScanSegmentBytes = 64 << 20
+	}
+	if cfg.ScanParallelism == 0 {
+		cfg.ScanParallelism = 4
+	}
+	if cfg.ScanSegmentBytes <= scanOverlap || cfg.ScanParallelism < 0 || cfg.MinThroughput < 0 {
+		return nil, errors.New("processing scan segments must be larger than their overlap, and parallelism and throughput not negative")
 	}
 	if cfg.RenewEvery <= 0 || 2*cfg.RenewEvery > cfg.Lease {
 		return nil, errors.New("processing lease renewal must come at least twice per lease")
@@ -181,37 +197,34 @@ func (s *Service) RunOnce(ctx context.Context) (CycleStats, error) {
 	}
 	stats.Enqueued = enqueued
 
-	jobs, err := s.deps.Jobs.Claim(ctx, s.cfg.Owner, s.now(), s.cfg.Lease, s.cfg.BatchSize)
-	if err != nil {
-		return stats, fmt.Errorf("claim processing jobs: %w", err)
-	}
-	stats.Claimed = len(jobs)
-
-	// Every claimed job renews its lease from now on, also while it waits
-	// for a free slot: a lease that ran out in the queue would hand the job
-	// to another worker and cost it an attempt it never used.
-	leases := make([]lease, len(jobs))
-	for i, job := range jobs {
-		leases[i] = s.leased(ctx, job, s.jobLog(job))
-	}
+	// A job is claimed only when a slot is free for it. A job claimed ahead
+	// would wait out a slow one (a large scan) holding its lease, so no other
+	// worker or event consumer could run it meanwhile either.
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	slots := make(chan struct{}, s.cfg.Concurrency)
-	for i, job := range jobs {
-		if ctx.Err() != nil {
-			// Unprocessed claims expire and are picked up again.
-			for _, l := range leases[i:] {
-				l.stop()
+	for stats.Claimed < s.cfg.BatchSize && ctx.Err() == nil {
+		slots <- struct{}{}
+		jobs, err := s.deps.Jobs.Claim(ctx, s.cfg.Owner, s.now(), s.cfg.Lease, 1)
+		if err != nil || len(jobs) == 0 {
+			<-slots
+			if err != nil {
+				wg.Wait()
+				return stats, fmt.Errorf("claim processing jobs: %w", err)
 			}
 			break
 		}
-		slots <- struct{}{}
+		mu.Lock()
+		stats.Claimed++
+		mu.Unlock()
+		job := jobs[0]
+		l := s.leased(ctx, job, s.jobLog(job))
 		wg.Add(1)
-		go func(job model.ProcessingJob, l lease) {
+		go func() {
 			defer wg.Done()
 			defer func() { <-slots }()
 			s.process(ctx, job, l, &stats, &mu)
-		}(job, leases[i])
+		}()
 	}
 	wg.Wait()
 
@@ -365,6 +378,20 @@ func (s *Service) process(ctx context.Context, job model.ProcessingJob, l lease,
 // errJobTooLong ends a job that kept its lease for MaxJobDuration.
 var errJobTooLong = errors.New("processing took longer than the maximum job duration")
 
+// budget is how long one job may keep its lease: MaxJobDuration, plus its
+// object's size at MinThroughput, so a terabyte object is not cut off (and
+// restarted from its stage, forever) after the time a small one needs.
+func (s *Service) budget(ctx context.Context, job model.ProcessingJob) time.Duration {
+	if s.cfg.MinThroughput <= 0 {
+		return s.cfg.MaxJobDuration
+	}
+	asset, err := s.deps.Assets.GetByID(ctx, job.TenantID, job.AssetID)
+	if err != nil {
+		return s.cfg.MaxJobDuration
+	}
+	return s.cfg.MaxJobDuration + time.Duration(asset.SizeBytes/s.cfg.MinThroughput)*time.Second
+}
+
 // lease is a claimed job's renewal. Its context ends when the lease is
 // lost (another worker may hold the job now), when renewal has failed for
 // a whole lease, or MaxJobDuration after the claim; content reads, scans
@@ -378,7 +405,7 @@ type lease struct {
 // leased renews job's lease from the claim until stop.
 func (s *Service) leased(ctx context.Context, job model.ProcessingJob, log *slog.Logger) lease {
 	leaseCtx, cancel := context.WithCancelCause(ctx)
-	workCtx, cancelTimeout := context.WithTimeoutCause(leaseCtx, s.cfg.MaxJobDuration, errJobTooLong)
+	workCtx, cancelTimeout := context.WithTimeoutCause(leaseCtx, s.budget(ctx, job), errJobTooLong)
 	done := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -614,22 +641,23 @@ func (s *Service) scan(ctx context.Context, job *model.ProcessingJob, asset mode
 	if err != nil {
 		return "", err
 	}
-	body, err := storage.OpenObject(ctx, bucket, key)
-	if err != nil {
-		return "", fmt.Errorf("open object to scan: %w", err)
-	}
-	// Hash and count exactly what the scanner reads. Quarantine is not
-	// pinned to the verified bytes, so a write credential still valid after
-	// verification could swap them for the scan; only bytes matching the
-	// declared SHA-256, which promotion checks the copy against too, may
-	// pass as scanned.
-	hasher := sha256.New()
-	var read byteCount
-	scanCtx, cancel := context.WithTimeout(ctx, s.cfg.ScanTimeout)
+	// Quarantine is not pinned to the verified bytes, so a write credential
+	// still valid after verification could swap them for the scan; only
+	// bytes matching the declared SHA-256, which promotion checks the copy
+	// against too, may pass as scanned. Both ways of scanning return how
+	// many bytes they hashed and their SHA-256.
 	started := time.Now()
-	result := s.deps.Scanner.Scan(scanCtx, io.TeeReader(body, io.MultiWriter(hasher, &read)))
-	cancel()
-	body.Close()
+	var result interfaces.ScanResult
+	var read int64
+	var sum string
+	if asset.SizeBytes > s.cfg.ScanSegmentBytes {
+		result, read, sum, err = s.scanSegments(ctx, storage, bucket, key, job.DetectedContentType)
+	} else {
+		result, read, sum, err = s.scanWhole(ctx, storage, bucket, key)
+	}
+	if err != nil {
+		return "", err
+	}
 
 	scannedAt := s.now()
 	job.ScannedAt = &scannedAt
@@ -640,10 +668,10 @@ func (s *Service) scan(ctx context.Context, job *model.ProcessingJob, asset mode
 
 	switch result.Outcome {
 	case model.ScanClean:
-		if int64(read) < asset.SizeBytes {
+		if read < asset.SizeBytes {
 			return s.scanIncomplete(ctx, job, interfaces.ScanResult{Outcome: model.ScanError, Detail: "the scanner did not read the whole object"})
 		}
-		if int64(read) != asset.SizeBytes || !strings.EqualFold(hex.EncodeToString(hasher.Sum(nil)), asset.ChecksumSHA256) {
+		if read != asset.SizeBytes || !strings.EqualFold(sum, asset.ChecksumSHA256) {
 			job.VerificationStatus = model.StageFailed
 			if _, err := s.save(ctx, job); err != nil {
 				return "", err

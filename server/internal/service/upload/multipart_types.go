@@ -57,6 +57,8 @@ type RecordPartInput struct {
 // by the client for completion.
 type CompleteMultipartInput struct {
 	Parts []CompletedPartInput
+	// ChecksumSHA256 is required here when the upload started without one.
+	ChecksumSHA256 string
 }
 
 // CompletedPartInput is an application-owned completion entry.

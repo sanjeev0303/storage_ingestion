@@ -2,11 +2,17 @@ import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { axe } from "vitest-axe";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { API, server } from "@/test/server";
 import { renderWithProviders } from "@/test/render";
 import { parseMetadata, validateDataset, validatePath } from "../validation";
 import { Dropzone } from "./dropzone";
+
+// jsdom cannot run the WebAssembly hasher; the checksum's value does not matter here.
+vi.mock("@/lib/upload/sha256", async (original) => ({
+  ...(await original<typeof import("@/lib/upload/sha256")>()),
+  sha256Blob: async () => "0".repeat(64),
+}));
 import { UploadsScreen } from "./uploads-screen";
 
 const platform = {
@@ -102,7 +108,54 @@ describe("uploads screen", () => {
 
     expect(await screen.findByText(/larger than your organization/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Start upload" })).toBeDisabled();
+    expect(screen.getByText("Needs a fix")).toBeInTheDocument();
+    expect(screen.getByText(/0 ready to start, 0 waiting for a slot, 1 needs a fix/)).toBeInTheDocument();
   });
+
+  it("says which files wait for Start and which wait for a slot, and never uploads one removed while waiting", async () => {
+    mockPage();
+    const created: string[] = [];
+    let freeSlots!: () => void;
+    const slotsFreed = new Promise<void>((resolve) => (freeSlots = resolve));
+    // Uploads that never finish keep every slot busy, until a.txt and b.txt
+    // fail and free two of them.
+    server.use(
+      http.get(`${API}/catalog/lookup`, () => HttpResponse.json({ error: "not found" }, { status: 404 })),
+      http.post(`${API}/uploads`, async ({ request }) => {
+        const name = ((await request.json()) as { file_name: string }).file_name;
+        created.push(name);
+        if (name === "a.txt" || name === "b.txt") {
+          await slotsFreed;
+          return HttpResponse.json({ error: "bad request" }, { status: 400 });
+        }
+        return new Promise<never>(() => undefined);
+      }),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<UploadsScreen />);
+    const files = ["a", "b", "c", "d", "e", "f"].map((name) => new File(["x"], `${name}.txt`, { type: "text/plain" }));
+    await user.upload(await screen.findByTestId("file-input"), files);
+
+    expect(await screen.findByText(/6 ready to start/)).toBeInTheDocument();
+    expect(screen.getAllByText("Ready")).toHaveLength(6);
+
+    await user.click(screen.getByRole("button", { name: "Start 6 uploads" }));
+    // Four files go at once; the last two wait their turn, and say so.
+    expect(await screen.findByText(/2 waiting for a slot/)).toBeInTheDocument();
+    expect(screen.getByText("Next in line for a free upload slot")).toBeInTheDocument();
+    expect(screen.getByText("Waiting for a free upload slot, 1 file ahead")).toBeInTheDocument();
+
+    const table = screen.getByRole("table", { name: "Upload queue" });
+    const lastRow = within(table).getByText("f.txt").closest("tr")!;
+    await user.click(within(lastRow).getByRole("button", { name: "Remove" }));
+    expect(await screen.findByText(/1 waiting for a slot/)).toBeInTheDocument();
+
+    freeSlots();
+    // e.txt takes the first freed slot; the second has nothing left to start.
+    await vi.waitFor(() => expect(created).toContain("e.txt"));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(created).not.toContain("f.txt");
+  }, 20_000);
 });
 
 describe("dropzone", () => {

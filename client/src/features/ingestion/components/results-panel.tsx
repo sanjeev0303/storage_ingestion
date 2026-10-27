@@ -82,7 +82,7 @@ function EntryRows({ entries, withError }: { entries: IngestionEntry[]; withErro
         {entries.map((entry) => (
           <tr key={entry.position}>
             <Td className="tabular-nums">{entry.position}</Td>
-            <Td className="mono-data max-w-md break-all">{entry.path ?? "No path"}</Td>
+            <Td className="mono-data min-w-40 max-w-md break-all">{entry.path ?? "No path"}</Td>
             <Td>
               <EntryBadge state={entry.state} />
             </Td>

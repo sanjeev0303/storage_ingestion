@@ -264,6 +264,38 @@ func (r *UploadRepository) SetStorageUploadID(
 	return nil
 }
 
+func (r *UploadRepository) SetDeclaredChecksum(
+	ctx context.Context,
+	tenantID string,
+	uploadID string,
+	checksum string,
+	at time.Time,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if checksum == "" {
+		return errors.New("checksum must not be empty")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	current, exists := r.uploads[uploadID]
+	if !exists || current.TenantID != tenantID {
+		return model.ErrUploadNotFound
+	}
+	if current.Status != model.UploadStatusUploading ||
+		(current.ChecksumSHA256 != "" && current.ChecksumSHA256 != checksum) {
+		return model.ErrInvalidUploadState
+	}
+
+	current.ChecksumSHA256 = checksum
+	current.UpdatedAt = at
+	r.uploads[uploadID] = current
+	return nil
+}
+
 // makeIdempotencyKey keeps idempotency keys scoped to a tenant and owner
 func makeIdempotencyKey(tenantID, ownerID, key string) string {
 	return tenantID + "\x00" + ownerID + "\x00" + key

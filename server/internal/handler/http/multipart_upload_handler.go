@@ -169,7 +169,7 @@ func (h *MultipartUploadHandler) complete(
 	}
 
 	session, err := h.service.CompleteFor(r.Context(), principalOf(r), r.PathValue("id"),
-		uploadservice.CompleteMultipartInput{Parts: parts})
+		uploadservice.CompleteMultipartInput{Parts: parts, ChecksumSHA256: body.ChecksumSHA256})
 	if err != nil {
 		h.fail(w, err)
 		return

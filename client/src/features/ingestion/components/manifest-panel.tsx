@@ -69,7 +69,7 @@ export function ManifestFormat() {
         </tbody>
       </Table>
       <div className="neo-in-sm p-3">
-        <p className="mono-data break-all text-sm" data-lenis-prevent>
+        <p className="mono-data break-all text-sm">
           {EXAMPLE_LINE}
         </p>
       </div>

@@ -48,6 +48,9 @@ export type UploadInfo = {
   size_bytes: number;
   expires_at: string;
   multipart: boolean;
+  // What processing made of the upload, once there is an asset. A rejected
+  // asset never reaches the catalog, so this is how the screen learns of it.
+  asset?: { asset_id: string; status: AssetStatus; rejection_reason?: string; object_id?: string; version?: number };
 };
 
 export type AssetStatus = "QUARANTINED" | "PROCESSING" | "AVAILABLE" | "REJECTED" | "SOFT_DELETED" | "DELETED";

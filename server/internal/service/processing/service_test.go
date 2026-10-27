@@ -93,6 +93,10 @@ type harness struct {
 	noScan   bool
 	attempts int
 	lease    time.Duration
+	// maxSize and segment, when set, replace the 1 MiB file limit and the
+	// default scan segment size.
+	maxSize int64
+	segment int64
 }
 
 func newHarness() *harness {
@@ -136,9 +140,13 @@ func (h *harness) service(t *testing.T, owner string) *Service {
 	if !h.noScan {
 		deps.Scanner = h.scanner
 	}
+	maxSize := h.maxSize
+	if maxSize == 0 {
+		maxSize = 1 << 20
+	}
 	svc, err := NewService(deps, Config{
-		Owner: owner, Bucket: "bucket", BatchSize: 10, Concurrency: 2, Lease: h.lease,
-		Policy:     model.ContentPolicy{MaxSizeBytes: 1 << 20, UnknownTypeAction: "allow"},
+		Owner: owner, Bucket: "bucket", BatchSize: 10, Concurrency: 2, Lease: h.lease, ScanSegmentBytes: h.segment,
+		Policy:     model.ContentPolicy{MaxSizeBytes: maxSize, UnknownTypeAction: "allow"},
 		ScanPolicy: h.policy, ScanTimeout: h.lease / 2, QuarantineRetention: retention,
 		Retry: retry.Policy{BaseDelay: time.Minute, MaxDelay: 10 * time.Minute, MaxAttempts: h.attempts},
 	}, quietLog)

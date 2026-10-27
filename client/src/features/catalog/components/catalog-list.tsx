@@ -109,7 +109,7 @@ function ShortSha({ sha }: { sha?: string }) {
   if (!sha) return <span className="text-muted">None</span>;
   return (
     <span className="flex items-center gap-2">
-      <span className="mono-data" title={sha}>
+      <span className="mono-data whitespace-nowrap" title={sha}>
         {sha.slice(0, 12)}
       </span>
       <CopyButton value={sha} label="Copy" variant="ghost" />
@@ -121,7 +121,7 @@ function ObjectRow({ object }: { object: CatalogObject }) {
   const current = object.current_version;
   return (
     <tr>
-      <Td>
+      <Td className="min-w-40">
         <Link href={`/app/catalog/${encodeURIComponent(object.id)}`} className="font-medium underline-offset-2 hover:underline [overflow-wrap:anywhere]">
           {object.path}
         </Link>

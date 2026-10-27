@@ -89,7 +89,7 @@ export function CountTable({ caption, rows: rawRows, emptyText }: { caption: str
           <tbody>
             {rows.map((row) => (
               <tr key={row.value}>
-                <Td className="px-2 py-1.5 [overflow-wrap:anywhere]">{row.value || "(empty)"}</Td>
+                <Td className="min-w-32 px-2 py-1.5 [overflow-wrap:anywhere]">{row.value || "(empty)"}</Td>
                 <Td className="px-2 py-1.5 text-right tabular-nums">{formatNumber(row.count)}</Td>
                 <Td className="px-2 py-1.5" aria-hidden>
                   <div className="h-2 bg-faint">

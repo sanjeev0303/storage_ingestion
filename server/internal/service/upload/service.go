@@ -34,6 +34,19 @@ type Service struct {
 	// (routing.go); nil keeps every upload on the platform's bucket.
 	chooser interfaces.StorageChooser
 	router  interfaces.StorageRouter
+	// assets, when set, lets AssetOf report what an upload became.
+	assets AssetReader
+}
+
+// AssetReader finds the asset made from an upload.
+type AssetReader interface {
+	GetByUpload(ctx context.Context, tenantID, uploadID string) (*model.Asset, error)
+}
+
+// ReportAssets makes AssetOf answer from assets.
+func (s *Service) ReportAssets(assets AssetReader) *Service {
+	s.assets = assets
+	return s
 }
 
 // Reserver stores an upload session with its quota reservation.
