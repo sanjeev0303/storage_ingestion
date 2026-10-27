@@ -199,7 +199,7 @@ Over a limit: 429 `rate_limited` with `Retry-After`. If the quota cannot be read
 
 **Limits of this design:**
 - **Single process.** The counters live in each API process's memory. With N instances a client gets up to N times the limit, and a restart forgets every count. Production would put them in a shared store (Redis, or PostgreSQL for the slow-moving ones).
-- **Client addresses.** These come from the connection unless `AUTH_TRUST_PROXY_HEADERS=true`. Set that only behind a proxy that writes `X-Forwarded-For` itself, or clients choose their own address.
+- **Client addresses.** These come from the connection unless `AUTH_TRUST_PROXY_HEADERS=true`, in which case the **last** `X-Forwarded-For` entry is used: the one the trusted proxy in front of the API wrote. Entries before it are what the client sent and are never used. Set it whenever the API is reached only through the console (which sends each caller's address as that last entry); without it, every user shares the console's address, and the per-address limits (sign-in, refresh at 30 a minute, credentials) apply to all of them together. Never set it on an API that clients can reach directly.
 
 Quotas, unlike rate limits, are authoritative in PostgreSQL.
 

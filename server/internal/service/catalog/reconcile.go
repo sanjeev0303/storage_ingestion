@@ -32,7 +32,7 @@ type Reconciler struct {
 	prefix  string
 	// router checks versions stored on tenants' connections; without it
 	// they are skipped.
-	router  interfaces.StorageRouter
+	router interfaces.StorageRouter
 	// packs finds versions whose bytes were packed; nil when nothing is.
 	packs   interfaces.PackLocator
 	audit   interfaces.AuditRecorder

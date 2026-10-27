@@ -43,9 +43,9 @@ Permissions are the backend's strings. The console hides actions the user's role
 
 | Screen | Endpoint | Method | Permission | Pagination | Status |
 | --- | --- | --- | --- | --- | --- |
-| Single upload | `/uploads`, `/uploads/{id}/complete`, `/uploads/{id}` | POST, GET | `uploads.write` | n/a | Verified (engine against MinIO) |
-| Multipart upload | `/uploads/multipart`, `/{id}/parts/urls`, `/{id}/parts/confirm`, `/{id}/complete`, `/{id}/abort` | POST | `uploads.write` | n/a | Verified (engine against MinIO) |
-| Locate the new object | `/catalog/lookup`, `/catalog/objects/{id}/versions`, `/assets/{id}` | GET | `assets.read` | n/a | Verified |
+| Single upload | `/uploads`, `/uploads/{id}/complete`, `/uploads/{id}` | POST, GET | `uploads.write` | n/a | Verified (engine against MinIO). `GET /uploads/{id}` carries `asset` (id, status, rejection reason, object id, version) once processing made one |
+| Multipart upload | `/uploads/multipart`, `/{id}/parts/urls`, `/{id}/parts/confirm`, `/{id}/complete`, `/{id}/abort` | POST | `uploads.write` | n/a | Verified (engine against MinIO). `complete` takes the SHA-256 when it was not known at the start |
+| Locate the new object | `/uploads/{id}` (its `asset`) | GET | `uploads.write` | n/a | Verified. The uploader no longer looks the object up by path; `/catalog/lookup` serves the catalog screens |
 | Ingestion jobs | `/ingestion/jobs`, `/{id}` | GET, POST | `ingestion.read`, `ingestion.write` | `after` string | Verified |
 | Manifest (inline, staged) | `/{id}/manifest`, `/manifest/staged-url`, `/manifest/staged` | PUT, POST | `ingestion.write` | n/a | Verified (inline), Mocked only (staged) |
 | Finalize, claims, per-entry upload, complete | `/{id}/finalize`, `/claims`, `/entries/{n}/upload-url`, `/parts/urls`, `/parts/confirm`, `/heartbeat`, `/complete` | POST | `ingestion.write` | n/a | Verified (not heartbeat, not 202) |
@@ -61,7 +61,7 @@ Permissions are the backend's strings. The console hides actions the user's role
 | Edit metadata, rename, versioning, promote | `/catalog/objects/{id}`, `/rename`, `/versioning`, `/versions/{n}/promote` | PATCH, POST, PUT | `catalog.write` | n/a | Verified (revision in body or `If-Match`; 412, 428, 409 paths) |
 | Delete version, object | `/catalog/objects/{id}[/versions/{n}]` | DELETE | `assets.delete` | n/a | Verified (202, tombstones, current version falls back) |
 | Download link | `/assets/{id}/download-url`, `/assets/{id}/download-links` | POST, DELETE | `assets.download`, `assets.delete` | n/a | Verified (storage and token modes, revoke) |
-| Preview bytes | `/assets/{id}/content` | GET | `assets.download` | n/a | Verified |
+| Preview bytes | `/assets/{id}/content` | GET | `assets.download` | n/a | Verified. Exists only with `DELIVERY_PROXY_ENABLED=true` (the default) |
 
 ## Datasets, validation, readiness, lineage
 
@@ -101,7 +101,7 @@ The console shows these as "not available" rather than inventing them.
 | Count of active ingestion jobs, manifest and request usage | No usage metric for them | "Not available from the API" |
 | List of uploads, list of manifest imports | No list endpoints | Uploads: remembered in this browser (IndexedDB, no secrets). Imports: ids remembered per dataset in `localStorage` |
 | Resume of a multipart upload, list of uploaded parts | No such endpoint | The console keeps its own part ETags; resume works only inside the ~30 minute server session |
-| Asset id after an upload | Upload endpoints never return it | Found through the catalog by path, version number and checksum |
+| Asset id after an upload | Closed: `GET /uploads/{id}` returns it once processing created the asset | Read from the upload status |
 | Object to datasets reverse lookup | No endpoint | Stated on the object page |
 | Read retention policies and legal holds | No GET | Write-only forms; hold ids shown once |
 | Error report download for bulk ingestion | No endpoint | Pages `/failures` and builds a CSV in the browser |
@@ -133,7 +133,7 @@ Found while checking the screens against the real API.
 - Findings are ordered by a hash id, not by severity.
 - Cancelling an already finished manifest import returns 409 `invalid_state`, not 200.
 - Patching an archived dataset answers `dataset_archived` before any revision check.
-- The catalog versions endpoint carries no `rejection_reason`; the uploader reads it from `GET /assets/{id}`.
+- The catalog versions endpoint carries no `rejection_reason`; the uploader reads it from the `asset` of `GET /uploads/{id}`.
 - Retrying an ingestion job that is still VALIDATING returns 409.
 - Revisions of a storage connection also change on test, enable, disable and rotate, not only on edits.
 - `include=unpublished` lists objects with `versions: 0` and no current version.

@@ -182,3 +182,46 @@ func TestUnreachableConnectionRetriesWithoutSwitchingStorage(t *testing.T) {
 		t.Fatalf("finished after the outage: %+v", asset)
 	}
 }
+
+// One tenant's provider being down holds back only that tenant's upload: in
+// the same cycle another tenant's upload, on the platform's storage, is
+// processed as usual.
+func TestOneTenantsOutageDoesNotHoldBackAnother(t *testing.T) {
+	h := newHarness()
+	r := &router{customer: storagememory.NewObjectStorage(), down: true}
+	svc := h.byosService(t, r)
+	h.boundUpload(t, "up-down", "sc_customer", "sc_customer", r.customer, "staging/"+tenant+"/up-down")
+
+	const other = "tenant-2"
+	key := "quarantine/" + other + "/up-other"
+	h.storage.PutObject(key, pdfBytes)
+	session := model.UploadSession{
+		ID: "up-other", TenantID: other, OwnerID: "user-2", ObjectKey: key, FileName: "file.pdf", ContentType: "application/pdf",
+		ExpectedSize: int64(len(pdfBytes)), ChecksumSHA256: sum(pdfBytes), Status: model.UploadStatusCompleted,
+		StorageUploadID: "provider-up-other", CreatedAt: h.clock, UpdatedAt: h.clock, ExpiresAt: h.clock.Add(time.Hour),
+	}
+	if err := h.uploads.Create(context.Background(), &session); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := svc.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Retried != 1 || stats.Succeeded != 1 {
+		t.Fatalf("the outage is retried and the other tenant's upload finishes: %+v", stats)
+	}
+	for _, job := range h.memJobs.Jobs() {
+		asset, err := h.assets.GetByID(context.Background(), job.TenantID, job.AssetID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := model.AssetStatusAvailable
+		if job.TenantID == tenant {
+			want = model.AssetStatusQuarantined
+		}
+		if asset.Status != want {
+			t.Fatalf("%s's asset is %s, want %s", job.TenantID, asset.Status, want)
+		}
+	}
+}

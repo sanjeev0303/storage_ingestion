@@ -35,6 +35,7 @@ import (
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 
+	"github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/rangeread"
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/retry"
@@ -265,7 +266,16 @@ func (s *Storage) OpenRange(ctx context.Context, bucket, key string, first, last
 	if err != nil {
 		return nil, classify("get object range", err)
 	}
-	return r, nil
+	if length < 0 {
+		return r, nil
+	}
+	// Only the asked-for bytes: from a pack, anything else is a neighbour's.
+	if r.Attrs.StartOffset != first || r.Remain() != length {
+		r.Close()
+		return nil, fmt.Errorf("%w: asked for %d bytes from %d, got %d from %d",
+			rangeread.ErrRangeNotHonoured, length, first, r.Remain(), r.Attrs.StartOffset)
+	}
+	return rangeread.Exact(r, length), nil
 }
 
 func (s *Storage) PresignGet(_ context.Context, bucket, key string, ttl time.Duration, options interfaces.DownloadOptions) (string, error) {

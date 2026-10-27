@@ -161,6 +161,10 @@ func enqueue(ctx context.Context, tx pgx.Tx, now time.Time, maxAttempts int, upl
 }
 
 func (r *ProcessingJobRepository) Claim(ctx context.Context, owner string, now time.Time, lease time.Duration, limit int) ([]model.ProcessingJob, error) {
+	return r.ClaimDue(ctx, owner, now, now, lease, limit)
+}
+
+func (r *ProcessingJobRepository) ClaimDue(ctx context.Context, owner string, dueBy, now time.Time, lease time.Duration, limit int) ([]model.ProcessingJob, error) {
 	if owner == "" || lease <= 0 || limit <= 0 {
 		return nil, fmt.Errorf("claim needs an owner, a positive lease and a positive limit")
 	}
@@ -172,7 +176,7 @@ func (r *ProcessingJobRepository) Claim(ctx context.Context, owner string, now t
 			SELECT id AS due_id
 			FROM processing_jobs
 			WHERE state = 'PENDING'
-			  AND next_attempt_at <= $2
+			  AND next_attempt_at <= $5
 			  AND (lease_expires_at IS NULL OR lease_expires_at <= $2)
 			ORDER BY next_attempt_at
 			LIMIT $4
@@ -187,7 +191,7 @@ func (r *ProcessingJobRepository) Claim(ctx context.Context, owner string, now t
 		FROM due
 		WHERE j.id = due.due_id
 		RETURNING `+jobColumns,
-		owner, now, lease.Seconds(), limit)
+		owner, now, lease.Seconds(), limit, dueBy)
 	if err != nil {
 		return nil, fmt.Errorf("claim processing jobs: %w", err)
 	}

@@ -94,8 +94,8 @@ function Processing({ snap, queued }: { snap: UploadSnapshot; queued: QueuedAs }
   let text = queued.text;
   if (state === "finalizing") text = "Waiting for the upload to finish";
   if (state === "verifying") text = "The server is verifying the checksum";
-  if (state === "processing") text = asset?.status ? `Catalog says ${asset.status}` : "Being checked and scanned";
-  if (state === "available") text = "Catalog says AVAILABLE";
+  if (state === "processing") text = asset?.status === "QUARANTINED" ? "Held in quarantine until the checks finish" : "Being checked and scanned";
+  if (state === "available") text = "Available in the catalog";
   if (state === "rejected") text = `Rejected and kept in quarantine${asset?.rejectionReason ? `: ${asset.rejectionReason.replaceAll("_", " ")}` : ""}`;
   if (state === "failed" || state === "cancelled") text = "Not processed";
 

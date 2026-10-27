@@ -25,6 +25,11 @@ type ProcessingJobRepository interface {
 	// Each claim's lease owner is owner#attempt, so a worker that lost a
 	// job cannot write to it even if the same worker claims it again.
 	Claim(ctx context.Context, owner string, now time.Time, lease time.Duration, limit int) ([]model.ProcessingJob, error)
+	// ClaimDue is Claim for jobs due by dueBy rather than by now (the lease
+	// still runs from now). A cycle that claims as it goes passes its own
+	// start, so a job that failed and became due again in the same cycle
+	// is left for the next one instead of spending its attempts at once.
+	ClaimDue(ctx context.Context, owner string, dueBy, now time.Time, lease time.Duration, limit int) ([]model.ProcessingJob, error)
 	// ClaimJob leases one job the same way, by ID. ok is false when the job
 	// is finished, not due yet or leased by another worker.
 	ClaimJob(ctx context.Context, jobID, owner string, now time.Time, lease time.Duration) (job model.ProcessingJob, ok bool, err error)

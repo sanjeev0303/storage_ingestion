@@ -135,7 +135,7 @@ func (s *Service) build(ctx context.Context, p model.Pack) string {
 		return s.fail(ctx, p, log, err, nil)
 	}
 	next := s.now().Add(s.retryPolicy().Delay(p.Attempts))
-	if rerr := s.deps.Packs.RetryPack(ctx, p.ID, s.cfg.Owner, s.now(), next, retry.Sanitize(err)); rerr != nil {
+	if rerr := s.deps.Packs.RetryPack(ctx, p.ID, p.LeaseOwner, s.now(), next, retry.Sanitize(err)); rerr != nil {
 		log.Error("reschedule pack", "error", rerr)
 		return outcomeLost
 	}
@@ -144,28 +144,40 @@ func (s *Service) build(ctx context.Context, p model.Pack) string {
 	return outcomeRetried
 }
 
-// stillRecorded reports whether the asset is still AVAILABLE and still
-// records the very source object the pack's entry was planned from. A lookup
-// that fails answers no, so the plan is treated as stale, as before.
+// stillRecorded reports whether the source the pack's entry was planned
+// from is still the one on record: the asset's own object while the asset
+// is AVAILABLE, or in a rewrite the old pack while it is still published.
+// A lookup that fails answers no, so the plan is treated as stale, as before.
 func (s *Service) stillRecorded(ctx context.Context, p model.Pack, assetID string) bool {
-	asset, err := s.deps.Assets.GetByID(ctx, p.TenantID, assetID)
-	if err != nil || asset.Status != model.AssetStatusAvailable {
-		return false
-	}
 	entries, err := s.deps.Packs.Entries(ctx, p.ID)
 	if err != nil {
 		return false
 	}
-	for _, e := range entries {
-		if e.AssetID == assetID {
-			return e.SourceKey == asset.ObjectKey && e.SourceETag == asset.StorageETag && e.SourceVersionID == asset.StorageVersionID
+	var entry *model.PackEntry
+	for i := range entries {
+		if entries[i].AssetID == assetID {
+			entry = &entries[i]
 		}
 	}
-	return false
+	if entry == nil {
+		return false
+	}
+	// In a rewrite the source is the old pack, which must still be the
+	// published pack the entry was planned from.
+	if p.RewriteOf != "" {
+		old, err := s.deps.Packs.GetPack(ctx, p.TenantID, p.RewriteOf)
+		return err == nil && old.State == model.PackPublished && entry.SourceKey == old.ObjectKey &&
+			entry.SourceETag == old.StorageETag && entry.SourceVersionID == old.StorageVersionID
+	}
+	asset, err := s.deps.Assets.GetByID(ctx, p.TenantID, assetID)
+	if err != nil || asset.Status != model.AssetStatusAvailable {
+		return false
+	}
+	return entry.SourceKey == asset.ObjectKey && entry.SourceETag == asset.StorageETag && entry.SourceVersionID == asset.StorageVersionID
 }
 
 func (s *Service) fail(ctx context.Context, p model.Pack, log *slog.Logger, cause error, excluded []string) string {
-	if err := s.deps.Packs.FailPack(ctx, p.ID, s.cfg.Owner, s.now(), retry.Sanitize(cause), excluded); err != nil {
+	if err := s.deps.Packs.FailPack(ctx, p.ID, p.LeaseOwner, s.now(), retry.Sanitize(cause), excluded); err != nil {
 		log.Error("record failed pack", "error", err)
 		return outcomeLost
 	}
@@ -185,7 +197,7 @@ func (s *Service) advance(ctx context.Context, p *model.Pack) error {
 		return err
 	}
 	if p.State == model.PackPlanned {
-		if err := s.deps.Packs.AdvancePack(ctx, p.ID, s.cfg.Owner, model.PackPlanned, model.PackWriting, interfaces.PackChange{}, s.now()); err != nil {
+		if err := s.deps.Packs.AdvancePack(ctx, p.ID, p.LeaseOwner, model.PackPlanned, model.PackWriting, interfaces.PackChange{}, s.now()); err != nil {
 			return err
 		}
 		p.State = model.PackWriting
@@ -195,7 +207,7 @@ func (s *Service) advance(ctx context.Context, p *model.Pack) error {
 		if err != nil {
 			return err
 		}
-		if err := s.deps.Packs.AdvancePack(ctx, p.ID, s.cfg.Owner, model.PackWriting, model.PackVerifying, change, s.now()); err != nil {
+		if err := s.deps.Packs.AdvancePack(ctx, p.ID, p.LeaseOwner, model.PackWriting, model.PackVerifying, change, s.now()); err != nil {
 			return err
 		}
 		p.State, p.SHA256, p.StorageETag, p.StorageVersionID = model.PackVerifying, change.SHA256, change.StorageETag, change.StorageVersionID
@@ -204,7 +216,7 @@ func (s *Service) advance(ctx context.Context, p *model.Pack) error {
 	if err != nil {
 		return err
 	}
-	published, dead, err := s.deps.Packs.PublishPack(ctx, p.ID, s.cfg.Owner, manifestSum, s.now())
+	published, dead, err := s.deps.Packs.PublishPack(ctx, p.ID, p.LeaseOwner, manifestSum, s.now())
 	if err != nil {
 		return err
 	}
@@ -219,6 +231,12 @@ func (s *Service) advance(ctx context.Context, p *model.Pack) error {
 // an earlier attempt left at the pack's keys (an unfinished multipart
 // upload, a whole object) is removed first: the keys are the pack's own.
 func (s *Service) write(ctx context.Context, p model.Pack, loc interfaces.StorageLocation, entries []model.PackEntry) (interfaces.PackChange, error) {
+	// The keys may hold a pack another worker has since built and published,
+	// if this one was paused past its lease: the claim is confirmed just
+	// before anything is deleted, and a lost one stops here.
+	if err := s.deps.Packs.RenewPack(ctx, p.ID, p.LeaseOwner, s.now(), s.cfg.Lease); err != nil {
+		return interfaces.PackChange{}, err
+	}
 	if err := s.removeObjects(ctx, p, loc); err != nil {
 		return interfaces.PackChange{}, err
 	}
@@ -393,7 +411,7 @@ func (s *Service) leased(ctx context.Context, p model.Pack, log *slog.Logger) (c
 				return
 			case <-ticker.C:
 			}
-			err := s.deps.Packs.RenewPack(workCtx, p.ID, s.cfg.Owner, s.now(), s.cfg.Lease)
+			err := s.deps.Packs.RenewPack(workCtx, p.ID, p.LeaseOwner, s.now(), s.cfg.Lease)
 			switch {
 			case err == nil:
 				renewed = time.Now()

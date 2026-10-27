@@ -122,8 +122,9 @@ func TestPostgresDeletionWorkflow(t *testing.T) {
 		t.Fatalf("restored asset is %s", got.Status)
 	}
 
-	// Request again; a worker claims it; nobody else can.
-	if _, _, err := repo.SoftDelete(ctx, scheduled(asset, now), []model.AssetStatus{model.AssetStatusAvailable}, event(env.tenant, "deletion_requested", now)); err != nil {
+	// Request again; a worker claims it; nobody else can. The event's time is
+	// past the four concurrent ones above, so its ID never matches the winner's.
+	if _, _, err := repo.SoftDelete(ctx, scheduled(asset, now), []model.AssetStatus{model.AssetStatusAvailable}, event(env.tenant, "deletion_requested", now.Add(4))); err != nil {
 		t.Fatal(err)
 	}
 	claimed, err := repo.Claim(ctx, "worker-a", now.Add(time.Second), time.Minute, 50, env.tenant)

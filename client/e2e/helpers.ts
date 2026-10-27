@@ -16,7 +16,7 @@ export async function signIn(page: Page, who: Who) {
   const { email, password } = credentials(who);
   await page.goto("/login");
   await page.getByLabel("Email").fill(email);
-  await page.getByLabel("Password").fill(password);
+  await page.getByLabel("Password", { exact: true }).fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
   await page.waitForURL(/\/app\//);
 }
@@ -36,7 +36,7 @@ export async function uploadThroughUi(page: Page, name: string, body: Buffer) {
   await page.goto("/app/ingestion/uploads");
   await page.getByTestId("file-input").setInputFiles({ name, mimeType: "application/octet-stream", buffer: body });
   await page.getByRole("button", { name: "Start upload" }).click();
-  await expect(page.getByText("Catalog says AVAILABLE")).toBeVisible({ timeout: 90_000 });
+  await expect(page.getByText("Available in the catalog")).toBeVisible({ timeout: 90_000 });
   const href = await page.getByRole("link", { name: "Open in catalog" }).getAttribute("href");
   return href!.split("/").pop()!;
 }

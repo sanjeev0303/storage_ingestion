@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
+	"github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/rangeread"
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
 )
 
@@ -86,5 +87,14 @@ func (s *ObjectStorage) OpenRange(
 	if err != nil {
 		return nil, classify("get object range", err)
 	}
-	return out.Body, nil
+	if last < 0 {
+		return out.Body, nil
+	}
+	// A provider (or a proxy in front of it) that ignores Range answers 200
+	// with the whole object: from a pack, that is the neighbours' bytes too.
+	if err := rangeread.CheckContentRange(aws.ToString(out.ContentRange), first, last); err != nil {
+		out.Body.Close()
+		return nil, err
+	}
+	return rangeread.Exact(out.Body, last-first+1), nil
 }

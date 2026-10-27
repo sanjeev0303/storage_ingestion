@@ -50,7 +50,9 @@ const inflight = new Map<string, Promise<Tokens | null>>();
 const recent = new Map<string, { tokens: Tokens | null; until: number }>();
 const RECENT_MS = 30_000;
 
-export async function refreshTokens(refreshToken: string): Promise<Tokens | null> {
+// clientIP is the caller's address (clientAddress), passed on so the API's
+// per-address refresh limit counts each caller, not the console as a whole.
+export async function refreshTokens(refreshToken: string, clientIP = ""): Promise<Tokens | null> {
   const now = Date.now();
   for (const [token, entry] of recent) {
     if (entry.until < now) recent.delete(token);
@@ -62,7 +64,7 @@ export async function refreshTokens(refreshToken: string): Promise<Tokens | null
   const running = inflight.get(refreshToken);
   if (running) return running;
 
-  const attempt = requestRefresh(refreshToken)
+  const attempt = requestRefresh(refreshToken, clientIP)
     .then((tokens) => {
       recent.set(refreshToken, { tokens, until: Date.now() + RECENT_MS });
       return tokens;
@@ -72,10 +74,12 @@ export async function refreshTokens(refreshToken: string): Promise<Tokens | null
   return attempt;
 }
 
-async function requestRefresh(refreshToken: string): Promise<Tokens | null> {
+async function requestRefresh(refreshToken: string, clientIP: string): Promise<Tokens | null> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (clientIP) headers["x-forwarded-for"] = clientIP;
   const res = await fetch(`${BACKEND_URL}/api/v1/auth/refresh`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify({ refresh_token: refreshToken }),
     cache: "no-store",
   });
@@ -84,10 +88,26 @@ async function requestRefresh(refreshToken: string): Promise<Tokens | null> {
   return (await res.json()) as Tokens;
 }
 
+// How many proxies the console runs behind. Each appends the address it saw
+// to X-Forwarded-For, so the caller is that many entries from the end, and
+// anything before is whatever the caller wrote itself. With none (local
+// development), Next.js sets the header to the connection's address only
+// when the request has none: a caller reaching the console directly can
+// still choose its own, so production runs the console behind a proxy.
+const TRUSTED_PROXY_HOPS = Math.max(0, Number.parseInt(process.env.TRUSTED_PROXY_HOPS ?? "0", 10) || 0);
+
+// An IPv4 or IPv6 address, and nothing else that could ride into a header.
+const ADDRESS = /^[0-9A-Fa-f.:]{2,45}$/;
+
+// The caller's address, sent to the API as the one X-Forwarded-For entry it
+// trusts (the last). Empty when there is none worth trusting.
 export function clientAddress(req: NextRequest) {
-  const forwarded = req.headers.get("x-forwarded-for");
-  const direct = req.headers.get("x-real-ip");
-  return forwarded ?? direct ?? "";
+  const entries = (req.headers.get("x-forwarded-for") ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  const address = entries[entries.length - Math.max(TRUSTED_PROXY_HOPS, 1)] ?? "";
+  return ADDRESS.test(address) ? address : "";
 }
 
 // Cookies are SameSite=Strict, which already stops cross-site requests. The

@@ -110,16 +110,18 @@ func TestRateLimitAnswers429WithRetryAfter(t *testing.T) {
 
 func TestClientAddressIgnoresForwardedHeadersUnlessTrusted(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/x", nil)
-	r.RemoteAddr = "203.0.113.5:4444"
+	r.RemoteAddr = "192.0.2.10:4444" // the console
+	// The client put 10.9.9.9 in the header itself; the console added
+	// 203.0.113.5, the address it saw.
 	r.Header.Set("X-Forwarded-For", "10.9.9.9, 203.0.113.5")
-	if got := middleware.RemoteIP(r, false); got != "203.0.113.5" {
+	if got := middleware.RemoteIP(r, false); got != "192.0.2.10" {
 		t.Fatalf("untrusted: %s", got)
 	}
-	if got := middleware.RemoteIP(r, true); got != "10.9.9.9" {
-		t.Fatalf("trusted: %s", got)
+	if got := middleware.RemoteIP(r, true); got != "203.0.113.5" {
+		t.Fatalf("trusted: %s, want the entry the trusted proxy wrote, never the client's own", got)
 	}
 	r.Header.Set("X-Forwarded-For", "not-an-address")
-	if got := middleware.RemoteIP(r, true); got != "203.0.113.5" {
+	if got := middleware.RemoteIP(r, true); got != "192.0.2.10" {
 		t.Fatalf("a malformed header falls back to the connection: %s", got)
 	}
 }

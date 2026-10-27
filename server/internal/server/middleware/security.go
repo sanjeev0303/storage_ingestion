@@ -15,8 +15,9 @@ import (
 
 // ClientIP records the client's address in the request context, for
 // sign-in throttling and audit records. The connection's address is used
-// unless trustProxy is set, in which case the first X-Forwarded-For entry
-// is: only correct behind a proxy that sets that header itself.
+// unless trustProxy is set, in which case the last X-Forwarded-For entry
+// is: the one the trusted proxy in front of the API (the console) wrote.
+// Entries before it are whatever the client sent, so they are never used.
 func ClientIP(trustProxy bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := RemoteIP(r, trustProxy)
@@ -28,8 +29,8 @@ func ClientIP(trustProxy bool, next http.Handler) http.Handler {
 func RemoteIP(r *http.Request, trustProxy bool) string {
 	if trustProxy {
 		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-			first, _, _ := strings.Cut(forwarded, ",")
-			if ip := net.ParseIP(strings.TrimSpace(first)); ip != nil {
+			entries := strings.Split(forwarded, ",")
+			if ip := net.ParseIP(strings.TrimSpace(entries[len(entries)-1])); ip != nil {
 				return ip.String()
 			}
 		}

@@ -2,7 +2,8 @@
 // the browser gets a generic message and a reference, never the cause.
 
 // Tokens and credentials must not land in a log file either.
-const SECRET = /\b(?:sat|srt)_[A-Za-z0-9_-]+|Bearer\s+\S+|("?(?:access_token|refresh_token|password|secret\w*)"?\s*[:=]\s*)"?[^"\s,}]+/gi;
+// Download links carry a bare token after downloads/, with no prefix.
+const SECRET = /\b(?:sat|srt|sct|sit)_[A-Za-z0-9_-]+|downloads\/[A-Za-z0-9_-]+|Bearer\s+\S+|("?(?:access_token|refresh_token|password|secret\w*|token)"?\s*[:=]\s*)"?[^"\s,}]+/gi;
 
 export function redact(text: string, max = 2000) {
   return text.replace(SECRET, (_match, key) => (key ? `${key}[redacted]` : "[redacted]")).slice(0, max);

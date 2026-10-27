@@ -20,7 +20,7 @@ The token refresh de-duplication lives in process memory, so run one Node instan
 
 ## Run it locally
 
-Requirements: Node 22+, and the backend running. The backend needs PostgreSQL, MinIO and the API with its workers; follow `../server/docs/security.md` ("starting the stack") and the runbooks in `../server/docs/`. Neon or any other Postgres configuration stays in the backend's own environment; the console has no database.
+Requirements: Node 22.22.2 or later on the 22 line, 24.15 or later, or 26+ (the locked `jsdom`, `vite`, `msw` and `undici` versions require it; 22.16 is too old), and the backend running. The backend needs PostgreSQL, MinIO and the API with its workers; follow `../server/docs/security.md` ("starting the stack") and the runbooks in `../server/docs/`. Neon or any other Postgres configuration stays in the backend's own environment; the console has no database.
 
 ```bash
 cd client
