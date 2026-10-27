@@ -51,7 +51,7 @@ The pack worker (`cmd/pack-worker`) reads `PACKING_*` (all in `.env.example`); `
 | `PACKING_MIN_AGE` | 1h | How long after publication an asset becomes a candidate. New assets are often read or replaced at once. |
 | `PACKING_TARGET_PACK_BYTES` / `PACKING_MAX_PACK_BYTES` | 64 MiB / 256 MiB | A pack is filled to the target; the maximum (at most 5 GiB) bounds it. |
 | `PACKING_MAX_ENTRIES` | 10000 | Entries per pack, and the manifest parser's limit. |
-| `PACKING_SOURCE_CONCURRENCY` | 16 | Sources read ahead per pack. A writer holds at most this × the maximum object size (at most 1 GiB). |
+| `PACKING_SOURCE_CONCURRENCY` | 16 | Sources read ahead per pack. A writer holds at most this + 1 sources of up to the maximum object size (the product is capped at 1 GiB); see Memory below. |
 | `PACKING_ACTIVE_WRITERS` | 2 | Packs one worker builds at once. |
 | `PACKING_TENANT_ACTIVE_PACKS` | 1 | Packs of one tenant being built at once, across workers, so no tenant takes every writer. |
 | `PACKING_TENANTS_PER_CYCLE` / `PACKING_TENANTS` | 16 / all | Tenants planned per cycle, in turn; `PACKING_TENANTS` limits packing to a list of organizations. |
@@ -99,7 +99,7 @@ Each cycle plans, builds and retires; a failing step is logged and the others st
 **Build.** The worker claims due packs (taking a lease and counting an attempt), then:
 
 1. Moves the pack from `PLANNED` to `WRITING`.
-2. Deletes anything at the pack's keys and aborts unfinished uploads there.
+2. Renews its lease, then deletes anything at the pack's keys and aborts unfinished uploads there. A worker paused past its lease stops at the renewal, so it can never delete a pack another worker has since written and published.
 3. Streams every source into one upload, each read pinned to its recorded ETag or version.
 4. Checks that every entry landed at its planned offset and that the stored size is right.
 5. Moves the pack to `VERIFYING`, recording the pack's SHA-256 and ETag.
@@ -107,13 +107,19 @@ Each cycle plans, builds and retires; a failing step is logged and the others st
 7. Writes the manifest and reads it back.
 8. Publishes.
 
+**Memory.** A writer holds the sources being fetched (`PACKING_SOURCE_CONCURRENCY`, C), the one being written, and one upload buffer: the whole pack when it fits in one part, otherwise one part (`STORAGE_TRANSFER_PART_BYTES`, P, 16 MiB). With W = `PACKING_ACTIVE_WRITERS` and M = `PACKING_MAX_OBJECT_BYTES`, the live pack data of one worker is at most
+
+    W × ((C + 1) × M + min(pack size, P))
+
+At the defaults (W 2, C 16, M 1 MiB, P 16 MiB) that is 66 MiB. Measured heap is higher, because it also holds garbage not yet collected and the SDK's own buffers. Phase 15 measured one writer with C = 16 (`TestPackingBenchmark`, see `phase15-report.md`): peak heap in use 8.7 MiB for 500 × 4 KiB, 40.3 MiB for 5,000 × 4 KiB, 48.1 MiB for 2,000 × 64 KiB. The bound does not depend on how many entries a pack has, only on C, M and P.
+
 With `EVENT_QUEUE=sqs`, `pack.planned` events on the `packing` queue start builds at once; polling remains the safety net.
 
 **Publish.** One transaction locks the entries' assets and publishes each entry whose asset is still the same bytes (`AVAILABLE` or `SOFT_DELETED`, same ETag); the others become `DELETED`. Readers see a pack whole or not at all.
 
 **Retire.** The worker:
 
-- deletes sources past their grace period;
+- deletes sources past their grace period, including the standalone objects of entries a rewrite has since moved to a new pack;
 - retires packs with no published entries;
 - plans rewrites;
 - deletes the objects of retired and failed packs after `PACKING_REMOVE_AFTER`;
@@ -125,11 +131,12 @@ With `EVENT_QUEUE=sqs`, `pack.planned` events on the `packing` queue start build
 |---|---|
 | Worker stops while `WRITING` | The lease expires; another worker writes again from scratch. |
 | Worker stops while `VERIFYING` | Another worker verifies the stored pack and publishes it as written. |
-| Lease lost (another worker took over) | The lease check refuses the step's write; the other worker carries on. |
+| Lease lost (another worker took over) | The lease check refuses the step's write; the other worker carries on. Each claim has its own lease owner (`<worker>#<attempt>`), so this holds even when the same worker process claims the pack again after its lease expired. |
 | A source's bytes do not match its recorded size or SHA-256 | The pack fails. That asset's entry is `EXCLUDED` and it is never packed again; the others are released and planned again. |
 | A source's object is missing or replaced while its asset still records it (`AVAILABLE`, same key, ETag and version) | Planned again it would fail again every cycle, so it is treated the same way: the pack fails, that entry is `EXCLUDED`, the others are planned again. |
 | A source is gone or replaced since planning | The pack fails at once, without retries. Its entries are released and planned again as they are now. |
 | The stored pack or manifest does not read back as written | The pack fails; its assets are planned again. |
+| A rewrite cannot read an entry from the old pack (its object lost or damaged) | The rewrite fails, and that entry of the old pack is `EXCLUDED`, so the next rewrite leaves it out instead of failing again every cycle. Once no live entry is left, the old pack is retired and waiting deletions complete. The asset is then read from its own object, which may already have been retired: the loss was outside the platform, and the cleanup worker's missing-object check reports it. |
 | Storage or database errors | Retried with backoff; after `PACKING_MAX_ATTEMPTS` the pack fails. |
 | A pack has failed | Its objects are deleted after `PACKING_REMOVE_AFTER`, then it is `DELETED`. Assets were never served from it. |
 
@@ -141,6 +148,7 @@ Readers resolve an asset as before (authorization, status, key check), then ask 
 
 - A full download reads `[offset, offset + length − 1]`. A client range is mapped inside the entry and refused past its end, so no request can reach a neighbour's bytes.
 - Reads are pinned to the pack's ETag or version; a `HEAD` checks the pack's size and ETag.
+- Every ranged read is checked against what was asked for: the provider's `Content-Range` (S3, Azure) or start offset and length (GCS) must match, and the body must be exactly that many bytes. A provider that ignores `Range` and sends the whole pack, or sends too many bytes, fails the read (`ErrRangeNotHonoured`); neighbours' bytes are never passed on.
 - A full read is hashed as it streams. If the bytes are not the asset's, it ends in an error, not a clean end.
 - The download's ETag and size are still the asset's own.
 - Packed assets get token links only, never a presigned or CDN URL: a `storage` request gets a token link instead. With `DELIVERY_PROXY_ENABLED=false` a download URL for a packed asset is refused; streaming it through the API still works.

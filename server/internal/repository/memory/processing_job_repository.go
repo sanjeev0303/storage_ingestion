@@ -122,6 +122,10 @@ func (r *ProcessingJobRepository) hasJob(assetID string) bool {
 }
 
 func (r *ProcessingJobRepository) Claim(ctx context.Context, owner string, now time.Time, lease time.Duration, limit int) ([]model.ProcessingJob, error) {
+	return r.ClaimDue(ctx, owner, now, now, lease, limit)
+}
+
+func (r *ProcessingJobRepository) ClaimDue(ctx context.Context, owner string, dueBy, now time.Time, lease time.Duration, limit int) ([]model.ProcessingJob, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -132,7 +136,7 @@ func (r *ProcessingJobRepository) Claim(ctx context.Context, owner string, now t
 	var due []model.ProcessingJob
 	for _, job := range r.jobs {
 		leaseFree := job.LeaseExpiresAt == nil || !job.LeaseExpiresAt.After(now)
-		if job.State == model.ProcessingPending && !job.NextAttemptAt.After(now) && leaseFree {
+		if job.State == model.ProcessingPending && !job.NextAttemptAt.After(dueBy) && leaseFree {
 			due = append(due, job)
 		}
 	}

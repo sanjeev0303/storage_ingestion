@@ -63,6 +63,7 @@ describe.skipIf(!enabled)("engine against the real API and MinIO", () => {
       { put: put as never, store: memoryStore(), pollMs: 1000, maxPolls: 90 },
     );
     await upload.run();
+    await upload.settled();
     return upload.getSnapshot();
   }
 

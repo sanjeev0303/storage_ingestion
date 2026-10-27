@@ -419,7 +419,9 @@ func TestPackingRecoversFromCrashesAndDuplicateWorkers(t *testing.T) {
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("claim: %v", err)
 	}
-	if err := rig.repo.AdvancePack(ctx, p.ID, "crashed", model.PackPlanned, model.PackWriting, interfaces.PackChange{}, time.Now().UTC()); err != nil {
+	// A claim's owner is the worker's id and the attempt: "crashed#1".
+	crashed := claimed[0].LeaseOwner
+	if err := rig.repo.AdvancePack(ctx, p.ID, crashed, model.PackPlanned, model.PackWriting, interfaces.PackChange{}, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	s.ie.storage.PutObject(p.ObjectKey, []byte("half a pack"))
@@ -455,10 +457,12 @@ func TestPackingRecoversFromCrashesAndDuplicateWorkers(t *testing.T) {
 	}
 	all := rig.packs(t, tenant)
 	q := all[len(all)-1]
-	if _, err := rig.repo.ClaimPacks(ctx, "crashed", time.Now().UTC(), time.Minute, 1); err != nil {
-		t.Fatal(err)
+	again, err := rig.repo.ClaimPacks(ctx, "crashed", time.Now().UTC(), time.Minute, 1)
+	if err != nil || len(again) != 1 {
+		t.Fatalf("claim: %v", err)
 	}
-	if err := rig.repo.AdvancePack(ctx, q.ID, "crashed", model.PackPlanned, model.PackWriting, interfaces.PackChange{}, time.Now().UTC()); err != nil {
+	crashed = again[0].LeaseOwner
+	if err := rig.repo.AdvancePack(ctx, q.ID, crashed, model.PackPlanned, model.PackWriting, interfaces.PackChange{}, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	sort.Slice(extra, func(i, j int) bool { return extra[i].ID < extra[j].ID })
@@ -471,7 +475,7 @@ func TestPackingRecoversFromCrashesAndDuplicateWorkers(t *testing.T) {
 		t.Fatal(err)
 	}
 	change := interfaces.PackChange{SHA256: sha256Of(written), StorageETag: meta.ETag, StorageVersionID: meta.VersionID}
-	if err := rig.repo.AdvancePack(ctx, q.ID, "crashed", model.PackWriting, model.PackVerifying, change, time.Now().UTC()); err != nil {
+	if err := rig.repo.AdvancePack(ctx, q.ID, crashed, model.PackWriting, model.PackVerifying, change, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	expireLease(t, s, q.ID)
@@ -606,6 +610,108 @@ func TestPackedAssetDeletionWaitsForTheRewrite(t *testing.T) {
 	}
 	if state, _ := deletionOf(t, s, gone.ID); state != string(model.DeletionCompleted) {
 		t.Fatalf("deletion %s", state)
+	}
+}
+
+// A rewrite whose old pack has lost its object: every entry it tries to
+// move fails. Each is excluded from the old pack once, so rewrites stop being
+// planned instead of failing every cycle, the emptied pack is retired, and
+// the deletion that asked for the rewrite completes.
+func TestPackingRewriteOfADamagedPackDoesNotLoop(t *testing.T) {
+	s := openSecurityStack(t, nil)
+	ctx := context.Background()
+	acme := s.team(t, "pack-loop")
+	dev := acme.developer
+	assets, _ := s.smallAssets(t, dev, "loop", 4)
+	rig := s.packingRig(t)
+	tenants := []string{acme.org.ID}
+	w := rig.worker(t, "w1", nil, tenants, func(c *config.Packing) { c.SourceRetireAfter = 0 })
+	if stats := rig.run(t, w); stats.Published != 1 || stats.SourcesRetired != 4 {
+		t.Fatalf("packed and retired: %+v", stats)
+	}
+	old := rig.packs(t, acme.org.ID)[0]
+	gone := assets[1]
+	if _, err := s.lifecycle.RequestDeletion(ctx, dev, gone.ID); err != nil {
+		t.Fatal(err)
+	}
+	var cycle assetservice.CycleStats
+	if err := s.lifecycle.ProcessDeletions(ctx, &cycle); err != nil || cycle.WaitingForPack != 1 {
+		t.Fatalf("waits for the pack: %+v %v", cycle, err)
+	}
+	// The pack object is lost out of band: no rewrite can read it.
+	if err := s.ie.storage.DeleteObject(ctx, s.ie.bucket, old.ObjectKey); err != nil {
+		t.Fatal(err)
+	}
+
+	impatient := rig.worker(t, "w2", nil, tenants, func(c *config.Packing) { c.MaxDeletionDelay = time.Nanosecond })
+	failed := 0
+	for range 10 {
+		failed += rig.run(t, impatient).Failed
+	}
+	if failed != 3 {
+		t.Fatalf("%d failed rewrites; want one for each of the three live entries, then none", failed)
+	}
+	if n := len(rig.packs(t, acme.org.ID)); n != 4 {
+		t.Fatalf("%d packs; want the old one and three failed rewrites, no more", n)
+	}
+	states := rig.stateOf(t, old.ID)
+	for _, a := range assets {
+		want := model.PackEntryExcluded
+		if a.ID == gone.ID {
+			want = model.PackEntryDeleted
+		}
+		if states[a.ID] != want {
+			t.Fatalf("old pack entry of %s is %s, want %s", a.ID, states[a.ID], want)
+		}
+	}
+	makeDue(t, s, gone.ID)
+	cycle = assetservice.CycleStats{}
+	if err := s.lifecycle.ProcessDeletions(ctx, &cycle); err != nil || cycle.Completed != 1 {
+		t.Fatalf("the deletion completes once the pack is retired: %+v %v", cycle, err)
+	}
+}
+
+// A rewrite can move an entry before its standalone copy was retired (a
+// grace period, a hold). The copy is still retired afterwards, and the
+// asset is still served, from its new pack.
+func TestPackingRetiresTheStandaloneCopyOfAMovedEntry(t *testing.T) {
+	s := openSecurityStack(t, nil)
+	ctx := context.Background()
+	acme := s.team(t, "pack-moved")
+	dev := acme.developer
+	assets, data := s.smallAssets(t, dev, "moved", 4)
+	rig := s.packingRig(t)
+	tenants := []string{acme.org.ID}
+	w := rig.worker(t, "w1", nil, tenants, nil) // a 24h grace period: nothing retired yet
+	if stats := rig.run(t, w); stats.Published != 1 || stats.SourcesRetired != 0 {
+		t.Fatalf("packed, sources kept: %+v", stats)
+	}
+	gone := assets[1]
+	if _, err := s.lifecycle.RequestDeletion(ctx, dev, gone.ID); err != nil {
+		t.Fatal(err)
+	}
+	var cycle assetservice.CycleStats
+	if err := s.lifecycle.ProcessDeletions(ctx, &cycle); err != nil {
+		t.Fatal(err)
+	}
+	impatient := rig.worker(t, "w2", nil, tenants, func(c *config.Packing) { c.MaxDeletionDelay = time.Nanosecond })
+	rig.run(t, impatient)
+	if stats := rig.run(t, impatient); stats.Published != 1 {
+		t.Fatalf("rewrite published: %+v", stats)
+	}
+
+	retirer := rig.worker(t, "w3", nil, tenants, func(c *config.Packing) { c.SourceRetireAfter = 0 })
+	if stats := rig.run(t, retirer); stats.SourcesRetired != 3 {
+		t.Fatalf("%d standalone copies retired; want the three moved entries'", stats.SourcesRetired)
+	}
+	for _, a := range assets {
+		if a.ID == gone.ID {
+			continue
+		}
+		if _, ok := s.ie.storage.Object(a.ObjectKey); ok {
+			t.Fatalf("the standalone copy of %s is still stored", a.ID)
+		}
+		s.mustDownload(t, dev, a.ID, data[a.ID])
 	}
 }
 

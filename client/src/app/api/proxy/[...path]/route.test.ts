@@ -183,4 +183,77 @@ describe("API proxy", () => {
     });
     expect(res.status).toBe(204);
   });
+
+  it("sends the API one caller address it can trust, never the caller's own forwarded entries", async () => {
+    let forwarded: string | null = "unset";
+    server.use(
+      http.get(`${BACKEND}/catalog/objects`, ({ request }) => {
+        forwarded = request.headers.get("x-forwarded-for");
+        return HttpResponse.json({ objects: [] });
+      }),
+    );
+    // With no proxy in front, the last entry is the connection's address;
+    // anything the caller wrote before it is dropped.
+    await call(GET, "catalog/objects", {
+      cookie: "osp_at=sat_ip; osp_rt=srt_ip",
+      headers: { "x-forwarded-for": "10.9.9.9, 203.0.113.5" },
+    });
+    expect(forwarded).toBe("203.0.113.5");
+    // Something that is not an address is not forwarded at all.
+    await call(GET, "catalog/objects", {
+      cookie: "osp_at=sat_ip; osp_rt=srt_ip",
+      headers: { "x-forwarded-for": "not-an-address" },
+    });
+    expect(forwarded).toBeNull();
+  });
+
+  it("passes the caller's address on the refresh it makes", async () => {
+    let refreshFrom: string | null = null;
+    server.use(
+      http.post(`${BACKEND}/auth/refresh`, ({ request }) => {
+        refreshFrom = request.headers.get("x-forwarded-for");
+        return HttpResponse.json(freshTokens("ipr"));
+      }),
+      http.get(`${BACKEND}/catalog/objects`, () => HttpResponse.json({ objects: [] })),
+    );
+    const res = await call(GET, "catalog/objects", { cookie: "osp_rt=srt_ip_refresh", headers: { "x-forwarded-for": "198.51.100.7" } });
+    expect(res.status).toBe(200);
+    expect(refreshFrom).toBe("198.51.100.7");
+  });
+
+  it("refuses a body without a session before reading it, and caps the size of any body", async () => {
+    let reached = false;
+    server.use(
+      http.post(`${BACKEND}/uploads`, () => {
+        reached = true;
+        return HttpResponse.json({});
+      }),
+    );
+    const anonymous = await call(POST, "uploads", { method: "POST", body: "x".repeat(1000), headers: { origin: "http://localhost:3100" } });
+    expect(anonymous.status).toBe(401);
+
+    const tooLarge = await call(POST, "uploads", {
+      method: "POST",
+      cookie: "osp_at=sat_big; osp_rt=srt_big",
+      headers: { origin: "http://localhost:3100", "content-length": String(18 * 1024 * 1024) },
+      body: "{}",
+    });
+    expect(tooLarge.status).toBe(413);
+    expect(reached).toBe(false);
+  });
+
+  it("keeps an encoded ? in a path segment encoded, so it cannot become a query", async () => {
+    let seenPath = "";
+    server.use(
+      http.get(`${BACKEND}/*`, ({ request }) => {
+        seenPath = new URL(request.url).pathname + new URL(request.url).search;
+        return HttpResponse.json({});
+      }),
+    );
+    const req = new NextRequest("http://localhost:3100/api/proxy/auth/login%3Fx", {
+      headers: { cookie: "osp_at=sat_q; osp_rt=srt_q" },
+    });
+    await GET(req, { params: Promise.resolve({ path: ["auth", "login?x"] }) });
+    expect(seenPath).toBe("/api/v1/auth/login%3Fx");
+  });
 });

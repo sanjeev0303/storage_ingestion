@@ -200,12 +200,16 @@ func (s *Service) RunOnce(ctx context.Context) (CycleStats, error) {
 	// A job is claimed only when a slot is free for it. A job claimed ahead
 	// would wait out a slow one (a large scan) holding its lease, so no other
 	// worker or event consumer could run it meanwhile either.
+	// Only jobs due when the cycle began: one that fails and is due again
+	// meanwhile waits for the next cycle, as it did when claims were taken
+	// all at once, rather than spending its attempts in this one.
+	cycleStart := s.now()
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	slots := make(chan struct{}, s.cfg.Concurrency)
 	for stats.Claimed < s.cfg.BatchSize && ctx.Err() == nil {
 		slots <- struct{}{}
-		jobs, err := s.deps.Jobs.Claim(ctx, s.cfg.Owner, s.now(), s.cfg.Lease, 1)
+		jobs, err := s.deps.Jobs.ClaimDue(ctx, s.cfg.Owner, cycleStart, s.now(), s.cfg.Lease, 1)
 		if err != nil || len(jobs) == 0 {
 			<-slots
 			if err != nil {

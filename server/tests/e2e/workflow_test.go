@@ -391,9 +391,11 @@ func (c *client) checkStored(db *pgx.Conn, uploadID string, version map[string]a
 	if err := db.QueryRow(context.Background(), `SELECT object_key FROM upload_sessions WHERE id = $1`, uploadID).Scan(&staged); err != nil {
 		t.Fatal(err)
 	}
-	if c.s.objectExists(bucket, staged) {
-		t.Fatalf("the staged object %s/%s is still there after promotion", bucket, staged)
-	}
+	// The version is published before the cleanup step deletes the staged
+	// copy, a moment later in the same pass.
+	eventually(t, 10*time.Second, fmt.Sprintf("the staged object %s/%s to be deleted after promotion", bucket, staged), func() bool {
+		return !c.s.objectExists(bucket, staged)
+	})
 	for _, prefix := range []string{"assets/" + c.org + "/", "quarantine/" + c.org + "/"} {
 		if keys := c.s.keysIn(c.s.platform, prefix); len(keys) > 0 {
 			t.Fatalf("the platform bucket holds the tenant's objects: %v", keys)

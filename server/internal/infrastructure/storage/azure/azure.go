@@ -39,6 +39,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/sas"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/service"
 
+	"github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/rangeread"
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/retry"
@@ -276,7 +277,19 @@ func (s *Storage) OpenRange(ctx context.Context, bucket, key string, first, last
 	if err != nil {
 		return nil, classify("get object range", err)
 	}
-	return r.Body, nil
+	if last < 0 {
+		return r.Body, nil
+	}
+	// Only the asked-for bytes: from a pack, anything else is a neighbour's.
+	if r.ContentRange == nil {
+		r.Body.Close()
+		return nil, fmt.Errorf("%w: no Content-Range in the answer", rangeread.ErrRangeNotHonoured)
+	}
+	if err := rangeread.CheckContentRange(*r.ContentRange, first, last); err != nil {
+		r.Body.Close()
+		return nil, err
+	}
+	return rangeread.Exact(r.Body, last-first+1), nil
 }
 
 func (s *Storage) PresignGet(_ context.Context, bucket, key string, ttl time.Duration, options interfaces.DownloadOptions) (string, error) {

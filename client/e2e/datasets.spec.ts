@@ -26,7 +26,7 @@ test("developer builds a dataset, snapshots it, validates it and reads the repor
     await page.goto(`/app/datasets/${datasetId}/members`);
     await page.getByRole("button", { name: "Add members" }).click();
     const dialog = page.getByRole("dialog", { name: "Add members" });
-    await dialog.getByLabel("Path", { exact: true }).fill(objectName);
+    await dialog.getByLabel("Path (required)").fill(objectName);
     await dialog.getByRole("button", { name: "Add member", exact: true }).click();
     await expect(page.getByRole("cell", { name: objectName })).toBeVisible();
     if (await dialog.isVisible()) await page.keyboard.press("Escape");

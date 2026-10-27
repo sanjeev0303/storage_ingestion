@@ -270,9 +270,14 @@ func nullable(s string) any {
 
 // ─── Building ─────────────────────────────────────────────────────────
 
+// ClaimPacks and ClaimPack record the claim's owner as owner#attempt, as
+// processing jobs do: two paths of one worker process (the poll and the
+// event consumer) share an owner string, and only the claim that is current
+// may write. Later calls pass the pack's LeaseOwner.
 func (r *PackRepository) ClaimPacks(ctx context.Context, owner string, now time.Time, lease time.Duration, limit int) ([]model.Pack, error) {
 	packs, err := collectPacks(r.db.Pool.Query(ctx, `
-		UPDATE packs SET lease_owner = $1, lease_expires_at = $2::timestamptz + make_interval(secs => $3),
+		UPDATE packs SET lease_owner = $1 || '#' || (attempts + 1)::text,
+		                 lease_expires_at = $2::timestamptz + make_interval(secs => $3),
 		                 attempts = attempts + 1, updated_at = $2
 		WHERE id IN (
 			SELECT id FROM packs
@@ -290,7 +295,8 @@ func (r *PackRepository) ClaimPacks(ctx context.Context, owner string, now time.
 
 func (r *PackRepository) ClaimPack(ctx context.Context, tenantID, packID, owner string, now time.Time, lease time.Duration) (model.Pack, bool, error) {
 	p, err := scanPack(r.db.Pool.QueryRow(ctx, `
-		UPDATE packs SET lease_owner = $3, lease_expires_at = $4::timestamptz + make_interval(secs => $5),
+		UPDATE packs SET lease_owner = $3 || '#' || (attempts + 1)::text,
+		                 lease_expires_at = $4::timestamptz + make_interval(secs => $5),
 		                 attempts = attempts + 1, updated_at = $4
 		WHERE tenant_id = $1 AND id = $2 AND state IN ('PLANNED', 'WRITING', 'VERIFYING') AND next_attempt_at <= $4
 		  AND (lease_expires_at IS NULL OR lease_expires_at <= $4)
@@ -375,6 +381,17 @@ func (r *PackRepository) FailPack(ctx context.Context, packID, owner string, now
 		`, packID, excluded, now)
 		if err != nil {
 			return fmt.Errorf("release pack entries: %w", err)
+		}
+		// In a rewrite, the damaged source is the old pack's entry: it is
+		// excluded too, or every later rewrite would plan it and fail again.
+		_, err = tx.Exec(ctx, `
+			UPDATE pack_entries o SET state = 'EXCLUDED', updated_at = $3
+			FROM packs p
+			WHERE p.id = $1 AND p.rewrite_of IS NOT NULL AND o.pack_id = p.rewrite_of
+			  AND o.asset_id = ANY($2) AND o.state = 'PUBLISHED'
+		`, packID, excluded, now)
+		if err != nil {
+			return fmt.Errorf("exclude rewritten entries: %w", err)
 		}
 		return nil
 	})
@@ -472,8 +489,15 @@ func (r *PackRepository) SourcesToRetire(ctx context.Context, cutoff time.Time, 
 	entries, err := collectPackEntries(r.db.Pool.Query(ctx, `
 		SELECT `+packEntryColumns+`
 		FROM pack_entries e JOIN packs p ON p.id = e.pack_id
-		WHERE e.state = 'PUBLISHED' AND e.source_retired_at IS NULL
-		  AND p.state = 'PUBLISHED' AND p.published_at <= $1 AND p.rewrite_of IS NULL
+		WHERE e.source_retired_at IS NULL AND p.rewrite_of IS NULL AND p.published_at <= $1
+		  AND ((e.state = 'PUBLISHED' AND p.state = 'PUBLISHED')
+		       -- Moved by a rewrite before its standalone copy was retired:
+		       -- the copy is still this entry's to retire, while the asset is
+		       -- served from its new pack.
+		       OR (e.state = 'MOVED' AND EXISTS (
+		             SELECT 1 FROM pack_entries n JOIN packs np ON np.id = n.pack_id
+		             WHERE n.asset_id = e.asset_id AND n.tenant_id = e.tenant_id
+		               AND n.state = 'PUBLISHED' AND np.state = 'PUBLISHED')))
 		  AND NOT EXISTS (
 			SELECT 1 FROM assets a JOIN legal_holds h ON h.tenant_id = a.tenant_id AND h.released_at IS NULL
 			WHERE a.id = e.asset_id

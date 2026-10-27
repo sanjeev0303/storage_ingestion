@@ -10,7 +10,7 @@ test("a new person registers, owns an organization, and is signed in", async ({ 
   await page.getByLabel(/organization name/i).fill("Registered Labs");
   await page.getByLabel("Your name").fill("Reggie");
   await page.getByLabel("Email").fill(email);
-  await page.getByLabel("Password").fill(password);
+  await page.getByLabel(/^Password/).fill(password);
 
   const answer = page.waitForResponse((res) => res.url().endsWith("/api/session/register"));
   await page.getByRole("button", { name: "Create account" }).click();
@@ -35,7 +35,7 @@ test("registering with an address that exists says to sign in", async ({ page })
   await page.goto("/register");
   await page.getByLabel(/organization name/i).fill("Dup Labs");
   await page.getByLabel("Email").fill(process.env.E2E_OWNER_EMAIL ?? "owner@dev.local");
-  await page.getByLabel("Password").fill("correct horse battery staple");
+  await page.getByLabel(/^Password/).fill("correct horse battery staple");
   await page.getByRole("button", { name: "Create account" }).click();
   await expect(page.locator("form").getByRole("alert")).toContainText(/already exists|not open/i);
 });

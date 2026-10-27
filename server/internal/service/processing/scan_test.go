@@ -6,6 +6,7 @@ import (
 	"io"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
@@ -161,5 +162,45 @@ func TestBusyWorkerDoesNotHoldJobsItCannotStart(t *testing.T) {
 	}
 	if busyStats.Claimed != 2 || busyStats.Succeeded != 2 {
 		t.Fatalf("the busy worker ran %+v; want only the two it could start", busyStats)
+	}
+}
+
+// A job that fails and falls due again while the cycle is still running is
+// left for the next cycle: one cycle spends one attempt on it, not all.
+func TestOneCycleTriesAFailingJobOnce(t *testing.T) {
+	h := newHarness()
+	h.attempts = 5
+	for _, id := range []string{"up-1", "up-2", "up-3"} {
+		h.goodUpload(t, id)
+	}
+	for range 20 {
+		h.scanner.results = append(h.scanner.results, interfaces.ScanResult{Outcome: model.ScanError, Detail: "down"})
+	}
+	svc := h.service(t, "worker-a")
+	// Each scan takes 70 s of clock: by the second scan the first job's
+	// 1-minute retry delay has passed, within the same cycle (the 5-minute
+	// lease has not).
+	clock := h.clock
+	var mu sync.Mutex
+	svc.now = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return clock
+	}
+	h.scanner.during = func(context.Context) error {
+		mu.Lock()
+		defer mu.Unlock()
+		clock = clock.Add(70 * time.Second)
+		return nil
+	}
+
+	stats := h.run(t, svc)
+	if stats.Claimed != 3 || stats.Retried != 3 {
+		t.Fatalf("stats %+v; want each of the three jobs claimed once and retried", stats)
+	}
+	for _, job := range h.memJobs.Jobs() {
+		if job.AttemptCount != 1 {
+			t.Fatalf("job %s made %d attempts in one cycle; want 1", job.ID, job.AttemptCount)
+		}
 	}
 }

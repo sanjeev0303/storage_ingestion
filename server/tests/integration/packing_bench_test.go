@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"sort"
 	"strconv"
 	"sync"
@@ -65,6 +66,7 @@ func TestPackingBenchmark(t *testing.T) {
 
 	// Pack: stream every source into one object, then read it back and
 	// check every entry, as the worker does.
+	memory := sampleHeap()
 	start = time.Now()
 	stream := compaction.NewStream(ctx, sources, 16)
 	total := int64(n * size)
@@ -96,9 +98,12 @@ func TestPackingBenchmark(t *testing.T) {
 		t.Fatal(err)
 	}
 	verified := time.Since(start)
+	peak, allocated := memory()
 	mib := float64(total) / (1 << 20)
 	t.Logf("pack: wrote %d entries (%.1f MiB) in %s (%.0f objects/s, %.1f MiB/s); verified in %s",
 		n, mib, written.Round(time.Millisecond), float64(n)/written.Seconds(), mib/written.Seconds(), verified.Round(time.Millisecond))
+	t.Logf("pack memory: peak heap in use %.1f MiB above the start, %.1f MiB allocated in all (sampled every 5ms)",
+		float64(peak)/(1<<20), float64(allocated)/(1<<20))
 
 	standalone := func(i int) (io.ReadCloser, error) {
 		return storage.OpenRange(ctx, bucket, keys[i], 0, int64(size)-1, interfaces.ReadCondition{IfMatch: etags[i]})
@@ -116,6 +121,43 @@ func TestPackingBenchmark(t *testing.T) {
 			t.Logf("read %-10s workers=%-2d %d reads in %s (%.0f reads/s), p50 %s, p95 %s", c.name, workers, n,
 				elapsed.Round(time.Millisecond), float64(n)/elapsed.Seconds(), p50.Round(10*time.Microsecond), p95.Round(10*time.Microsecond))
 		}
+	}
+}
+
+// sampleHeap watches the heap until the returned function is called, which
+// stops it and returns the peak heap in use above the starting point and the
+// bytes allocated meanwhile. ReadMemStats briefly stops the world, so it
+// slows what it measures a little.
+func sampleHeap() func() (peak, allocated uint64) {
+	runtime.GC()
+	var start runtime.MemStats
+	runtime.ReadMemStats(&start)
+	done := make(chan struct{})
+	result := make(chan uint64)
+	go func() {
+		var top uint64
+		tick := time.NewTicker(5 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			if m.HeapInuse > start.HeapInuse && m.HeapInuse-start.HeapInuse > top {
+				top = m.HeapInuse - start.HeapInuse
+			}
+			select {
+			case <-done:
+				result <- top
+				return
+			case <-tick.C:
+			}
+		}
+	}()
+	return func() (uint64, uint64) {
+		close(done)
+		peak := <-result
+		var end runtime.MemStats
+		runtime.ReadMemStats(&end)
+		return peak, end.TotalAlloc - start.TotalAlloc
 	}
 }
 

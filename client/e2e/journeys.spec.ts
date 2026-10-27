@@ -1,12 +1,12 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
-import { credentials, openOrganization, orgA, orgB, signIn } from "./helpers";
+import { credentials, openOrganization, orgA, orgB, signIn, uploadThroughUi } from "./helpers";
 
 test.describe("signing in", () => {
   test("rejects a wrong password with a clear message and stays on the page", async ({ page }) => {
     await page.goto("/login");
     await page.getByLabel("Email").fill(credentials("OWNER").email);
-    await page.getByLabel("Password").fill("not the password");
+    await page.getByLabel("Password", { exact: true }).fill("not the password");
     await page.getByRole("button", { name: "Sign in" }).click();
     await expect(page.getByText("The email or password is wrong.")).toBeVisible();
     await expect(page).toHaveURL(/\/login/);
@@ -17,7 +17,7 @@ test.describe("signing in", () => {
     await expect(page).toHaveURL(/\/login\?next=%2Fapp%2Fcatalog/);
     const { email, password } = credentials("OWNER");
     await page.getByLabel("Email").fill(email);
-    await page.getByLabel("Password").fill(password);
+    await page.getByLabel("Password", { exact: true }).fill(password);
     await page.getByRole("button", { name: "Sign in" }).click();
     await page.waitForURL(/\/app\/catalog/);
   });
@@ -52,19 +52,39 @@ test.describe("signing in", () => {
 
 test.describe("organizations and tenant isolation", () => {
   test("data from one organization is never shown in another", async ({ page }) => {
+    const name = `e2e-isolation-${Date.now()}.txt`;
+    let organizationId = "";
+    page.on("request", (request) => {
+      organizationId = request.headers()["x-organization-id"] ?? organizationId;
+    });
     await signIn(page, "OWNER");
     await openOrganization(page, orgA());
+    const objectId = await uploadThroughUi(page, name, Buffer.from("only in one organization"));
+    const ownOrganization = organizationId;
 
-    await page.goto("/app/catalog");
-    await expect(page.getByText("smoke.txt")).toBeVisible();
+    try {
+      await page.goto("/app/catalog");
+      await expect(page.getByText(name)).toBeVisible();
 
-    // Switch to the other organization through the shell.
-    await page.getByRole("button", { name: new RegExp(orgA()) }).click();
-    await page.getByRole("menuitem", { name: new RegExp(orgB()) }).click();
-    await page.waitForURL(/\/app\/overview/);
+      // Switch to the other organization through the shell.
+      await page.getByRole("button", { name: new RegExp(orgA()) }).click();
+      await page.getByRole("menuitem", { name: new RegExp(orgB()) }).click();
+      await page.waitForURL(/\/app\/overview/);
 
-    await page.goto("/app/catalog");
-    await expect(page.getByText("smoke.txt")).toHaveCount(0);
+      await page.goto("/app/catalog");
+      await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+      await expect(page.getByText(name)).toHaveCount(0);
+      // Asked for by id from the other organization, the object does not exist.
+      expect(organizationId).not.toBe(ownOrganization);
+      const other = await page.request.get(`/api/proxy/catalog/objects/${objectId}`, {
+        headers: { "X-Organization-ID": organizationId },
+      });
+      expect(other.status()).toBe(404);
+    } finally {
+      await page.request.delete(`/api/proxy/catalog/objects/${objectId}`, {
+        headers: { Origin: new URL(page.url()).origin, "X-Organization-ID": ownOrganization },
+      });
+    }
   });
 });
 
