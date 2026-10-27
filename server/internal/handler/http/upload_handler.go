@@ -84,10 +84,20 @@ func (h *UploadHandler) Get(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, uploadStatus{
+	out := uploadStatus{
 		UploadID: session.ID, Status: string(session.Status), FileName: session.FileName,
 		SizeBytes: session.ExpectedSize, ExpiresAt: session.ExpiresAt, Multipart: session.StorageUploadID != "",
-	})
+	}
+	asset, err := h.service.AssetOf(r.Context(), session.TenantID, session.ID)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	if asset != nil {
+		out.Asset = &uploadAsset{AssetID: asset.ID, Status: string(asset.Status), RejectionReason: asset.RejectionReason,
+			ObjectID: asset.ObjectID, Version: asset.Version}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 type uploadStatus struct {
@@ -97,6 +107,17 @@ type uploadStatus struct {
 	SizeBytes int64     `json:"size_bytes"`
 	ExpiresAt time.Time `json:"expires_at"`
 	Multipart bool      `json:"multipart"`
+	// Asset is what the upload became, once processing has made one.
+	Asset *uploadAsset `json:"asset,omitempty"`
+}
+
+type uploadAsset struct {
+	AssetID         string `json:"asset_id"`
+	Status          string `json:"status"`
+	RejectionReason string `json:"rejection_reason,omitempty"`
+	// ObjectID and Version are the catalog object and version, once published.
+	ObjectID string `json:"object_id,omitempty"`
+	Version  int    `json:"version,omitempty"`
 }
 
 func (h *UploadHandler) fail(w http.ResponseWriter, err error) {

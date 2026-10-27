@@ -42,7 +42,6 @@ export function AccessRoles() {
       <div
         role="tablist"
         aria-label="Built-in roles"
-        data-lenis-prevent
         onKeyDown={onKeyDown}
         className="grid grid-cols-2 gap-1.5 sm:grid-cols-4 lg:flex lg:w-[150px] lg:shrink-0 lg:flex-col"
       >

@@ -212,7 +212,7 @@ export function DriverPanel({ job, canWrite }: { job: IngestionJob; canWrite: bo
               {view.active.map((item) => (
                 <tr key={item.position}>
                   <Td className="tabular-nums">{item.position}</Td>
-                  <Td className="mono-data max-w-md break-all">{item.path}</Td>
+                  <Td className="mono-data min-w-40 max-w-md break-all">{item.path}</Td>
                   <Td>{item.strategy === "MULTIPART" ? "Large, in parts" : "Single request"}</Td>
                   <Td className="text-right tabular-nums">
                     {formatBytes(item.sent)} of {formatBytes(item.size)}

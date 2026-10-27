@@ -196,6 +196,9 @@ func run() error {
 		},
 		ScanPolicy:          processingservice.ScanPolicy(workerCfg.ScanPolicy),
 		ScanTimeout:         workerCfg.ClamAVTimeout,
+		ScanSegmentBytes:    workerCfg.ScanSegmentBytes,
+		ScanParallelism:     workerCfg.ScanParallelism,
+		MinThroughput:       workerCfg.MinThroughput,
 		QuarantineRetention: workerCfg.QuarantineRetention,
 		Retry: retry.Policy{
 			BaseDelay:   workerCfg.BackoffBase,

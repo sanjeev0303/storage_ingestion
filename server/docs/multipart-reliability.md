@@ -59,6 +59,19 @@ resumes from the saved cursor; a scan that fails five pages in a row ends
 `FAILED` and the next one starts over. A session lookup that fails stops the
 page: nothing is deleted on a database error.
 
+## Declaring the checksum
+
+The SHA-256 may be declared when the upload starts (`POST /uploads/multipart`,
+`checksum_sha256`) or, for a client that hashes a large file while its parts
+upload, when it completes (`POST /uploads/{id}/complete`, `checksum_sha256`
+next to `parts`). Completion is refused (400) without one at either point, or
+with one that differs from the one given at start. A completion's checksum
+is recorded once, only while the upload is `UPLOADING`, and before the object
+is assembled, so the completion event, the asset and verification always
+have it. Verification is the same either way: the stored bytes are hashed
+and must match. Bulk ingestion manifests still require a checksum per entry;
+single-request uploads still declare it at creation.
+
 ## Environment
 
 ```

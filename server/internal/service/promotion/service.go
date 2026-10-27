@@ -8,6 +8,7 @@ import (
 	"time"
 
 	checksum "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/checksum/sha256"
+	"github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/rangeread"
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/retry"
@@ -229,7 +230,7 @@ func (s *Service) copyMatches(ctx context.Context, dst side, asset model.Asset, 
 		return metadata, false, nil
 	}
 
-	body, err := dst.storage.OpenObject(ctx, dst.ReadyBucket, destinationKey)
+	body, err := rangeread.OpenObject(ctx, dst.storage, dst.ReadyBucket, destinationKey, metadata)
 	if err != nil {
 		return metadata, false, fmt.Errorf("open promoted copy: %w", err)
 	}

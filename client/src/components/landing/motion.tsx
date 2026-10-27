@@ -40,5 +40,11 @@ export function LandingMotion({ children }: { children: ReactNode }) {
     { scope: root },
   );
 
-  return <div ref={root}>{children}</div>;
+  // Blocks start up to 32px to the side; clip keeps that from widening the
+  // page on a phone, and unlike hidden it leaves the sticky diagrams sticky.
+  return (
+    <div ref={root} className="overflow-x-clip">
+      {children}
+    </div>
+  );
 }

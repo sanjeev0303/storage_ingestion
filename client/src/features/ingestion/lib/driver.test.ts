@@ -134,13 +134,22 @@ describe("runDriver", () => {
   });
 
   it("sends heartbeats on a schedule while an entry uploads and stops afterwards", async () => {
-    const t = setup([{ grants: [{ entry: entry(1), upload_url: "https://store/1" }] }]);
-    (t.put as ReturnType<typeof vi.fn>).mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve({ status: 200, etag: null }), 60)));
-    await t.run({ heartbeatMs: 10 });
-    const during = (t.api.heartbeat as ReturnType<typeof vi.fn>).mock.calls.length;
-    expect(during).toBeGreaterThanOrEqual(2);
-    await new Promise((r) => setTimeout(r, 40));
-    expect((t.api.heartbeat as ReturnType<typeof vi.fn>).mock.calls.length).toBe(during);
+    // Fake timers: on a busy machine a real 60 ms upload can fit fewer than
+    // two 10 ms heartbeats, and the test then fails for nothing.
+    vi.useFakeTimers();
+    try {
+      const t = setup([{ grants: [{ entry: entry(1), upload_url: "https://store/1" }] }]);
+      (t.put as ReturnType<typeof vi.fn>).mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve({ status: 200, etag: null }), 60)));
+      const running = t.run({ heartbeatMs: 10 });
+      await vi.advanceTimersByTimeAsync(60);
+      await running;
+      const during = (t.api.heartbeat as ReturnType<typeof vi.fn>).mock.calls.length;
+      expect(during).toBeGreaterThanOrEqual(2);
+      await vi.advanceTimersByTimeAsync(40);
+      expect((t.api.heartbeat as ReturnType<typeof vi.fn>).mock.calls.length).toBe(during);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not upload a file whose size differs from the manifest", async () => {

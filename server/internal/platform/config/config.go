@@ -168,18 +168,26 @@ type Processing struct {
 	LeaseDuration time.Duration
 	// RenewEvery renews a claimed job's lease; MaxJobDuration bounds how
 	// long renewal keeps one job, from its claim.
-	RenewEvery      time.Duration
-	MaxJobDuration  time.Duration
-	MaxAttempts     int
-	BackoffBase     time.Duration
-	BackoffMax      time.Duration
-	MaxFileBytes    int64
-	AllowedTypes    []string
-	DeniedTypes     []string // added to the built-in deny list
-	UnknownType     string   // "allow" or "reject"
-	Scanner         string   // "none" or "clamav"
-	ClamAVAddress   string
-	ClamAVTimeout   time.Duration
+	RenewEvery     time.Duration
+	MaxJobDuration time.Duration
+	MaxAttempts    int
+	BackoffBase    time.Duration
+	BackoffMax     time.Duration
+	MaxFileBytes   int64
+	AllowedTypes   []string
+	DeniedTypes    []string // added to the built-in deny list
+	UnknownType    string   // "allow" or "reject"
+	Scanner        string   // "none" or "clamav"
+	ClamAVAddress  string
+	ClamAVTimeout  time.Duration
+	// Objects larger than ScanSegmentBytes are scanned as overlapping
+	// segments of that size, ScanParallelism at a time; each must fit in
+	// clamd's StreamMaxLength.
+	ScanSegmentBytes int64
+	ScanParallelism  int
+	// MinThroughput (bytes a second) stretches MaxJobDuration for large
+	// objects: a job may also take its object's size at this rate.
+	MinThroughput   int64
 	ScanPolicy      string // used when Scanner is "none"
 	PromotionBucket string // empty: the quarantine bucket
 	PromotionPrefix string
@@ -235,6 +243,7 @@ func LoadProcessing() (Processing, error) {
 		{"PROCESSING_BATCH_SIZE", "10", &cfg.BatchSize},
 		{"PROCESSING_CONCURRENCY", "2", &cfg.Concurrency},
 		{"PROCESSING_MAX_ATTEMPTS", "8", &cfg.MaxAttempts},
+		{"PROCESSING_SCAN_PARALLELISM", "4", &cfg.ScanParallelism},
 		{"ARCHIVE_MAX_ENTRIES", "10000", &cfg.ArchiveMaxEntries},
 	}
 	for _, n := range ints {
@@ -248,6 +257,8 @@ func LoadProcessing() (Processing, error) {
 		target        *int64
 	}{
 		{"PROCESSING_MAX_FILE_BYTES", "5368709120", &cfg.MaxFileBytes},
+		{"PROCESSING_SCAN_SEGMENT_BYTES", "67108864", &cfg.ScanSegmentBytes},
+		{"PROCESSING_MIN_THROUGHPUT_BYTES", "16777216", &cfg.MinThroughput},
 		{"ARCHIVE_MAX_BYTES", "536870912", &cfg.ArchiveMaxBytes},
 		{"ARCHIVE_MAX_UNCOMPRESSED_BYTES", "2147483648", &cfg.ArchiveMaxExpanded},
 		{"ARCHIVE_MAX_RATIO", "100", &cfg.ArchiveMaxRatio},
@@ -275,6 +286,9 @@ func LoadProcessing() (Processing, error) {
 	}
 	if cfg.MaxJobDuration < cfg.LeaseDuration {
 		return Processing{}, fmt.Errorf("PROCESSING_MAX_JOB_DURATION must not be shorter than PROCESSING_LEASE_DURATION")
+	}
+	if cfg.ScanSegmentBytes < 1<<20 || cfg.ScanSegmentBytes > 1<<30 {
+		return Processing{}, fmt.Errorf("PROCESSING_SCAN_SEGMENT_BYTES must be between 1 MiB and 1 GiB")
 	}
 	if cfg.ClamAVTimeout >= cfg.MaxJobDuration {
 		return Processing{}, fmt.Errorf("CLAMAV_TIMEOUT must be shorter than PROCESSING_MAX_JOB_DURATION")

@@ -245,19 +245,19 @@ function EventTable({ events }: { events: AuditEvent[] }) {
                 <Td>
                   <Time value={event.created_at} />
                 </Td>
-                <Td>
+                <Td className="min-w-40">
                   <div className="text-sm text-muted">{event.actor_type}</div>
                   <div className="mono-data">{event.actor_id}</div>
                 </Td>
                 <Td className="mono-data">{event.action}</Td>
-                <Td>
+                <Td className="min-w-40">
                   <div className="text-sm text-muted">{event.resource_type}</div>
                   {event.resource_id && <div className="mono-data">{event.resource_id}</div>}
                 </Td>
                 <Td>
                   <StateBadge tone={event.outcome === "SUCCESS" ? "neutral" : "attention"}>{event.outcome}</StateBadge>
                 </Td>
-                <Td className="max-w-64 [overflow-wrap:anywhere]">{event.reason ?? ""}</Td>
+                <Td className="min-w-40 max-w-64 [overflow-wrap:anywhere]">{event.reason ?? ""}</Td>
                 <Td>
                   <Button
                     variant="ghost"

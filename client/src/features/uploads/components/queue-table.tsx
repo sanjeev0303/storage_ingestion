@@ -2,7 +2,7 @@
 
 import { CaretDown, CaretUp } from "@phosphor-icons/react";
 import Link from "next/link";
-import { useState } from "react";
+import { memo, useCallback, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/dialog";
 import { Checkbox, Field, Input, Textarea } from "@/components/ui/field";
@@ -28,6 +28,17 @@ const STATE_LABEL: Record<UploadState, string> = {
   failed: "Failed",
   cancelled: "Cancelled",
 };
+
+// A queued file is one of three things, and each needs saying: it waits for
+// Start, for a free slot, or for a fix to its details.
+type QueuedAs = { label: string; text: string };
+
+function queuedAs(hasProblem: boolean, ahead: number): QueuedAs {
+  if (hasProblem) return { label: "Needs a fix", text: "Fix the problem shown under the file name, then start it." };
+  if (ahead === 0) return { label: "Waiting", text: "Next in line for a free upload slot" };
+  if (ahead > 0) return { label: "Waiting", text: `Waiting for a free upload slot, ${ahead} ${ahead === 1 ? "file" : "files"} ahead` };
+  return { label: "Ready", text: "Ready. Start upload begins it." };
+}
 
 function badgeTone(state: UploadState) {
   if (state === "available") return "done" as const;
@@ -61,6 +72,12 @@ function UploadProgress({ snap }: { snap: UploadSnapshot }) {
     const percent = Math.round((snap.hashedBytes / Math.max(snap.fileSize, 1)) * 100);
     return <ProgressBar label={`Checksum of ${snap.fileName}`} value={snap.hashedBytes} max={snap.fileSize} text={`Reading file for its checksum, ${percent}%`} />;
   }
+  // A large file's checksum is read while it uploads; when the parts finish
+  // first, completion waits for it.
+  if (snap.state === "finalizing" && snap.mode === "multipart" && snap.hashedBytes < snap.fileSize) {
+    const percent = Math.round((snap.hashedBytes / Math.max(snap.fileSize, 1)) * 100);
+    return <ProgressBar label={`Checksum of ${snap.fileName}`} value={snap.hashedBytes} max={snap.fileSize} text={`Finishing the checksum, ${percent}%`} />;
+  }
 
   const done = ["finalizing", "verifying", "processing", "available", "rejected"].includes(snap.state);
   const sent = done ? snap.fileSize : snap.sentBytes;
@@ -72,14 +89,14 @@ function UploadProgress({ snap }: { snap: UploadSnapshot }) {
   return <ProgressBar label={`Upload of ${snap.fileName}`} value={sent} max={snap.fileSize} text={text} />;
 }
 
-function Processing({ snap }: { snap: UploadSnapshot }) {
+function Processing({ snap, queued }: { snap: UploadSnapshot; queued: QueuedAs }) {
   const { state, asset } = snap;
-  let text = "Waiting for the upload";
+  let text = queued.text;
   if (state === "finalizing") text = "Waiting for the upload to finish";
   if (state === "verifying") text = "The server is verifying the checksum";
-  if (state === "processing") text = asset?.status ? `Catalog says ${asset.status}` : "Waiting for the catalog to list it";
+  if (state === "processing") text = asset?.status ? `Catalog says ${asset.status}` : "Being checked and scanned";
   if (state === "available") text = "Catalog says AVAILABLE";
-  if (state === "rejected") text = `Catalog says REJECTED${asset?.rejectionReason ? `: ${asset.rejectionReason}` : ""}`;
+  if (state === "rejected") text = `Rejected and kept in quarantine${asset?.rejectionReason ? `: ${asset.rejectionReason.replaceAll("_", " ")}` : ""}`;
   if (state === "failed" || state === "cancelled") text = "Not processed";
 
   return (
@@ -177,11 +194,117 @@ type Props = {
   defaultConnectionId: string;
   onDraft: (id: string, change: Partial<FileDraft>) => void;
   onRemove: (id: string) => void;
+  waitingIds: string[];
 };
 
-export function QueueTable({ entries, snapshots, errors, connections, defaultConnectionId, onDraft, onRemove }: Props) {
+type RowProps = {
+  entry: QueueEntry;
+  snap: UploadSnapshot;
+  rowErrors: DraftErrors;
+  connection: StorageConnection | undefined;
+  connections: StorageConnection[];
+  defaultConnectionId: string;
+  expanded: boolean;
+  ahead: number;
+  onToggle: (id: string) => void;
+  onDraft: (id: string, change: Partial<FileDraft>) => void;
+  onRemove: (id: string) => void;
+  onAskCancel: (entry: QueueEntry) => void;
+};
+
+// One file's row. Memoized: every update makes a new snapshot for that file
+// only, so a busy batch re-renders the rows that changed, not all of them.
+const QueueRow = memo(function QueueRow({
+  entry,
+  snap,
+  rowErrors,
+  connection,
+  connections,
+  defaultConnectionId,
+  expanded,
+  ahead,
+  onToggle,
+  onDraft,
+  onRemove,
+  onAskCancel,
+}: RowProps) {
+  const editable = snap.state === "queued";
+  // The open editor already shows its own field errors.
+  const problems = Object.values(expanded ? { size: rowErrors.size } : rowErrors).filter(Boolean);
+  const queued = queuedAs(Object.values(rowErrors).some(Boolean), ahead);
+
+  return (
+    <>
+      <tr>
+        <Td className="min-w-48 max-w-72">
+          <p className="font-medium [overflow-wrap:anywhere]">{snap.fileName}</p>
+          <p className="text-sm text-muted">
+            {formatBytes(snap.fileSize)}
+            {snap.request.path ? `, ${snap.request.path}` : ""}
+            {snap.request.dataset ? `, dataset ${snap.request.dataset}` : ""}
+          </p>
+          <p className="text-sm text-muted">To {describeConnection(connection, snap.storageConnectionId)}</p>
+          {editable && problems.length > 0 && (
+            <p role="alert" className="mt-1 text-sm font-medium">
+              {problems[0]}
+            </p>
+          )}
+          {editable && (
+            <button
+              type="button"
+              aria-expanded={expanded}
+              aria-controls={`edit-${entry.id}`}
+              onClick={() => onToggle(entry.id)}
+              className="mt-1 inline-flex items-center gap-1 text-sm font-medium underline underline-offset-2"
+            >
+              {expanded ? <CaretUp aria-hidden /> : <CaretDown aria-hidden />}
+              {expanded ? "Hide details" : "Edit details"}
+            </button>
+          )}
+        </Td>
+        <Td>
+          <UploadProgress snap={snap} />
+        </Td>
+        <Td>
+          <Processing snap={snap} queued={queued} />
+        </Td>
+        <Td className="max-w-72">
+          <StateBadge tone={badgeTone(snap.state)}>{snap.state === "queued" ? queued.label : STATE_LABEL[snap.state]}</StateBadge>
+          {snap.failure && (
+            <p role="alert" className={cn("mt-2 text-sm")}>
+              {snap.failure.message}
+            </p>
+          )}
+        </Td>
+        <Td>
+          <RowActions entry={entry} snap={snap} onRemove={() => onRemove(entry.id)} onAskCancel={() => onAskCancel(entry)} />
+        </Td>
+      </tr>
+      {expanded && (
+        <tr>
+          <Td colSpan={5} className="bg-faint/40">
+            <div id={`edit-${entry.id}`}>
+              <Editor
+                draft={entry.draft}
+                errors={rowErrors}
+                connections={connections}
+                defaultConnectionId={defaultConnectionId}
+                onChange={(change) => onDraft(entry.id, change)}
+              />
+            </div>
+          </Td>
+        </tr>
+      )}
+    </>
+  );
+});
+
+const NO_ERRORS: DraftErrors = {};
+
+export function QueueTable({ entries, snapshots, errors, connections, defaultConnectionId, onDraft, onRemove, waitingIds }: Props) {
   const [open, setOpen] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState<QueueEntry | null>(null);
+  const toggle = useCallback((id: string) => setOpen((current) => (current === id ? null : id)), []);
 
   return (
     <>
@@ -199,75 +322,23 @@ export function QueueTable({ entries, snapshots, errors, connections, defaultCon
           {entries.map((entry, index) => {
             const snap = snapshots[index];
             if (!snap) return null;
-            const rowErrors = errors.get(entry.id) ?? {};
-            const editable = snap.state === "queued";
-            const expanded = editable && open === entry.id;
-            // The open editor already shows its own field errors.
-            const problems = Object.values(expanded ? { size: rowErrors.size } : rowErrors).filter(Boolean);
-            const connection = connections.find((c) => c.id === (snap.storageConnectionId ?? entry.draft.connectionId));
-
-            return [
-              <tr key={entry.id}>
-                <Td className="max-w-72">
-                  <p className="font-medium [overflow-wrap:anywhere]">{snap.fileName}</p>
-                  <p className="text-sm text-muted">
-                    {formatBytes(snap.fileSize)}
-                    {snap.request.path ? `, ${snap.request.path}` : ""}
-                    {snap.request.dataset ? `, dataset ${snap.request.dataset}` : ""}
-                  </p>
-                  <p className="text-sm text-muted">To {describeConnection(connection, snap.storageConnectionId)}</p>
-                  {editable && problems.length > 0 && (
-                    <p role="alert" className="mt-1 text-sm font-medium">
-                      {problems[0]}
-                    </p>
-                  )}
-                  {editable && (
-                    <button
-                      type="button"
-                      aria-expanded={expanded}
-                      aria-controls={`edit-${entry.id}`}
-                      onClick={() => setOpen(expanded ? null : entry.id)}
-                      className="mt-1 inline-flex items-center gap-1 text-sm font-medium underline underline-offset-2"
-                    >
-                      {expanded ? <CaretUp aria-hidden /> : <CaretDown aria-hidden />}
-                      {expanded ? "Hide details" : "Edit details"}
-                    </button>
-                  )}
-                </Td>
-                <Td>
-                  <UploadProgress snap={snap} />
-                </Td>
-                <Td>
-                  <Processing snap={snap} />
-                </Td>
-                <Td className="max-w-72">
-                  <StateBadge tone={badgeTone(snap.state)}>{STATE_LABEL[snap.state]}</StateBadge>
-                  {snap.failure && (
-                    <p role="alert" className={cn("mt-2 text-sm")}>
-                      {snap.failure.message}
-                    </p>
-                  )}
-                </Td>
-                <Td>
-                  <RowActions entry={entry} snap={snap} onRemove={() => onRemove(entry.id)} onAskCancel={() => setCancelling(entry)} />
-                </Td>
-              </tr>,
-              expanded && (
-                <tr key={`${entry.id}-edit`}>
-                  <Td colSpan={5} className="bg-faint/40">
-                    <div id={`edit-${entry.id}`}>
-                      <Editor
-                        draft={entry.draft}
-                        errors={rowErrors}
-                        connections={connections}
-                        defaultConnectionId={defaultConnectionId}
-                        onChange={(change) => onDraft(entry.id, change)}
-                      />
-                    </div>
-                  </Td>
-                </tr>
-              ),
-            ];
+            return (
+              <QueueRow
+                key={entry.id}
+                entry={entry}
+                snap={snap}
+                rowErrors={errors.get(entry.id) ?? NO_ERRORS}
+                connection={connections.find((c) => c.id === (snap.storageConnectionId ?? entry.draft.connectionId))}
+                connections={connections}
+                defaultConnectionId={defaultConnectionId}
+                expanded={snap.state === "queued" && open === entry.id}
+                ahead={waitingIds.indexOf(entry.id)}
+                onToggle={toggle}
+                onDraft={onDraft}
+                onRemove={onRemove}
+                onAskCancel={setCancelling}
+              />
+            );
           })}
         </tbody>
       </Table>

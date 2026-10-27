@@ -34,6 +34,42 @@ policy) can ever reach promotion. With no scanner configured,
 `SCAN_UNAVAILABLE_POLICY` decides: `hold` (default, HELD), `reject`, or
 `allow_unscanned` (refused unless `APP_ENV=development`).
 
+## Large objects
+
+Every full read of a stored object (verification's SHA-256, the scan's
+hash, promotion's check of its copy) goes through
+`internal/infrastructure/storage/rangeread`: 8 MiB ranges, eight in
+flight, delivered in order and all pinned to the ETag read first, so an
+overwrite during the read fails it instead of mixing two objects.
+
+clamd takes at most `StreamMaxLength` (100 MiB by default) in one stream
+and answers a longer one with a connection reset, which loses its verdict.
+So an object larger than `PROCESSING_SCAN_SEGMENT_BYTES` (64 MiB) is
+scanned as segments of that size, each reaching 1 MiB back into the one
+before so a signature on a boundary is still read whole,
+`PROCESSING_SCAN_PARALLELISM` (4) at a time on their own clamd
+connections, while one more pinned read hashes the whole object. The first
+INFECTED segment stops the others. Two limits follow:
+
+- a segment is scanned as raw bytes: ClamAV cannot unpack part of an
+  archive, so an archive (zip, gzip, rar, 7z) larger than one segment is
+  UNSUPPORTED and held, never passed;
+- `PROCESSING_SCAN_SEGMENT_BYTES` plus 1 MiB must not exceed clamd's
+  `StreamMaxLength`, or every segment fails and the job is retried until
+  held.
+
+A job's time limit is `PROCESSING_MAX_JOB_DURATION` plus its object's size
+at `PROCESSING_MIN_THROUGHPUT_BYTES` a second (16 MiB/s: about 18 hours
+more for 1 TiB), so a large object is not cut off and restarted forever.
+Promotion copies objects over 256 MiB as four part copies at a time.
+
+Uploads above 5 GiB also need `UPLOAD_MAX_SIZE_BYTES` (API, at most 5 TiB)
+and `PROCESSING_MAX_FILE_BYTES` raised; both default to 5 GiB.
+
+Measured locally (MinIO and ClamAV in Docker on one laptop), 1 GiB of
+random bytes: verification 3.5 s, scan 14.2 s, promotion 18.7 s, 36.4 s in
+all; before, the scan never finished and the object stayed held.
+
 ## Quarantine records
 
 `quarantine_records` holds one row per decision, with at most one HELD row

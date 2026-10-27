@@ -135,7 +135,7 @@ func run() error {
 		bucket,
 		cfg.UploadMaxSize,
 		cfg.UploadSessionTTL,
-	).Guard(quotaService, auditService)
+	).Guard(quotaService, auditService).ReportAssets(postgres.NewAssetRepository(db))
 
 	multipartRepository := postgres.NewMultipartUploadRepository(db)
 

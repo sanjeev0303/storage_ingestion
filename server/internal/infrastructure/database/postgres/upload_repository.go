@@ -381,6 +381,36 @@ func (r *UploadRepository) SetStorageUploadID(
 	return r.missingOrInvalid(ctx, tenantID, uploadID)
 }
 
+func (r *UploadRepository) SetDeclaredChecksum(
+	ctx context.Context,
+	tenantID string,
+	uploadID string,
+	checksum string,
+	at time.Time,
+) error {
+	if checksum == "" {
+		return errors.New("checksum must not be empty")
+	}
+
+	tag, err := r.db.Pool.Exec(ctx, `
+		UPDATE upload_sessions
+		SET checksum_sha256 = $3,
+		    updated_at = $4
+		WHERE tenant_id = $1
+		  AND id = $2
+		  AND status = 'UPLOADING'
+		  AND (checksum_sha256 IS NULL OR checksum_sha256 = $3)
+	`, tenantID, uploadID, checksum, at)
+	if err != nil {
+		return mapDatabaseError(err)
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+
+	return r.missingOrInvalid(ctx, tenantID, uploadID)
+}
+
 // missingOrInvalid tells a conditional update that matched nothing apart:
 // the session does not exist, or it is in a state the update refused.
 func (r *UploadRepository) missingOrInvalid(

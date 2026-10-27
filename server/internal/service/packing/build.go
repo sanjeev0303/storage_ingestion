@@ -109,6 +109,16 @@ func (s *Service) build(ctx context.Context, p model.Pack) string {
 		log.Error("a source does not match its recorded size or checksum; it is excluded from packing",
 			"asset_id", source.AssetID, "rewrite_of", p.RewriteOf)
 		return s.fail(ctx, p, log, err, []string{source.AssetID})
+	case errors.As(err, &source) && (errors.Is(err, interfaces.ErrObjectNotFound) || errors.Is(err, interfaces.ErrPreconditionFailed)) &&
+		s.stillRecorded(ctx, p, source.AssetID):
+		// The asset still names exactly the object the plan read, yet that
+		// object is gone or replaced. Planned again, it would make the same
+		// pack and fail the same way, forever. Like a mismatching source, it
+		// is never packed again.
+		s.deps.Metrics.Add("packing_source_integrity_failures", 1)
+		log.Error("a source's object is missing or replaced while its asset still records it; it is excluded from packing",
+			"asset_id", source.AssetID)
+		return s.fail(ctx, p, log, err, []string{source.AssetID})
 	case errors.As(err, &source) && (errors.Is(err, interfaces.ErrObjectNotFound) || errors.Is(err, interfaces.ErrPreconditionFailed)):
 		// The source was deleted or replaced after the pack was planned: the
 		// plan is stale, and no retry can read it. The pack fails now and its
@@ -132,6 +142,26 @@ func (s *Service) build(ctx context.Context, p model.Pack) string {
 	s.deps.Metrics.Add("packs_retried", 1)
 	log.Warn("packing failed; it retries", "next_attempt_at", next, "error", retry.Sanitize(err))
 	return outcomeRetried
+}
+
+// stillRecorded reports whether the asset is still AVAILABLE and still
+// records the very source object the pack's entry was planned from. A lookup
+// that fails answers no, so the plan is treated as stale, as before.
+func (s *Service) stillRecorded(ctx context.Context, p model.Pack, assetID string) bool {
+	asset, err := s.deps.Assets.GetByID(ctx, p.TenantID, assetID)
+	if err != nil || asset.Status != model.AssetStatusAvailable {
+		return false
+	}
+	entries, err := s.deps.Packs.Entries(ctx, p.ID)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.AssetID == assetID {
+			return e.SourceKey == asset.ObjectKey && e.SourceETag == asset.StorageETag && e.SourceVersionID == asset.StorageVersionID
+		}
+	}
+	return false
 }
 
 func (s *Service) fail(ctx context.Context, p model.Pack, log *slog.Logger, cause error, excluded []string) string {

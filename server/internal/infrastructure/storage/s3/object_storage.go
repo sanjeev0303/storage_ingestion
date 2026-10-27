@@ -452,7 +452,7 @@ func (s *ObjectStorage) CopyObject(
 	}
 	limit := s.singleCopyBytes
 	if limit <= 0 {
-		limit = maxSingleCopyBytes
+		limit = parallelCopyBytes
 	}
 	if source.SizeBytes > limit {
 		return s.copyInParts(ctx, sourceBucket, sourceKey, source.ETag, source.SizeBytes, destinationBucket, destinationKey)

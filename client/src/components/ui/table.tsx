@@ -3,7 +3,9 @@ import { cn } from "@/lib/utils/cn";
 
 export function Table({ className, ...rest }: HTMLAttributes<HTMLTableElement>) {
   return (
-    <div className="overflow-x-auto border border-faint" data-lenis-prevent tabIndex={0} role="region" aria-label="Table">
+    // relative: an absolutely placed child (an sr-only label) is clipped by
+    // this scroller instead of widening the whole page.
+    <div className="relative overflow-x-auto border border-faint" data-lenis-prevent-horizontal tabIndex={0} role="region" aria-label="Table">
       <table className={cn("w-full min-w-full border-collapse text-left text-base", className)} {...rest} />
     </div>
   );

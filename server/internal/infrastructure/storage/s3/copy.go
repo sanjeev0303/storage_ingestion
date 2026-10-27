@@ -31,6 +31,10 @@ const (
 	copyPartBytes = 128 << 20
 	// copyConcurrency bounds the part copies of one object in flight.
 	copyConcurrency = 4
+	// parallelCopyBytes is the size above which a copy goes in parts even
+	// where one call could do it: one CopyObject copies serially inside
+	// the provider, four part copies at once finish sooner.
+	parallelCopyBytes = 256 << 20
 )
 
 // SetCopyLimits lowers the size above which a copy goes in parts, and the

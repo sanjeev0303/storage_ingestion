@@ -7,11 +7,8 @@ import { sleep as realSleep, withRetry } from "@/lib/upload/retry";
 import { isAbort, sha256Blob } from "@/lib/upload/sha256";
 import { formatBytes } from "@/lib/utils/format";
 import type {
-  AssetStatus,
-  CatalogObject,
   FailureKind,
   MultipartStartResponse,
-  ObjectVersion,
   PartUrlsResponse,
   ResumeRecord,
   SingleUploadResponse,
@@ -130,13 +127,13 @@ export class FileUpload {
   private controller = new AbortController();
   private key = newIdempotencyKey();
   private sha: string | undefined;
-  private baselineVersion = 0;
   private sentByPart = new Map<number, number>();
   private resumedBytes = 0;
   private samples: { at: number; bytes: number }[] = [];
   private lastEmit = 0;
   private record: ResumeRecord | undefined;
   private running = false;
+  private watching: Promise<void> | undefined;
 
   constructor(file: File, request: UploadRequest, options: Partial<EngineOptions> = {}) {
     this.file = file;
@@ -186,26 +183,29 @@ export class FileUpload {
     if (this.snap.state !== "queued" || this.running) return;
     this.running = true;
     this.controller = new AbortController();
-    this.patch({ failure: undefined, note: undefined, resumed: Boolean(resume) });
+    // Out of "queued" at once: the file has its slot, and the screen says so.
+    this.patch({ state: "hashing", hashedBytes: 0, failure: undefined, note: undefined, resumed: Boolean(resume) });
 
     try {
       if (resume) this.key = resume.idempotency_key;
-      this.sha = resume?.sha256 ?? this.sha;
-      await this.baseline();
-
-      if (!this.sha) {
-        this.patch({ state: "hashing", hashedBytes: 0 });
-        this.sha = await this.options.hash(this.file, {
-          signal: this.signal,
-          onProgress: (bytes) => this.throttled({ hashedBytes: bytes }),
-        });
-      }
+      this.sha = resume?.sha256 || this.sha;
 
       const useMultipart = resume || (this.file.size > SINGLE_LIMIT_BYTES && this.options.hasMultipart);
       if (useMultipart) {
+        // A large file is hashed while its parts upload, and the checksum
+        // goes with the completion: reading it all first would add a whole
+        // pass over the file before the first byte is sent.
         this.patch({ mode: "multipart" });
         await this.uploadMultipart(resume);
       } else {
+        // A small one is hashed first: it takes well under a second, and the
+        // single request declares it up front.
+        if (!this.sha) {
+          this.sha = await this.options.hash(this.file, {
+            signal: this.signal,
+            onProgress: (bytes) => this.throttled({ hashedBytes: bytes }),
+          });
+        }
         this.patch({ mode: "single" });
         await this.uploadSingle();
       }
@@ -261,8 +261,9 @@ export class FileUpload {
     this.controller = new AbortController();
     this.patch({ pollingStopped: false, failure: undefined });
     try {
-      const status = await this.uploadStatus();
-      await this.finish(status);
+      const info = await this.uploadInfo();
+      if (this.rejected(info)) return;
+      await this.finish(info.status);
     } catch (error) {
       await this.fail(error);
     }
@@ -315,8 +316,8 @@ export class FileUpload {
     }
   }
 
-  private uploadStatus() {
-    return this.request<UploadInfo>(`/uploads/${this.snap.uploadId}`).then((r) => r.data.status);
+  private uploadInfo() {
+    return this.request<UploadInfo>(`/uploads/${this.snap.uploadId}`).then((r) => r.data);
   }
 
   private async fail(error: unknown) {
@@ -327,39 +328,6 @@ export class FileUpload {
       await this.options.store.remove(uploadId);
     }
     this.patch({ state: "failed", failure, note: undefined, speedBps: 0 });
-  }
-
-  // The object's newest version before this upload, so later we can tell the
-  // new version from older ones at the same path.
-  private async baseline() {
-    this.baselineVersion = 0;
-    try {
-      const object = await this.lookup();
-      if (!object) return;
-      const { data } = await call<{ versions: ObjectVersion[] }>(`/catalog/objects/${object.id}/versions`, {
-        query: { limit: 1 },
-        signal: this.signal,
-      });
-      this.baselineVersion = data.versions[0]?.version ?? 0;
-    } catch (error) {
-      if (isAbort(error)) throw error;
-      // No catalog access or no object yet: match on the checksum alone.
-    }
-  }
-
-  private async lookup(): Promise<CatalogObject | null> {
-    const { request } = this.snap;
-    const path = (request.path || this.file.name).normalize("NFC");
-    try {
-      const { data } = await call<CatalogObject>("/catalog/lookup", {
-        query: { dataset: request.dataset ?? "", path },
-        signal: this.signal,
-      });
-      return data;
-    } catch (error) {
-      if (isApiError(error) && error.isNotFound) return null;
-      throw error;
-    }
   }
 
   private body() {
@@ -418,7 +386,7 @@ export class FileUpload {
 
     this.patch({ state: "finalizing" });
     const done = await this.request<{ status: UploadStatus }>(`/uploads/${created.upload_id}/complete`, { method: "POST" });
-    await this.finish(done.status === 202 ? "COMPLETING" : done.data.status);
+    this.watch(done.status === 202 ? "COMPLETING" : done.data.status);
   }
 
   private async uploadMultipart(resume?: ResumeRecord) {
@@ -438,7 +406,7 @@ export class FileUpload {
         });
       } else if (status !== "open") {
         await this.options.store.remove(record.upload_id);
-        await this.finish(status);
+        this.watch(status);
         return;
       }
     }
@@ -463,6 +431,11 @@ export class FileUpload {
     }
     this.record = record;
 
+    // Runs alongside the parts and is only awaited at completion. A failure
+    // is reported there, so it must not go unhandled before then.
+    const hashing = this.sha ? Promise.resolve(this.sha) : this.hashWhileUploading();
+    hashing.catch(() => undefined);
+
     const plan = planParts(this.file.size, record.part_size);
     const confirmed = new Map<number, StoredPart>(record.parts.map((p) => [p.number, p]));
     this.sentByPart.clear();
@@ -476,15 +449,41 @@ export class FileUpload {
     }
 
     this.patch({ state: "finalizing" });
+    const checksum = await hashing;
     const parts = [...confirmed.values()]
       .sort((a, b) => a.number - b.number)
       .map((p) => ({ part_number: p.number, etag: p.etag }));
+    // The server records this checksum, or checks it against the one the
+    // upload started with, and verifies the stored bytes against it.
     const done = await this.request<{ status: UploadStatus }>(`/uploads/${record.upload_id}/complete`, {
       method: "POST",
-      body: { parts },
+      body: { parts, checksum_sha256: checksum },
     });
     await this.options.store.remove(record.upload_id);
-    await this.finish(done.status === 202 ? "COMPLETING" : done.data.status);
+    this.watch(done.status === 202 ? "COMPLETING" : done.data.status);
+  }
+
+  // Hashes the file while its parts upload. Progress has its own throttle so
+  // it never crowds out the upload's own progress updates. The result is
+  // saved with the resume record, so a resumed upload does not hash again.
+  private async hashWhileUploading() {
+    let lastEmit = 0;
+    const sha = await this.options.hash(this.file, {
+      signal: this.signal,
+      onProgress: (bytes) => {
+        const now = Date.now();
+        if (now - lastEmit < 250) return;
+        lastEmit = now;
+        this.patch({ hashedBytes: bytes });
+      },
+    });
+    this.sha = sha;
+    this.patch({ hashedBytes: this.file.size });
+    if (this.record) {
+      this.record = { ...this.record, sha256: sha, saved_at: new Date().toISOString() };
+      await this.options.store.put(this.record);
+    }
+    return sha;
   }
 
   // "open" means parts can still be sent; "gone" means start over.
@@ -582,12 +581,37 @@ export class FileUpload {
     return result.etag ?? "";
   }
 
-  // From here the bytes are stored. The API then verifies them, and the
-  // catalog reports the asset as it is scanned and published.
+  // The bytes are stored: the rest is the server's work. Watching it does
+  // not hold the run() caller, so the queue can start the next file.
+  private watch(status: UploadStatus) {
+    this.watching = this.finish(status).catch((error) => this.fail(error));
+  }
+
+  // Resolves once the server's verdict on the stored bytes is known (or
+  // watching stopped).
+  settled() {
+    return this.watching ?? Promise.resolve();
+  }
+
+  // From here the bytes are stored. The API then verifies, scans and
+  // publishes them, and the upload's status reports each step.
   private async finish(status: UploadStatus) {
     const verified = await this.waitForVerified(status);
     if (!verified) return;
-    await this.watchCatalog();
+    await this.watchAsset();
+  }
+
+  // Processing usually takes well under a second for small files, so the
+  // first checks come quickly and then slow down to pollMs.
+  private pollDelay(polls: number) {
+    return Math.min(this.options.pollMs, 500 * 2 ** polls);
+  }
+
+  // A rejected upload never gets a catalog version; the upload itself says so.
+  private rejected(info: UploadInfo) {
+    if (info.asset?.status !== "REJECTED") return false;
+    this.patch({ state: "rejected", asset: { ...this.snap.asset, status: "REJECTED", rejectionReason: info.asset.rejection_reason } });
+    return true;
   }
 
   private async waitForVerified(first: UploadStatus) {
@@ -608,49 +632,27 @@ export class FileUpload {
         this.patch({ pollingStopped: true });
         return false;
       }
-      await this.options.sleep(this.options.pollMs, this.signal);
-      status = await this.uploadStatus();
+      await this.options.sleep(this.pollDelay(polls), this.signal);
+      const info = await this.uploadInfo();
+      if (this.rejected(info)) return false;
+      status = info.status;
     }
   }
 
-  private async watchCatalog() {
+  // Polls the upload alone: it reports what the upload became and, once
+  // published, its catalog object. One request a check, however many files
+  // are waiting, so a large batch does not crowd out the uploads still going.
+  private async watchAsset() {
     this.patch({ state: "processing", speedBps: 0 });
 
     for (let polls = 0; ; polls++) {
-      let version: ObjectVersion | undefined;
-      let objectId: string | undefined;
-      try {
-        const object = await this.lookup();
-        if (object) {
-          objectId = object.id;
-          const { data } = await this.request<{ versions: ObjectVersion[] }>(`/catalog/objects/${object.id}/versions`, {
-            query: { limit: 10 },
-          });
-          version = data.versions.find(
-            (v) => v.version > this.baselineVersion && (!v.checksum_sha256 || v.checksum_sha256 === this.sha),
-          );
-        }
-      } catch (error) {
-        if (isApiError(error) && error.isForbidden) {
-          this.patch({
-            pollingStopped: true,
-            note: "Your role cannot read the catalog, so processing status cannot be shown. The upload itself is verified.",
-          });
-          return;
-        }
-        throw error;
-      }
-
-      if (version) {
-        const status: AssetStatus = version.status;
-        this.patch({ asset: { objectId, status } });
-        if (status === "AVAILABLE") {
+      const info = await this.uploadInfo();
+      if (this.rejected(info)) return;
+      const asset = info.asset;
+      if (asset) {
+        this.patch({ asset: { objectId: asset.object_id || undefined, status: asset.status } });
+        if (asset.status === "AVAILABLE") {
           this.patch({ state: "available" });
-          return;
-        }
-        if (status === "REJECTED") {
-          const reason = await this.rejectionReason(version.asset_id);
-          this.patch({ state: "rejected", asset: { objectId, status, rejectionReason: reason } });
           return;
         }
       }
@@ -659,16 +661,7 @@ export class FileUpload {
         this.patch({ pollingStopped: true });
         return;
       }
-      await this.options.sleep(this.options.pollMs, this.signal);
-    }
-  }
-
-  private async rejectionReason(assetId: string) {
-    try {
-      const { data } = await call<{ rejection_reason?: string }>(`/assets/${assetId}`, { signal: this.signal });
-      return data.rejection_reason;
-    } catch {
-      return undefined;
+      await this.options.sleep(this.pollDelay(polls), this.signal);
     }
   }
 }

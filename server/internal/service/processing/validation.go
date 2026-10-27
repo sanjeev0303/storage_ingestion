@@ -54,6 +54,14 @@ var extensionTypes = map[string]string{
 	".txt": "text/plain", ".csv": "text/csv", ".json": "application/json",
 }
 
+// signedTypes are binary formats whose files start with a signature that
+// DetectType recognises, so their bytes are never detected as plain text.
+var signedTypes = map[string]bool{
+	"application/pdf": true, "application/zip": true,
+	"image/png": true, "image/jpeg": true, "image/gif": true, "image/webp": true, "image/bmp": true,
+	"video/mp4": true, "video/webm": true, "audio/mpeg": true, "audio/wav": true,
+}
+
 // RunValidators runs the chain in order and stops at the first rejection.
 // The result carries the detected type from the type check.
 func RunValidators(ctx context.Context, validators []interfaces.FileValidator, sample interfaces.ContentSample, policy model.ContentPolicy) (interfaces.ValidationResult, error) {
@@ -147,6 +155,12 @@ func (TypeValidator) Validate(_ context.Context, sample interfaces.ContentSample
 	recognised := detected != UnknownType && detected != "text/plain"
 	if recognised && family(detected) != family(declared) {
 		return reject(model.RejectContentMismatch, "content is "+detected+", declared "+declared)
+	}
+	// Plain text does contradict a format that always opens with a
+	// signature the detector knows: a text file named report.pdf is not a
+	// PDF, and would be served as one.
+	if detected == "text/plain" && signedTypes[declared] {
+		return reject(model.RejectContentMismatch, "content is text, declared "+declared)
 	}
 	// Only media families are compared for the extension: text and
 	// application types are declared too inconsistently by browsers (a

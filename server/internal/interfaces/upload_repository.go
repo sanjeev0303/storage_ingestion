@@ -66,4 +66,16 @@ type UploadRepository interface {
 		storageUploadID string,
 		at time.Time,
 	) error
+
+	// SetDeclaredChecksum records the SHA-256 a client declares when it
+	// completes a multipart upload instead of when it starts one: once,
+	// and only while the session is UPLOADING. The same value again
+	// succeeds; a different one is model.ErrInvalidUploadState.
+	SetDeclaredChecksum(
+		ctx context.Context,
+		tenantID string,
+		uploadID string,
+		checksum string,
+		at time.Time,
+	) error
 }
