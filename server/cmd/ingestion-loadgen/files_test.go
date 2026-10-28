@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -71,5 +73,44 @@ func TestPlanFollowsTheSizeClasses(t *testing.T) {
 		if _, err := parseClasses(bad); err == nil {
 			t.Fatalf("%q was accepted", bad)
 		}
+	}
+}
+
+func TestScanDirListsKnownTypesWithRelativePaths(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		path := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("photos/a.JPG", "jpeg bytes")
+	write("data/b.csv", "x,y\n1,2\n")
+	write("skip.bin", "unknown type")
+	write("empty.txt", "")
+
+	specs, err := scanDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, f := range specs {
+		got[f.path] = f.contentType
+		body, err := openContent(0, f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, _ := io.ReadAll(body)
+		body.Close()
+		if int64(len(data)) != f.size {
+			t.Fatalf("%s: read %d bytes, size says %d", f.path, len(data), f.size)
+		}
+	}
+	want := map[string]string{"photos/a.JPG": "image/jpeg", "data/b.csv": "text/csv"}
+	if len(got) != len(want) || got["photos/a.JPG"] != want["photos/a.JPG"] || got["data/b.csv"] != want["data/b.csv"] {
+		t.Fatalf("got %v, want %v", got, want)
 	}
 }

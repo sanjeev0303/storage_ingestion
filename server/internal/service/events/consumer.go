@@ -137,22 +137,45 @@ func (s *ConsumeStats) add(outcome string) {
 	}
 }
 
-// Run consumes until ctx is cancelled. A failed receive is logged and
-// tried again after a backoff.
+// Run consumes until ctx is cancelled, and returns once every event it
+// started has finished. A failed receive is logged and tried again after a
+// backoff.
+//
+// The handler slots are shared across receives: as soon as one frees up,
+// more messages are taken, so a slow event never holds back the batch it
+// came with. Only as many messages are received as there are free slots, so
+// none sits hidden on the queue waiting for one.
 func (c *Consumer) Run(ctx context.Context) {
+	slots := make(chan struct{}, c.cfg.Concurrency)
+	var running sync.WaitGroup
+	defer running.Wait()
+
 	failures := 0
 	for ctx.Err() == nil {
-		stats, err := c.RunOnce(ctx)
-		if err == nil {
-			failures = 0
+		// Block until at least one slot is free, then count the free ones.
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
+		free := cap(slots) - len(slots) + 1
+		<-slots
+
+		running.Add(1)
+		err := c.consume(ctx, min(free, c.cfg.BatchSize), slots, func(stats ConsumeStats) {
+			defer running.Done()
 			if stats.Received > 0 {
 				c.log.Info("events consumed", "queue", c.cfg.Name, "received", stats.Received,
 					"completed", stats.Completed, "skipped", stats.Skipped, "duplicates", stats.Duplicates,
 					"busy", stats.Busy, "retried", stats.Retried, "dead_lettered", stats.DeadLettered,
 					"interrupted", stats.Interrupted, "unrecorded", stats.Unrecorded, "deferred", stats.Deferred)
 			}
+		})
+		if err == nil {
+			failures = 0
 			continue
 		}
+		running.Done()
 		if ctx.Err() != nil {
 			return
 		}
@@ -168,13 +191,25 @@ func (c *Consumer) Run(ctx context.Context) {
 }
 
 // RunOnce receives one batch and handles it, at most Concurrency groups at
-// a time. A FIFO queue can return several events of one group (one
-// aggregate) in a batch, so each group's events run one after another in
-// the order received; different groups run side by side.
+// a time, and returns when the whole batch is done.
 func (c *Consumer) RunOnce(ctx context.Context) (ConsumeStats, error) {
-	messages, err := c.queue.Receive(ctx, c.cfg.Name, c.cfg.BatchSize, c.cfg.Visibility, c.cfg.Wait)
+	done := make(chan ConsumeStats, 1)
+	if err := c.consume(ctx, c.cfg.BatchSize, make(chan struct{}, c.cfg.Concurrency), func(stats ConsumeStats) { done <- stats }); err != nil {
+		return ConsumeStats{}, err
+	}
+	return <-done, nil
+}
+
+// consume receives up to max messages and starts each group on a slot. A
+// FIFO queue can return several events of one group (one aggregate) in a
+// batch, so each group's events run one after another in the order
+// received; different groups run side by side. It returns once every group
+// has started; finished is called with the batch's counts after the last
+// one ends (and only if the receive succeeded).
+func (c *Consumer) consume(ctx context.Context, max int, slots chan struct{}, finished func(ConsumeStats)) error {
+	messages, err := c.queue.Receive(ctx, c.cfg.Name, max, c.cfg.Visibility, c.cfg.Wait)
 	if err != nil {
-		return ConsumeStats{}, fmt.Errorf("receive from %s: %w", c.cfg.Name, err)
+		return fmt.Errorf("receive from %s: %w", c.cfg.Name, err)
 	}
 	receivedAt := time.Now()
 	stats := ConsumeStats{Received: len(messages)}
@@ -182,7 +217,6 @@ func (c *Consumer) RunOnce(ctx context.Context) (ConsumeStats, error) {
 
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	slots := make(chan struct{}, c.cfg.Concurrency)
 	for _, group := range groupsOf(messages) {
 		slots <- struct{}{}
 		wg.Add(1)
@@ -213,8 +247,11 @@ func (c *Consumer) RunOnce(ctx context.Context) (ConsumeStats, error) {
 			}
 		}(group)
 	}
-	wg.Wait()
-	return stats, nil
+	go func() {
+		wg.Wait()
+		finished(stats)
+	}()
+	return nil
 }
 
 // handleInTurn handles a message that may have waited for a free slot or

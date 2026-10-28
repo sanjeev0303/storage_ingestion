@@ -1,6 +1,7 @@
 package sha256
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -44,3 +45,27 @@ func TestSumReportsReadErrors(t *testing.T) {
 type iotestErrReader struct{}
 
 func (iotestErrReader) Read([]byte) (int, error) { return 0, errors.New("connection reset") }
+
+// writerToOnly hides everything but WriteTo, as the range reader offers.
+type writerToOnly struct{ r *bytes.Reader }
+
+func (w writerToOnly) Read(p []byte) (int, error)           { return w.r.Read(p) }
+func (w writerToOnly) WriteTo(dst io.Writer) (int64, error) { return w.r.WriteTo(dst) }
+
+func TestSumOfAWriterToSourceMatchesAPlainRead(t *testing.T) {
+	data := bytes.Repeat([]byte("object bytes "), 100_000)
+	plain, err := Sum(context.Background(), io.LimitReader(bytes.NewReader(data), int64(len(data))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	direct, err := Sum(context.Background(), writerToOnly{bytes.NewReader(data)})
+	if err != nil || direct != plain {
+		t.Fatalf("WriteTo path gave %q (err %v), plain read gave %q", direct, err, plain)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := Sum(ctx, writerToOnly{bytes.NewReader(data)}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled hash returned %v, want context.Canceled", err)
+	}
+}

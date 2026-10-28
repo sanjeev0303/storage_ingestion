@@ -1,0 +1,694 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Competitor Gap Analysis</title>
+<meta name="description" content="How the multi-tenant ML dataset storage platform compares with lakeFS, Quilt, Hugging Face, W&amp;B Artifacts, DVC, curation platforms and cloud object stores, and what to build, in what order, to surpass them.">
+<style>
+  :root {
+    --bg: #f7f7f5;
+    --surface: #ffffff;
+    --surface-2: #f0efec;
+    --text: #1b1b19;
+    --muted: #5a5a55;
+    --border: #dddcd7;
+    --accent: #1f4b73;
+    --link: #1f4b73;
+    --yes-bg: #e3f1e7;
+    --yes-fg: #1b5530;
+    --partial-bg: #fbf0d8;
+    --partial-fg: #6f4a0c;
+    --no-bg: #f7e2df;
+    --no-fg: #842820;
+    --unk-bg: #e9e9e6;
+    --unk-fg: #45453f;
+    --callout: #eef3f8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #131312;
+      --surface: #1b1b1a;
+      --surface-2: #232322;
+      --text: #ebeae6;
+      --muted: #a3a29c;
+      --border: #34342f;
+      --accent: #9cc0e4;
+      --link: #9cc0e4;
+      --yes-bg: #183021;
+      --yes-fg: #9bd6ad;
+      --partial-bg: #362b12;
+      --partial-fg: #e4c078;
+      --no-bg: #3a1c19;
+      --no-fg: #efa198;
+      --unk-bg: #292927;
+      --unk-fg: #c3c2bc;
+      --callout: #1a232d;
+    }
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+
+  html { -webkit-text-size-adjust: 100%; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 1rem;
+    line-height: 1.6;
+    overflow-x: hidden;
+  }
+
+  main {
+    max-width: 62rem;
+    margin: 0 auto;
+    padding: 2rem 16px 4rem;
+  }
+
+  h1, h2, h3 { line-height: 1.25; text-wrap: balance; }
+  h1 { font-size: clamp(1.6rem, 4vw, 2.2rem); margin: 0 0 .5rem; letter-spacing: -0.01em; }
+  h2 { font-size: 1.4rem; margin: 3rem 0 .75rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+  h3 { font-size: 1.1rem; margin: 2rem 0 .5rem; }
+  p { margin: 0 0 1rem; max-width: 72ch; }
+  ul, ol { max-width: 72ch; padding-left: 1.25rem; }
+  li { margin-bottom: .4rem; }
+
+  a { color: var(--link); text-underline-offset: 2px; }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+
+  .meta { color: var(--muted); font-size: .9rem; margin-bottom: 1.5rem; }
+
+  .verdict {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--accent);
+    border-radius: 6px;
+    padding: 1.25rem 1.25rem .5rem;
+    margin: 1.5rem 0;
+  }
+  .verdict h2 { border: 0; margin: 0 0 .5rem; padding: 0; font-size: 1.15rem; }
+
+  .figures {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+    gap: .75rem;
+    margin: 1.5rem 0;
+  }
+  .figure {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: .9rem 1rem;
+  }
+  .figure strong {
+    display: block;
+    font-size: 1.5rem;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.2;
+  }
+  .figure span { color: var(--muted); font-size: .875rem; }
+
+  nav.toc {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: .75rem 1rem;
+    margin: 1.5rem 0;
+    font-size: .95rem;
+  }
+  nav.toc ol { margin: .25rem 0 0; }
+
+  .callout {
+    background: var(--callout);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1rem 1rem .25rem;
+    margin: 1rem 0 1.5rem;
+  }
+
+  .table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    margin: 1rem 0 .5rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+  }
+  .table-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: .875rem;
+    font-variant-numeric: tabular-nums;
+  }
+  caption {
+    text-align: left;
+    padding: .75rem .75rem .25rem;
+    font-weight: 600;
+    color: var(--text);
+  }
+  th, td {
+    text-align: left;
+    vertical-align: top;
+    padding: .55rem .75rem;
+    border-bottom: 1px solid var(--border);
+  }
+  thead th {
+    background: var(--surface-2);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  tbody tr:last-child th, tbody tr:last-child td { border-bottom: 0; }
+  tbody th { font-weight: 600; }
+
+  table.matrix { min-width: 72rem; }
+  table.matrix td, table.matrix tbody th { min-width: 8.5rem; }
+  table.matrix tbody th,
+  table.matrix thead th:first-child {
+    position: sticky;
+    left: 0;
+    background: var(--surface-2);
+    z-index: 1;
+    min-width: 11rem;
+  }
+  table.matrix td.ours { background: var(--callout); }
+
+  table.wide { min-width: 48rem; }
+
+  .s {
+    display: inline-block;
+    font-size: .72rem;
+    font-weight: 700;
+    letter-spacing: .02em;
+    text-transform: uppercase;
+    padding: 0 .4rem;
+    border-radius: 3px;
+    margin-right: .25rem;
+    border: 1px solid currentColor;
+    white-space: nowrap;
+  }
+  .yes { background: var(--yes-bg); color: var(--yes-fg); }
+  .partial { background: var(--partial-bg); color: var(--partial-fg); }
+  .no { background: var(--no-bg); color: var(--no-fg); }
+  .unk { background: var(--unk-bg); color: var(--unk-fg); }
+
+  .legend { display: flex; flex-wrap: wrap; gap: .5rem 1rem; font-size: .875rem; color: var(--muted); margin: .5rem 0; }
+
+  .note { color: var(--muted); font-size: .85rem; max-width: 72ch; }
+
+  .sources h3 { font-size: 1rem; margin-top: 1.5rem; }
+  .sources ul { font-size: .9rem; }
+  .sources li { overflow-wrap: anywhere; }
+
+  footer { color: var(--muted); font-size: .85rem; margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+
+  @media print {
+    .table-wrap { overflow: visible; border: 0; }
+    table.matrix, table.wide { min-width: 0; }
+    nav.toc { display: none; }
+  }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>Integrity-first dataset platform must now earn reach</h1>
+  <p class="meta">Competitor gap analysis for the multi-tenant ML dataset storage platform &middot; 28 October 2026 &middot; Based on research notes dated 2026-10-28 and the platform's own repo documentation</p>
+</header>
+
+<section class="verdict" aria-labelledby="verdict">
+  <h2 id="verdict">Verdict</h2>
+  <p><strong>The platform is ahead in a narrow niche (integrity, safety and governance) and well behind on adoption features.</strong> No researched competitor combines its full-object SHA-256 on every upload, malware quarantine <em>before</em> an object is readable, snapshots that pin object versions across five storage backend types, readiness reports that state what was <em>not</em> checked, legal holds, and a hash-chained audit log.</p>
+  <p>It lacks what the leading competitors all ship: a Python SDK or CLI, branching, a dataset preview with SQL, ML streaming, deduplication, a hosted SaaS and compliance certifications. None of its storage connectors has been tested against a real cloud.</p>
+  <p><strong>What to do, in order:</strong> prove it works (live-cloud tests, fix the open defects, publish a cloud benchmark), make it usable from code (SDK, CLI, SSO), make it ML-native (dedup, preview, streaming, diff and branch), then do the procurement work (SOC 2, hosted SaaS).</p>
+</section>
+
+<div class="figures" role="list">
+  <div class="figure" role="listitem"><strong>9 / 3 / 7</strong><span>Of 19 capabilities in the matrix: fully present / partial / missing</span></div>
+  <div class="figure" role="listitem"><strong>8</strong><span>Open medium-severity defects in the release candidate</span></div>
+  <div class="figure" role="listitem"><strong>0</strong><span>Storage connectors verified against a live cloud (emulators only)</span></div>
+  <div class="figure" role="listitem"><strong>11.3&ndash;14.5 MiB/s</strong><span>End-to-end ingest with hash and malware scan, one laptop</span></div>
+</div>
+
+<nav class="toc" aria-label="Contents">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#landscape">Competitor landscape</a></li>
+    <li><a href="#matrix">Feature comparison matrix</a></li>
+    <li><a href="#performance">Performance comparison</a></li>
+    <li><a href="#ahead">Where the platform is ahead</a></li>
+    <li><a href="#behind">Where it is behind</a></li>
+    <li><a href="#roadmap">Roadmap to surpass competitors</a></li>
+    <li><a href="#conclusion">Conclusion</a></li>
+    <li><a href="#sources">Sources</a></li>
+  </ol>
+</nav>
+
+<section aria-labelledby="landscape">
+  <h2 id="landscape">1. Quilt and lakeFS are the true rivals; the rest are adjacent</h2>
+  <p>The platform's pitch is "verifiable, reproducible datasets. Every snapshot pins object versions; every report states what was checked, how, what was not checked, and what evidence backs it" (repo: <code>PRODUCT.md</code>).</p>
+  <p>The closest product to that model is <strong>Quilt</strong>. Its packages are immutable, and each manifest entry pins an S3 version such as <code>s3://bucket/a1b2c3/customers.csv?versionId=xyz</code> (<a href="https://docs.quilt.bio/mentalmodel.md">Quilt Mental Model</a>). Quilt runs only on AWS, inside the customer's own account (<a href="https://docs.quilt.bio/architecture">Quilt Architecture</a>).</p>
+  <p><strong>lakeFS</strong> is the commercial heavyweight. It versions a whole object-store namespace with zero-copy branches, commits, merges and hooks (<a href="https://docs.lakefs.io/">lakeFS docs</a>).</p>
+  <p>The <strong>Hugging Face Hub</strong> is the volume leader: 77PB+ across 6M repositories now sit on Xet (<a href="https://huggingface.co/blog/huggingface-hub-v1">HF hub v1.0</a>). It is SaaS-only, and customers cannot bring their own bucket (<a href="https://huggingface.co/docs/hub/storage-regions">HF Storage Regions</a>).</p>
+  <p><strong>W&amp;B Artifacts</strong> is the only hub-style product with first-class bring-your-own-bucket. On the multi-tenant SaaS this is team-level and limited to S3, GCS and CoreWeave storage (<a href="https://docs.coreweave.com/platform/hosting/data-security/secure-storage-connector.md">Secure Storage Connector</a>).</p>
+  <p>Curation platforms (Encord, Labelbox, Voxel51, Roboflow) answer "is this data good for training?". Cloud object stores are the platform's substrate, not its rivals.</p>
+
+  <div class="table-wrap" tabindex="0" role="region" aria-label="Competitor landscape table">
+  <table class="wide">
+    <caption>Who they are and what changed in 2025&ndash;2026</caption>
+    <thead>
+      <tr><th scope="col">Product</th><th scope="col">Category</th><th scope="col">Deployment</th><th scope="col">Status (Oct 2026)</th><th scope="col">Price signal</th></tr>
+    </thead>
+    <tbody>
+      <tr><th scope="row">lakeFS</th><td>Data versioning layer</td><td>Self-managed or lakeFS Cloud</td><td>Community edition moved from Apache 2.0 to <strong>Business Source License 1.1</strong> from v1.87.0 (22 Sept 2026): internal use only, no hosting for third parties (<a href="https://github.com/treeverse/lakeFS/blob/master/LICENSE">LICENSE</a>; <a href="https://lakefs.io/blog/lakefs-business-source-license/">blog</a>). $20M round July 2025; names Arm, Bosch, NASA, Volvo (<a href="https://lakefs.io/blog/lakefs-acquires-dvc/">lakeFS</a>)</td><td>Team $499/mo for 5 users, 500 GB, 500 RPS; Enterprise custom (<a href="https://lakefs.io/pricing/">pricing</a>)</td></tr>
+      <tr><th scope="row">DVC</th><td>Git-based data versioning CLI</td><td>Client tool</td><td><strong>Acquired by lakeFS</strong> 18 Nov 2025, stays Apache-2.0 (<a href="https://lakefs.io/blog/lakefs-acquires-dvc/">announcement</a>; <a href="https://github.com/treeverse/dvc">GitHub</a>). DVC Studio docs return 404 (<a href="https://dvc.org/doc/studio">dvc.org/doc/studio</a>)</td><td>Free</td></tr>
+      <tr><th scope="row">Pachyderm / HPE MLDM</th><td>Versioned data pipelines</td><td>Kubernetes</td><td>Acquired by HPE Jan 2023 (<a href="https://techcrunch.com/2023/01/12/hpe-acquires-pachyderm-as-looks-to-bolster-its-ai-dev-offerings/">TechCrunch</a>). <strong>Repo dormant</strong>: last release v2.12.2 on 2025-01-15, last push 2025-02-03 (<a href="https://github.com/pachyderm/pachyderm">GitHub</a>)</td><td>Unpublished</td></tr>
+      <tr><th scope="row">Quilt</th><td>Immutable data packages</td><td>Customer's AWS account (CloudFormation)</td><td>Active; Apache-2.0 repo (<a href="https://github.com/quiltdata/quilt">GitHub</a>)</td><td>From $750/bucket/mo, 5-bucket minimum (<a href="https://www.quilt.bio/pricing">pricing</a>)</td></tr>
+      <tr><th scope="row">Hugging Face Hub</th><td>ML dataset and model hub</td><td>SaaS only</td><td>Active; Xet chunk storage across 77PB+ (<a href="https://huggingface.co/blog/huggingface-hub-v1">HF</a>)</td><td>Private storage $18 falling to $12/TB/mo (<a href="https://huggingface.co/docs/hub/storage-limits">storage limits</a>)</td></tr>
+      <tr><th scope="row">W&amp;B Artifacts</th><td>ML artifact versioning</td><td>SaaS, dedicated, self-managed</td><td><strong>Part of CoreWeave</strong> since 5 May 2025; SaaS sign-in moved to CoreWeave Forge from 30 Sept 2026 (<a href="https://www.coreweave.com/companies/weights-and-biases">CoreWeave</a>; <a href="https://www.coreweave.com/news/coreweave-completes-acquisition-of-weights-biases-2">press release</a>)</td><td>Not retrieved</td></tr>
+      <tr><th scope="row">Deep Lake, Oxen</th><td>Open-source versioned data stores</td><td>Self-hosted or vendor cloud</td><td>Apache-2.0 (<a href="https://github.com/activeloopai/deeplake">Deep Lake</a>; <a href="https://github.com/Oxen-AI/Oxen">Oxen</a>)</td><td>Deep Lake Team $99/seat (<a href="https://www.deeplake.ai/pricing">pricing</a>)</td></tr>
+      <tr><th scope="row">Encord, Labelbox, Voxel51, Roboflow</th><td>Curation and labelling</td><td>SaaS, VPC, on-prem</td><td>Active; register media in place in the customer's bucket (<a href="https://docs.encord.com/platform-documentation/General/annotate-data-integrations/annotate-aws-integration.md">Encord</a>)</td><td>Mostly contact sales (<a href="https://voxel51.com/pricing">Voxel51</a>)</td></tr>
+      <tr><th scope="row">S3, R2, GCS, Azure Blob, MinIO</th><td>Object storage (substrate)</td><td>Cloud or self-hosted</td><td><strong>MinIO community edition in maintenance mode</strong> since late 2025, no new features, security fixes "case by case" (<a href="https://www.infoq.com/news/2025/12/minio-s3-api-alternatives/">InfoQ</a>); AIStor is proprietary (<a href="https://docs.min.io/aistor/">AIStor docs</a>)</td><td>R2 $0.015/GB-mo, free egress (<a href="https://developers.cloudflare.com/r2/pricing/">R2 pricing</a>)</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">The platform's default local backend and all of its measurements use single-node MinIO community edition (repo), so the MinIO change is a direct dependency risk.</p>
+</section>
+
+<section aria-labelledby="matrix">
+  <h2 id="matrix">2. The platform fully matches 9 of 19 capabilities</h2>
+  <p>The platform column uses only facts from the repo documentation. Competitor cells use only the cited research. <strong>Unknown</strong> means the documentation was not found or could not be fetched; it does not mean the feature is absent.</p>
+  <div class="legend" aria-label="Legend">
+    <span><span class="s yes">Yes</span> documented and present</span>
+    <span><span class="s partial">Partial</span> limited or by a different model</span>
+    <span><span class="s no">No</span> absent or not documented</span>
+    <span><span class="s unk">Unknown</span> not found or not researched</span>
+    <span><span class="s unk">N/A</span> does not apply</span>
+  </div>
+
+  <div class="table-wrap" tabindex="0" role="region" aria-label="Feature comparison matrix, scrolls horizontally">
+  <table class="matrix">
+    <caption>Feature comparison matrix (scroll sideways on small screens)</caption>
+    <thead>
+      <tr>
+        <th scope="col">Capability</th>
+        <th scope="col">This platform</th>
+        <th scope="col">lakeFS</th>
+        <th scope="col">Quilt</th>
+        <th scope="col">Hugging Face</th>
+        <th scope="col">W&amp;B Artifacts</th>
+        <th scope="col">DVC</th>
+        <th scope="col">Curation (Encord, Labelbox, Voxel51)</th>
+        <th scope="col">Cloud stores</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <th scope="row">Bring your own storage</th>
+        <td class="ours"><span class="s partial">Partial</span> S3, R2, GCS, Azure, S3-compatible built; emulator-tested only</td>
+        <td><span class="s yes">Yes</span> S3, Azure, GCS, S3-compatible</td>
+        <td><span class="s partial">Partial</span> AWS S3 only</td>
+        <td><span class="s no">No</span> HF-managed US/EU</td>
+        <td><span class="s partial">Partial</span> team-level S3/GCS on SaaS; Azure on dedicated only</td>
+        <td><span class="s yes">Yes</span> many remotes</td>
+        <td><span class="s yes">Yes</span> register in place via IAM role</td>
+        <td><span class="s unk">N/A</span></td>
+      </tr>
+      <tr>
+        <th scope="row">Presigned and multipart upload</th>
+        <td class="ours"><span class="s yes">Yes</span></td>
+        <td><span class="s partial">Partial</span> presigned; multipart undocumented</td>
+        <td><span class="s partial">Partial</span> SDK multipart; presigned undocumented</td>
+        <td><span class="s partial">Partial</span> LFS bridge presigned URL</td>
+        <td><span class="s partial">Partial</span> presigned URLs</td>
+        <td><span class="s partial">Partial</span> client push, no server</td>
+        <td><span class="s partial">Partial</span> by reference; Roboflow direct upload</td>
+        <td><span class="s yes">Yes</span></td>
+      </tr>
+      <tr>
+        <th scope="row">Whole-file SHA-256 integrity</th>
+        <td class="ours"><span class="s yes">Yes</span> all sizes incl. multipart</td>
+        <td><span class="s unk">Unknown</span> not documented</td>
+        <td><span class="s partial">Partial</span> chunked SHA-256, verify()</td>
+        <td><span class="s yes">Yes</span> SHA-256 in LFS pointers, each file checked</td>
+        <td><span class="s partial">Partial</span> metadata checksum (unverified)</td>
+        <td><span class="s partial">Partial</span> MD5</td>
+        <td><span class="s no">No</span> not documented</td>
+        <td><span class="s partial">Partial</span> S3 SHA-256 only composite for multipart</td>
+      </tr>
+      <tr>
+        <th scope="row">Malware scan before availability</th>
+        <td class="ours"><span class="s yes">Yes</span> ClamAV, quarantine, fail-closed</td>
+        <td><span class="s no">No</span> DIY via hooks</td>
+        <td><span class="s no">No</span> not documented</td>
+        <td><span class="s partial">Partial</span> ClamAV under 2 GB, warn only</td>
+        <td><span class="s no">No</span> not found</td>
+        <td><span class="s no">No</span></td>
+        <td><span class="s no">No</span> not documented</td>
+        <td><span class="s partial">Partial</span> scan after write; blocking is DIY</td>
+      </tr>
+      <tr>
+        <th scope="row">Branching, merge, diff</th>
+        <td class="ours"><span class="s no">No</span></td>
+        <td><span class="s yes">Yes</span></td>
+        <td><span class="s partial">Partial</span> immutable versions, no branches</td>
+        <td><span class="s yes">Yes</span> Git</td>
+        <td><span class="s partial">Partial</span> versions, no branches</td>
+        <td><span class="s yes">Yes</span> via Git</td>
+        <td><span class="s partial">Partial</span> metadata snapshots</td>
+        <td><span class="s partial">Partial</span> object versioning</td>
+      </tr>
+      <tr>
+        <th scope="row">Immutable snapshots pinning object versions</th>
+        <td class="ours"><span class="s yes">Yes</span></td>
+        <td><span class="s yes">Yes</span> commits (own layout)</td>
+        <td><span class="s yes">Yes</span> manifest pins versionId</td>
+        <td><span class="s partial">Partial</span> repo commits yes; Buckets unversioned</td>
+        <td><span class="s partial">Partial</span> artifact versions</td>
+        <td><span class="s yes">Yes</span> Git-tracked hashes</td>
+        <td><span class="s no">No</span> media assumed immutable</td>
+        <td><span class="s partial">Partial</span> versioning, Object Lock</td>
+      </tr>
+      <tr>
+        <th scope="row">Validation / readiness with explicit "not checked"</th>
+        <td class="ours"><span class="s yes">Yes</span></td>
+        <td><span class="s partial">Partial</span> pre-commit/merge hooks</td>
+        <td><span class="s partial">Partial</span> JSON Schema workflows</td>
+        <td><span class="s partial">Partial</span> viewer stats, no gate</td>
+        <td><span class="s no">No</span> not found</td>
+        <td><span class="s no">No</span></td>
+        <td><span class="s partial">Partial</span> ML-quality metrics</td>
+        <td><span class="s no">No</span></td>
+      </tr>
+      <tr>
+        <th scope="row">Lineage</th>
+        <td class="ours"><span class="s partial">Partial</span> dataset-internal graph</td>
+        <td><span class="s unk">Unknown</span></td>
+        <td><span class="s unk">Unknown</span></td>
+        <td><span class="s partial">Partial</span> model-to-bucket links</td>
+        <td><span class="s yes">Yes</span> dataset to run to model</td>
+        <td><span class="s unk">Unknown</span></td>
+        <td><span class="s unk">Unknown</span></td>
+        <td><span class="s no">No</span></td>
+      </tr>
+      <tr>
+        <th scope="row">Manifest bulk ingestion</th>
+        <td class="ours"><span class="s yes">Yes</span> JSONL with per-file SHA-256, 1M entries</td>
+        <td><span class="s partial">Partial</span> zero-copy import</td>
+        <td><span class="s partial">Partial</span> Packaging Engine, events</td>
+        <td><span class="s partial">Partial</span> large-folder upload, sync plan</td>
+        <td><span class="s partial">Partial</span> reference artifacts</td>
+        <td><span class="s partial">Partial</span> import-url</td>
+        <td><span class="s partial">Partial</span> JSON up to 500K items</td>
+        <td><span class="s partial">Partial</span> S3 Batch Operations</td>
+      </tr>
+      <tr>
+        <th scope="row">Retention and legal holds</th>
+        <td class="ours"><span class="s yes">Yes</span> age-based retention, holds</td>
+        <td><span class="s partial">Partial</span> lifecycle and GC, no holds</td>
+        <td><span class="s partial">Partial</span> deletion hard by design</td>
+        <td><span class="s no">No</span> not documented</td>
+        <td><span class="s partial">Partial</span> TTL, no holds</td>
+        <td><span class="s no">No</span></td>
+        <td><span class="s no">No</span> not documented</td>
+        <td><span class="s yes">Yes</span> S3 Object Lock, legal hold</td>
+      </tr>
+      <tr>
+        <th scope="row">Tamper-evident audit</th>
+        <td class="ours"><span class="s yes">Yes</span> hash-chained, verifiable, reads logged</td>
+        <td><span class="s partial">Partial</span> audit logs, paid tiers</td>
+        <td><span class="s unk">Unknown</span></td>
+        <td><span class="s partial">Partial</span> admin events, no reads</td>
+        <td><span class="s unk">Unknown</span></td>
+        <td><span class="s no">No</span></td>
+        <td><span class="s partial">Partial</span> on request or cloud logs</td>
+        <td><span class="s partial">Partial</span> append-only logs, no hash chain</td>
+      </tr>
+      <tr>
+        <th scope="row">Multi-tenant orgs with quotas</th>
+        <td class="ours"><span class="s yes">Yes</span></td>
+        <td><span class="s partial">Partial</span> tenants in private preview</td>
+        <td><span class="s no">No</span> single-customer stack</td>
+        <td><span class="s yes">Yes</span> orgs, quotas</td>
+        <td><span class="s yes">Yes</span> teams</td>
+        <td><span class="s no">No</span></td>
+        <td><span class="s yes">Yes</span> workspaces</td>
+        <td><span class="s unk">N/A</span></td>
+      </tr>
+      <tr>
+        <th scope="row">RBAC, SSO, SCIM</th>
+        <td class="ours"><span class="s partial">Partial</span> roles only; no SSO/SAML/SCIM</td>
+        <td><span class="s yes">Yes</span> paid tiers</td>
+        <td><span class="s partial">Partial</span> SSO; SCIM not found</td>
+        <td><span class="s yes">Yes</span> SSO Team+, SCIM Enterprise</td>
+        <td><span class="s unk">Unknown</span></td>
+        <td><span class="s no">No</span></td>
+        <td><span class="s partial">Partial</span> RBAC and SSO</td>
+        <td><span class="s unk">Unknown</span> not researched</td>
+      </tr>
+      <tr>
+        <th scope="row">Compliance certifications</th>
+        <td class="ours"><span class="s no">No</span></td>
+        <td><span class="s partial">Partial</span> SOC 2 logo only</td>
+        <td><span class="s partial">Partial</span> SOC 2 II, HIPAA, GxP (vendor claim, unverified)</td>
+        <td><span class="s yes">Yes</span> SOC 2 Type 2, GDPR, BAA</td>
+        <td><span class="s unk">Unknown</span></td>
+        <td><span class="s unk">N/A</span></td>
+        <td><span class="s yes">Yes</span> SOC 2 II; Labelbox ISO 27001</td>
+        <td><span class="s unk">Unknown</span> not researched</td>
+      </tr>
+      <tr>
+        <th scope="row">Python SDK / CLI</th>
+        <td class="ours"><span class="s no">No</span> HTTP API and console only</td>
+        <td><span class="s yes">Yes</span></td>
+        <td><span class="s yes">Yes</span></td>
+        <td><span class="s yes">Yes</span></td>
+        <td><span class="s yes">Yes</span></td>
+        <td><span class="s yes">Yes</span></td>
+        <td><span class="s yes">Yes</span></td>
+        <td><span class="s yes">Yes</span></td>
+      </tr>
+      <tr>
+        <th scope="row">ML framework streaming</th>
+        <td class="ours"><span class="s no">No</span></td>
+        <td><span class="s partial">Partial</span> fsspec, HF Datasets</td>
+        <td><span class="s unk">Unknown</span></td>
+        <td><span class="s yes">Yes</span> datasets streaming</td>
+        <td><span class="s unk">Unknown</span></td>
+        <td><span class="s unk">Unknown</span></td>
+        <td><span class="s unk">Unknown</span></td>
+        <td><span class="s unk">Unknown</span> not researched</td>
+      </tr>
+      <tr>
+        <th scope="row">Dataset viewer / SQL</th>
+        <td class="ours"><span class="s no">No</span></td>
+        <td><span class="s partial">Partial</span> UI, DuckDB integration</td>
+        <td><span class="s yes">Yes</span> previews, Athena SQL</td>
+        <td><span class="s yes">Yes</span> Data Studio, DuckDB SQL</td>
+        <td><span class="s partial">Partial</span> Tables</td>
+        <td><span class="s no">No</span></td>
+        <td><span class="s partial">Partial</span> visual browsing</td>
+        <td><span class="s partial">Partial</span> S3 Metadata tables</td>
+      </tr>
+      <tr>
+        <th scope="row">Deduplication</th>
+        <td class="ours"><span class="s no">No</span> every upload stored and scanned again</td>
+        <td><span class="s partial">Partial</span> zero-copy branches</td>
+        <td><span class="s unk">Unknown</span></td>
+        <td><span class="s yes">Yes</span> Xet chunk-level, global</td>
+        <td><span class="s partial">Partial</span> file-level (unverified)</td>
+        <td><span class="s yes">Yes</span> content-addressed cache</td>
+        <td><span class="s partial">Partial</span> near-duplicate detection only</td>
+        <td><span class="s no">No</span></td>
+      </tr>
+      <tr>
+        <th scope="row">Hosted SaaS</th>
+        <td class="ours"><span class="s no">No</span></td>
+        <td><span class="s yes">Yes</span> lakeFS Cloud</td>
+        <td><span class="s no">No</span> in-account install</td>
+        <td><span class="s yes">Yes</span></td>
+        <td><span class="s yes">Yes</span></td>
+        <td><span class="s no">No</span></td>
+        <td><span class="s yes">Yes</span></td>
+        <td><span class="s yes">Yes</span></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">Platform column: repo <code>PRODUCT.md</code>, <code>server/docs/release-candidate.md</code>, <code>server/docs/phase15-report.md</code>. Competitor cells: <a href="https://docs.lakefs.io/">lakeFS docs</a>, <a href="https://docs.lakefs.io/security/presigned-url/">lakeFS presigned URLs</a>, <a href="https://docs.lakefs.io/guides/hooks/">lakeFS hooks</a>, <a href="https://docs.lakefs.io/data-retention/">lakeFS retention</a>, <a href="https://docs.lakefs.io/admin/auditing/">lakeFS auditing</a>, <a href="https://docs.lakefs.io/security/tenants/">lakeFS tenants</a>, <a href="https://docs.quilt.bio/quilt-platform-administration/advanced/chunked_checksums.md">Quilt checksums</a>, <a href="https://docs.quilt.bio/quilt-platform/workflows.md">Quilt workflows</a>, <a href="https://docs.quilt.bio/faq.md">Quilt FAQ</a>, <a href="https://www.quilt.bio/lp/governance">Quilt governance (vendor marketing)</a>, <a href="https://huggingface.co/docs/hub/security-malware">HF malware scanning</a>, <a href="https://huggingface.co/docs/hub/security">HF security</a>, <a href="https://huggingface.co/docs/hub/enterprise-hub">HF plans</a>, <a href="https://huggingface.co/docs/hub/audit-logs">HF audit logs</a>, <a href="https://huggingface.co/docs/hub/datasets-viewer">HF Data Studio</a>, <a href="https://huggingface.co/docs/hub/xet/deduplication">HF Xet dedup</a>, <a href="https://huggingface.co/docs/hub/storage-buckets">HF Buckets</a>, <a href="https://docs.coreweave.com/guides/artifacts">W&amp;B Artifacts</a>, <a href="https://docs.coreweave.com/models/artifacts/ttl.md">W&amp;B TTL</a>, <a href="https://dvc.org/doc/user-guide/project-structure/internal-files">DVC internal files</a>, <a href="https://docs.voxel51.com/enterprise/dataset_versioning.html">FiftyOne versioning</a>, <a href="https://docs.encord.com/solutions-documentation/enterprise-ai/security-and-compliance.md">Encord security</a>, <a href="https://labelbox.com/blog/celebrating-labelboxs-latest-security-advancement-iso-27001-2022-certification/">Labelbox ISO 27001</a>, <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity-upload.html">S3 integrity</a>, <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html">S3 Object Lock</a>, <a href="https://docs.aws.amazon.com/guardduty/latest/ug/how-malware-protection-for-s3-gdu-works.html">GuardDuty for S3</a>, <a href="https://learn.microsoft.com/en-us/azure/defender-for-cloud/introduction-malware-scanning">Defender for Storage</a>.</p>
+</section>
+
+<section aria-labelledby="performance">
+  <h2 id="performance">3. Performance: one laptop against vendor clusters</h2>
+  <div class="callout">
+    <p><strong>These numbers are not like-for-like.</strong> The platform's figures come from a single <strong>Intel Core i5-1135G7 laptop</strong>: 4 cores, 15.7 GB RAM, Docker Desktop with 8 CPUs and 7.6 GiB, running single-node MinIO, PostgreSQL 17 and ClamAV 1.4. Every file was SHA-256-verified, malware-scanned and promoted.</p>
+    <p>Competitor figures are <strong>vendor-published</strong>, usually from multi-node clusters, and most measure only part of the pipeline. lakeFS benchmarks metadata operations, not data transfer, and the clouds publish request-rate targets, not end-to-end ingest. The table shows scale side by side; it does not show who is faster.</p>
+  </div>
+
+  <div class="table-wrap" tabindex="0" role="region" aria-label="Performance comparison table">
+  <table class="wide">
+    <caption>Measured (platform) versus published (competitors), with conditions</caption>
+    <thead>
+      <tr><th scope="col">Metric</th><th scope="col">This platform (one laptop)</th><th scope="col">Competitor (vendor-published)</th><th scope="col">Competitor conditions</th></tr>
+    </thead>
+    <tbody>
+      <tr><th scope="row">End-to-end ingest with hash and scan</th><td>11.3 MiB/s cold scan cache; 14.5 MiB/s warm (174 files, 1.2 GiB)</td><td>Azure Defender on-upload scan up to 50 GB/min per account (<a href="https://learn.microsoft.com/en-us/azure/defender-for-cloud/on-upload-malware-scanning">Defender</a>)</td><td>Per storage account; scan only, not ingest</td></tr>
+      <tr><th scope="row">Raw object throughput</th><td>Not measured separately</td><td>MinIO AIStor 249.5 GiB/s GET, 128.5 GiB/s PUT (<a href="https://min.io/blog/density-was-supposed-to-cost-you-performance-the-numbers-say-otherwise">MinIO blog, vendor</a>)</td><td>8 nodes, 192 NVMe drives, 400G NICs, 256 MiB objects</td></tr>
+      <tr><th scope="row">Raw object throughput</th><td>Not measured separately</td><td>Hugging Face Xet storage ~35 Gb/s sustained, ~300 Gb/s peak (<a href="https://huggingface.co/blog/migrating-the-hub-to-xet">HF blog</a>)</td><td>Fleet-wide, during 2025 migrations</td></tr>
+      <tr><th scope="row">Small-file writes</th><td>35&ndash;40 files/s with raised limits; ~10 files/s at default (defect R2)</td><td>S3 at least 3,500 PUT/s per prefix (<a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/optimizing-performance.html">AWS</a>); GCS ~1,000 writes/s per bucket initially (<a href="https://docs.cloud.google.com/storage/docs/request-rate">Google</a>)</td><td>Per prefix / per bucket, no scanning</td></tr>
+      <tr><th scope="row">Metadata reads</th><td>Path lookup p50/p95 2.12/14.73 ms at 1M objects</td><td>lakeFS random read 10,851.69 req/s, p50 under 10 ms (<a href="https://docs.lakefs.io/admin/sizing-guide/">lakeFS sizing</a>)</td><td>2 load generators, db.m6g.2xlarge, ~180M objects</td></tr>
+      <tr><th scope="row">Metadata writes</th><td>Not benchmarked as req/s</td><td>lakeFS random write 7,595.46 req/s, p50 under 10 ms (<a href="https://docs.lakefs.io/admin/sizing-guide/">lakeFS sizing</a>)</td><td>Same cluster, parallelism 64</td></tr>
+      <tr><th scope="row">Bulk registration</th><td>Manifest read at 4,723 lines/s (1M entries)</td><td>lakeFS import "roughly a few thousand objects per second" (<a href="https://docs.lakefs.io/guides/import/">lakeFS import</a>)</td><td>No conditions given</td></tr>
+      <tr><th scope="row">Snapshot / branch</th><td>Snapshot of 2,000 files in 0.21 s</td><td>lakeFS branch creation 7,069.03 req/s, p50 under 15 ms (<a href="https://docs.lakefs.io/admin/sizing-guide/">lakeFS sizing</a>)</td><td>Metadata-only branching</td></tr>
+      <tr><th scope="row">Per-tenant API ceiling</th><td>600 requests/min default</td><td>Labelbox 1,500 to 20,000 req/min (<a href="https://docs.labelbox.com/docs/limits">Labelbox</a>); HF 1,000 to 100,000 per 5 min (<a href="https://huggingface.co/docs/hub/enterprise-hub">HF plans</a>)</td><td>Published plan limits</td></tr>
+      <tr><th scope="row">Incremental update</th><td>Re-uploads whole changed files</td><td>Xet: 0.1 s vs 13 min under LFS for a ~1MB append to a ~5GB file (<a href="https://huggingface.co/blog/xet-on-the-hub">HF blog</a>)</td><td>50Mb/s link, single example</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>Two readings hold despite the mismatch</h3>
+  <p><strong>The catalog is not the bottleneck.</strong> A path lookup at a p95 of 14.73 ms over 1M objects is in the same range as lakeFS's stated target of under 25 ms p90 for object reads (<a href="https://docs.lakefs.io/admin/sizing-guide/">lakeFS sizing</a>). Manifest reading runs at the same order of magnitude as lakeFS's zero-copy import. Scale beyond 1M objects is unmeasured.</p>
+  <p><strong>Malware scanning is the bottleneck, and it is CPU-bound.</strong> ClamAV averaged about 4.6 of 8 CPUs, while the busiest Go service peaked around 330 MiB of memory (repo). The laptop processes roughly 0.7 GB per minute end to end. Matching Azure's published 50 GB/minute per-account scan ceiling would therefore take roughly <strong>55&ndash;70&times;</strong> the laptop's throughput. That is a judgement from dividing the two figures, not a measurement, and it can only come from scanner workers scaled out horizontally on cloud hardware.</p>
+  <p>The warm-cache run hints at the cheapest gain. Re-ingesting identical files cut the median wait for processing from 20.6 s to 5.8 s, an effect that SHA-256-keyed deduplication would make permanent. Separately, the small-file rate is about 1% of one S3 prefix's floor, because the platform's control plane, not the store, sets the pace.</p>
+</section>
+
+<section aria-labelledby="ahead">
+  <h2 id="ahead">4. Where the platform is ahead</h2>
+  <p><strong>Scan before availability.</strong> Hugging Face runs ClamAV only on files <strong>under 2 GB</strong>, and an infected file gets a warning badge with advice to the owner to delete it. There is no quarantine (<a href="https://huggingface.co/docs/hub/security-malware">HF malware scanning</a>). The cloud scanners also scan after the write:</p>
+  <ul>
+    <li>AWS GuardDuty scans after upload and leaves blocking to customer-written tag policies (<a href="https://docs.aws.amazon.com/guardduty/latest/ug/how-malware-protection-for-s3-gdu-works.html">GuardDuty</a>).</li>
+    <li>Azure Defender says "access to the scanned data remains unaffected during scanning" and that its result tags "aren't tamper-resistant" (<a href="https://learn.microsoft.com/en-us/azure/defender-for-cloud/introduction-malware-scanning">Defender</a>).</li>
+    <li>Azure also fails open: past a <strong>10 TB monthly cap</strong> or a sustained 50 GB/minute upload rate, some blobs may go unscanned (<a href="https://learn.microsoft.com/en-us/azure/defender-for-cloud/on-upload-malware-scanning">Defender on-upload</a>).</li>
+  </ul>
+  <p>The platform holds files while the scanner is down and promotes nothing until every check passes (repo).</p>
+  <p><strong>Full-object SHA-256.</strong> For multipart uploads, S3 stores SHA-256 only as a composite of part checksums, because "full object checksums in multipart uploads are only available for CRC-based checksums" (<a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity-upload.html">S3</a>). GCS offers only CRC32C and MD5 (<a href="https://docs.cloud.google.com/storage/docs/hashes-etags">GCS</a>). DVC relies on MD5 (<a href="https://dvc.org/doc/user-guide/project-structure/internal-files">DVC</a>).</p>
+  <p><strong>Governance depth.</strong> No researched competitor documents legal holds, a hash-chained audit log, or a validation report with explicit "not checked" states. Hugging Face's audit log covers admin events but not file reads, and documents no tamper-evidence (<a href="https://huggingface.co/docs/hub/audit-logs">HF audit logs</a>). The curation platforms' snapshots pin metadata over media they assume is immutable (<a href="https://docs.voxel51.com/enterprise/dataset_versioning.html">FiftyOne</a>).</p>
+  <p><strong>Backend breadth.</strong> The platform has built-in connectors for S3, R2, GCS, Azure and S3-compatible storage. Quilt supports S3 only, and W&amp;B's multi-tenant SaaS does not support Azure. This lead is unverified until the connectors are tested on real clouds.</p>
+</section>
+
+<section aria-labelledby="behind">
+  <h2 id="behind">5. Where it is behind</h2>
+  <p>Each missing capability is a front-door feature for someone:</p>
+  <ul>
+    <li><strong>SDK and CLI.</strong> Every competitor in the matrix ships a Python SDK or CLI. The platform offers only an HTTP API, the console and an internal load generator.</li>
+    <li><strong>Dataset preview.</strong> Hugging Face's Data Studio shows paged rows, column histograms and a DuckDB SQL console in the browser (<a href="https://huggingface.co/docs/hub/datasets-viewer">HF Data Studio</a>).</li>
+    <li><strong>Streaming.</strong> Hugging Face's streaming rework claims "up to 2x faster" streaming and 256 workers on 64&times;H100 without crashes (<a href="https://huggingface.co/blog/streaming-datasets">HF streaming</a>).</li>
+    <li><strong>Deduplication.</strong> Xet deduplicates ~64KB chunks across all repositories (<a href="https://huggingface.co/docs/hub/xet/deduplication">HF Xet</a>). The platform stores and re-scans every upload.</li>
+    <li><strong>Certifications.</strong> Hugging Face (SOC 2 Type 2), Encord (SOC 2 Type II) and Labelbox (ISO 27001:2022) can answer security questionnaires with certificates (<a href="https://huggingface.co/docs/hub/security">HF</a>; <a href="https://docs.encord.com/solutions-documentation/enterprise-ai/security-and-compliance.md">Encord</a>; <a href="https://labelbox.com/blog/celebrating-labelboxs-latest-security-advancement-iso-27001-2022-certification/">Labelbox</a>). The platform has none.</li>
+  </ul>
+  <p>Most important of all, <strong>no connector has been tested against a real cloud</strong>. Everything ran on MinIO, fake-gcs-server and Azurite emulators (repo).</p>
+
+  <div class="table-wrap" tabindex="0" role="region" aria-label="Open defects table">
+  <table>
+    <caption>Open medium-severity defects a buyer would meet in a trial (repo: release-candidate.md &sect;3.2)</caption>
+    <thead><tr><th scope="col">ID</th><th scope="col">Defect</th></tr></thead>
+    <tbody>
+      <tr><th scope="row">R1</th><td>The 15-minute processing lease is never renewed, so crash recovery waits 15 minutes</td></tr>
+      <tr><th scope="row">R2</th><td>The default limit of 600 requests per minute per org caps one tenant's bulk ingestion at about 10 files/s</td></tr>
+      <tr><th scope="row">R5</th><td>Cancelling a 1M-entry job took 24 minutes</td></tr>
+      <tr><th scope="row">D2</th><td>Editing a connection sets it to PENDING and stops that tenant's I/O until it is retested</td></tr>
+      <tr><th scope="row">D11</th><td>Promotion uses a single CopyObject, which has a 5 GiB cap</td></tr>
+      <tr><th scope="row">D3</th><td>STS session expiry versus presigned URL lifetime is unverified</td></tr>
+      <tr><th scope="row">D7</th><td>Orphan scans cover only the platform bucket</td></tr>
+      <tr><th scope="row">D4</th><td>On versioned BYO storage, delete removes only the current version</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">Low-severity items also open: D13 (write probe not on by default), D8, an S3 race, P1, H1 (/health has no database readiness check) and M1 (migration tool). Delivery and API gaps: no cross-organisation sharing, presigned URLs cannot be revoked, no listing of uploads or imports, no worker or queue health endpoint (repo).</p>
+</section>
+
+<section aria-labelledby="roadmap">
+  <h2 id="roadmap">6. Roadmap: four phases, correctness before features</h2>
+  <p>The sizes are <strong>judgements about engineering effort, not measurements</strong>: S is under two weeks, M is two to six weeks, L is one to three months, and XL is longer or depends on outside parties. The order matters, because a trial that hits the 10 files/s default ceiling or a failed real-S3 connection ends before any differentiator is seen.</p>
+
+  <div class="table-wrap" tabindex="0" role="region" aria-label="Prioritised roadmap table">
+  <table class="wide">
+    <caption>Prioritised improvement roadmap</caption>
+    <thead>
+      <tr><th scope="col">#</th><th scope="col">Phase</th><th scope="col">Build</th><th scope="col">Why</th><th scope="col">Closes gap with</th><th scope="col">Size (judgement)</th></tr>
+    </thead>
+    <tbody>
+      <tr><th scope="row">1</th><td>Prove it works</td><td>Live-cloud verification on AWS S3, R2, GCS, Azure; settle D3</td><td>BYO storage is the core claim and has only been tested on emulators</td><td>lakeFS, W&amp;B, curation platforms</td><td>M</td></tr>
+      <tr><th scope="row">2</th><td>Prove it works</td><td>Fix R1 (renew lease), R2 (raise default rate limit), R5 (fast cancel), D11 (multipart copy above 5 GiB), D2 (edit without I/O outage), D4, D7, H1 (/health with DB readiness)</td><td>Removes trial-killing failures; R2 alone caps ingest at ~10 files/s</td><td>All</td><td>M</td></tr>
+      <tr><th scope="row">3</th><td>Prove it works</td><td>Replace or abstract the MinIO community-edition default: test Garage, SeaweedFS, RustFS or Ceph RGW, or license AIStor (<a href="https://www.infoq.com/news/2025/12/minio-s3-api-alternatives/">InfoQ</a>)</td><td>MinIO CE is in maintenance mode, with security fixes "case by case"</td><td>Risk reduction</td><td>S&ndash;M</td></tr>
+      <tr><th scope="row">4</th><td>Prove it works</td><td>Publish a dated, reproducible cloud benchmark with instance, region and scanner limits stated</td><td>Competitors mostly publish caps or vendor claims; a rigorous number is itself a differentiator</td><td>lakeFS, HF, Oxen</td><td>S</td></tr>
+      <tr><th scope="row">5</th><td>Prove it works</td><td>Scale scanning horizontally; state ClamAV size ceilings</td><td>Scanning is the bottleneck. HF stops at 2 GB, GuardDuty at 100 GB (<a href="https://docs.aws.amazon.com/guardduty/latest/ug/malware-protection-s3-quotas-guardduty.html">quotas</a>), Defender at 50 GB (<a href="https://learn.microsoft.com/en-us/azure/defender-for-cloud/introduction-malware-scanning">Defender</a>)</td><td>HF, GuardDuty, Defender</td><td>M</td></tr>
+      <tr><th scope="row">6</th><td>Usable from code</td><td>Python SDK and CLI (upload, manifest ingest, snapshot pin, verify), plus fsspec</td><td>Every leading competitor ships one; it is the adoption front door</td><td>lakeFS, Quilt, HF, W&amp;B, DVC</td><td>L</td></tr>
+      <tr><th scope="row">7</th><td>Usable from code</td><td>Close the API gaps: list uploads and imports, read retention and holds, object-to-dataset lookup, worker and queue health; add customer webhooks</td><td>The SDK and customer automation need them</td><td>lakeFS hooks, HF bucket webhooks</td><td>M</td></tr>
+      <tr><th scope="row">8</th><td>Usable from code</td><td>SSO (OIDC/SAML), then SCIM</td><td>Enterprise buyers require it</td><td>lakeFS, HF, Labelbox, Encord</td><td>M</td></tr>
+      <tr><th scope="row">9</th><td>ML-native</td><td>File-level dedup keyed by SHA-256, skipping re-scan of known-clean content</td><td>Cuts storage and the scan bottleneck; the warm-cache run shows the effect</td><td>HF Xet, DVC, W&amp;B</td><td>M</td></tr>
+      <tr><th scope="row">10</th><td>ML-native</td><td>Dataset preview: Parquet, CSV and JSONL rows, image thumbnails, DuckDB SQL</td><td>Now table stakes for dataset hubs</td><td>HF Data Studio, Quilt</td><td>L</td></tr>
+      <tr><th scope="row">11</th><td>ML-native</td><td>ML streaming loader (PyTorch IterableDataset over pinned snapshots)</td><td>Lets training read verified snapshots directly</td><td>HF datasets, Deep Lake</td><td>L</td></tr>
+      <tr><th scope="row">12</th><td>ML-native</td><td>Snapshot diff, then lightweight branches; lineage links to external training runs</td><td>Closes the "Git for data" and run-lineage comparisons</td><td>lakeFS, HF, W&amp;B</td><td>L</td></tr>
+      <tr><th scope="row">13</th><td>Buyable</td><td>Map retention and holds onto S3 Object Lock for S3 BYO backends</td><td>Object Lock is Cohasset-assessed for SEC 17a-4 (<a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html">AWS</a>); reuse it rather than compete with it</td><td>S3, MinIO AIStor</td><td>M</td></tr>
+      <tr><th scope="row">14</th><td>Buyable</td><td>SOC 2 Type II, then ISO 27001</td><td>A procurement requirement that competitors already meet</td><td>HF, Encord, Labelbox, Quilt</td><td>XL</td></tr>
+      <tr><th scope="row">15</th><td>Buyable</td><td>Hosted multi-tenant SaaS with billing, then multi-region and CDN delivery</td><td>Removes self-hosting friction</td><td>lakeFS Cloud, HF, W&amp;B</td><td>XL</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Together this is roughly <strong>two to three engineer-quarters before the platform is credibly at parity on adoption features</strong>, plus whatever time the external audit takes. That is a judgement, not a forecast. Surpassing rather than matching comes from keeping the integrity-and-governance lead while closing the gaps, because no researched competitor documents scan-before-availability or hash-chained audit.</p>
+</section>
+
+<section aria-labelledby="conclusion">
+  <h2 id="conclusion">7. Conclusion</h2>
+  <p><strong>The platform's central promise is evidence.</strong> It is not a weaker lakeFS or a smaller Hugging Face: it is the only product in this field built around proof of what was hashed, scanned, pinned and left unchecked.</p>
+  <p><strong>That points sales at regulated, governance-led buyers first.</strong> These are the buyers Quilt courts with HIPAA and GxP claims and that S3 Object Lock serves with its SEC 17a-4 assessment. Without this platform they assemble that evidence themselves from GuardDuty tags, Object Lock and do-it-yourself hooks. For them, certifications and SSO matter more than branching.</p>
+  <p><strong>The market has opened a gap for a neutral, multi-backend platform:</strong></p>
+  <ul>
+    <li>lakeFS can no longer be hosted for third parties under its free licence.</li>
+    <li>MinIO's free edition is frozen.</li>
+    <li>Pachyderm is dormant.</li>
+    <li>W&amp;B is now tied to one GPU cloud.</li>
+  </ul>
+  <p>To use that gap, the platform must prove its connectors on real clouds before its rivals add quarantine and tamper-evident audit. In my judgement those features would be cheaper for them to add than SDKs and dataset viewers are for this platform.</p>
+  <p><strong>The first cloud benchmark will decide whether the lead is affordable.</strong> None of the platform's performance figures says anything about cloud scale yet. The one bottleneck found, CPU-bound malware scanning, costs more as the platform grows.</p>
+</section>
+
+<section class="sources" aria-labelledby="sources">
+  <h2 id="sources">Sources</h2>
+  <h3>The platform (repo, not public)</h3>
+  <ul>
+    <li><code>C:\Users\sanjeev.kumar\Music\storage\PRODUCT.md</code></li>
+    <li><code>server/docs/release-candidate.md</code> (&sect;3.2 defects, &sect;5.1 measurements)</li>
+    <li><code>server/docs/phase15-report.md</code> (&sect;10 API gaps)</li>
+    <li>Session measurements of 2026-10-27/28, recorded in <code>research_notes/Storage platform competitor gap analysis/00_our_product.md</code></li>
+  </ul>
+  <h3>Data versioning layers</h3>
+  <ul>
+    <li><a href="https://docs.lakefs.io/">lakeFS docs</a> &middot; <a href="https://docs.lakefs.io/editions/">lakeFS Editions</a> &middot; <a href="https://lakefs.io/pricing/">lakeFS pricing</a> &middot; <a href="https://github.com/treeverse/lakeFS/blob/master/LICENSE">lakeFS LICENSE</a> &middot; <a href="https://lakefs.io/blog/lakefs-business-source-license/">lakeFS BSL blog</a> &middot; <a href="https://lakefs.io/blog/lakefs-acquires-dvc/">lakeFS acquires DVC</a> &middot; <a href="https://dvc.org/blog/dvc-joins-lakefs-your-questions-answered/">DVC joins lakeFS Q&amp;A</a></li>
+    <li><a href="https://docs.lakefs.io/guides/import/">lakeFS import</a> &middot; <a href="https://docs.lakefs.io/security/presigned-url/">lakeFS presigned URLs</a> &middot; <a href="https://docs.lakefs.io/guides/hooks/">lakeFS hooks</a> &middot; <a href="https://docs.lakefs.io/data-retention/">lakeFS data retention</a> &middot; <a href="https://docs.lakefs.io/admin/auditing/">lakeFS auditing</a> &middot; <a href="https://docs.lakefs.io/security/sso/">lakeFS SSO</a> &middot; <a href="https://docs.lakefs.io/security/tenants/">lakeFS tenants</a> &middot; <a href="https://docs.lakefs.io/admin/sizing-guide/">lakeFS sizing guide</a></li>
+    <li><a href="https://github.com/treeverse/dvc">GitHub treeverse/dvc</a> &middot; <a href="https://dvc.org/doc/user-guide/project-structure/internal-files">DVC internal files</a> &middot; <a href="https://dvc.org/doc/studio">dvc.org/doc/studio</a></li>
+    <li><a href="https://techcrunch.com/2023/01/12/hpe-acquires-pachyderm-as-looks-to-bolster-its-ai-dev-offerings/">TechCrunch on HPE and Pachyderm</a> &middot; <a href="https://github.com/pachyderm/pachyderm">GitHub pachyderm</a></li>
+    <li><a href="https://docs.quilt.bio/mentalmodel.md">Quilt Mental Model</a> &middot; <a href="https://docs.quilt.bio/architecture">Quilt Architecture</a> &middot; <a href="https://docs.quilt.bio/faq.md">Quilt FAQ</a> &middot; <a href="https://docs.quilt.bio/quilt-platform-administration/advanced/chunked_checksums.md">Quilt checksums</a> &middot; <a href="https://docs.quilt.bio/quilt-platform/workflows.md">Quilt workflows</a> &middot; <a href="https://www.quilt.bio/lp/governance">Quilt governance (vendor marketing)</a> &middot; <a href="https://www.quilt.bio/pricing">Quilt pricing</a> &middot; <a href="https://github.com/quiltdata/quilt">GitHub quiltdata/quilt</a></li>
+  </ul>
+  <h3>ML dataset hubs</h3>
+  <ul>
+    <li><a href="https://huggingface.co/docs/hub/xet/index">HF Xet</a> &middot; <a href="https://huggingface.co/docs/hub/xet/deduplication">HF Xet dedup</a> &middot; <a href="https://huggingface.co/docs/hub/storage-buckets">HF Storage Buckets</a> &middot; <a href="https://huggingface.co/docs/hub/storage-regions">HF Storage Regions</a> &middot; <a href="https://huggingface.co/docs/hub/storage-limits">HF storage limits</a> &middot; <a href="https://huggingface.co/blog/xet-on-the-hub">HF Xet is on the Hub</a> &middot; <a href="https://huggingface.co/blog/migrating-the-hub-to-xet">HF migrating to Xet</a> &middot; <a href="https://huggingface.co/blog/huggingface-hub-v1">HF hub v1.0</a></li>
+    <li><a href="https://huggingface.co/docs/hub/security-malware">HF malware scanning</a> &middot; <a href="https://huggingface.co/docs/hub/security">HF security</a> &middot; <a href="https://huggingface.co/docs/hub/enterprise-hub">HF Team and Enterprise</a> &middot; <a href="https://huggingface.co/docs/hub/audit-logs">HF audit logs</a> &middot; <a href="https://huggingface.co/docs/hub/datasets-viewer">HF Data Studio</a> &middot; <a href="https://huggingface.co/blog/streaming-datasets">HF streaming datasets</a></li>
+    <li><a href="https://docs.coreweave.com/guides/artifacts">W&amp;B Artifacts</a> &middot; <a href="https://docs.coreweave.com/platform/hosting/data-security/secure-storage-connector.md">W&amp;B Secure Storage Connector</a> &middot; <a href="https://docs.coreweave.com/models/artifacts/ttl.md">W&amp;B TTL</a> &middot; <a href="https://www.coreweave.com/companies/weights-and-biases">CoreWeave: W&amp;B</a> &middot; <a href="https://www.coreweave.com/news/coreweave-completes-acquisition-of-weights-biases-2">CoreWeave press release</a></li>
+    <li><a href="https://github.com/activeloopai/deeplake">Deep Lake GitHub</a> &middot; <a href="https://www.deeplake.ai/pricing">Deep Lake pricing</a> &middot; <a href="https://github.com/Oxen-AI/Oxen">Oxen GitHub</a></li>
+  </ul>
+  <h3>Object storage</h3>
+  <ul>
+    <li><a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/optimizing-performance.html">S3 performance</a> &middot; <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity-upload.html">S3 integrity on upload</a> &middot; <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html">S3 Object Lock</a></li>
+    <li><a href="https://docs.cloud.google.com/storage/docs/request-rate">GCS request rate</a> &middot; <a href="https://docs.cloud.google.com/storage/docs/hashes-etags">GCS hashes</a></li>
+    <li><a href="https://docs.aws.amazon.com/guardduty/latest/ug/how-malware-protection-for-s3-gdu-works.html">GuardDuty Malware Protection for S3</a> &middot; <a href="https://docs.aws.amazon.com/guardduty/latest/ug/malware-protection-s3-quotas-guardduty.html">GuardDuty S3 quotas</a> &middot; <a href="https://learn.microsoft.com/en-us/azure/defender-for-cloud/introduction-malware-scanning">Defender malware scanning</a> &middot; <a href="https://learn.microsoft.com/en-us/azure/defender-for-cloud/on-upload-malware-scanning">Defender on-upload scanning</a></li>
+    <li><a href="https://developers.cloudflare.com/r2/pricing/">R2 pricing</a> &middot; <a href="https://min.io/blog/density-was-supposed-to-cost-you-performance-the-numbers-say-otherwise">MinIO density benchmark (vendor)</a> &middot; <a href="https://docs.min.io/aistor/">MinIO AIStor docs</a> &middot; <a href="https://www.infoq.com/news/2025/12/minio-s3-api-alternatives/">InfoQ on MinIO maintenance mode</a></li>
+  </ul>
+  <h3>Curation platforms</h3>
+  <ul>
+    <li><a href="https://docs.encord.com/platform-documentation/General/annotate-data-integrations/annotate-aws-integration.md">Encord AWS integration</a> &middot; <a href="https://docs.encord.com/solutions-documentation/enterprise-ai/security-and-compliance.md">Encord security and compliance</a> &middot; <a href="https://docs.labelbox.com/docs/limits">Labelbox limits</a> &middot; <a href="https://labelbox.com/blog/celebrating-labelboxs-latest-security-advancement-iso-27001-2022-certification/">Labelbox ISO 27001</a> &middot; <a href="https://docs.voxel51.com/brain/index.html">FiftyOne Brain</a> &middot; <a href="https://docs.voxel51.com/enterprise/dataset_versioning.html">FiftyOne dataset versioning</a> &middot; <a href="https://voxel51.com/pricing">Voxel51 pricing</a></li>
+  </ul>
+</section>
+
+<footer>
+  <p>Platform figures are single-laptop measurements; competitor figures are vendor-published and unverified unless stated. Effort sizes and the 55&ndash;70&times; scan-throughput gap are judgements, not measurements. No customers, pricing, benchmarks or certifications are claimed for the platform.</p>
+</footer>
+
+</main>
+</body>
+</html>

@@ -90,6 +90,21 @@ func TestScanOutcomes(t *testing.T) {
 	}
 }
 
+// The buffers are pooled: a short file scanned after a longer one must not
+// carry any of the earlier bytes.
+func TestScanReusesBuffersWithoutMixingContent(t *testing.T) {
+	for _, content := range []string{"a much longer first file of plain text", "short", ""} {
+		address, got := fakeClamd(t, "stream: OK")
+		result := New(address, 5*time.Second).Scan(context.Background(), strings.NewReader(content))
+		if received := <-got; string(received) != content {
+			t.Fatalf("clamd received %q, want %q", received, content)
+		}
+		if result.Outcome != model.ScanClean {
+			t.Fatalf("got %+v, want CLEAN", result)
+		}
+	}
+}
+
 func TestScanIsAnErrorWhenClamdIsUnreachable(t *testing.T) {
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
 	address := ln.Addr().String()

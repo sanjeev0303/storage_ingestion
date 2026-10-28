@@ -15,6 +15,16 @@ const bufferSize = 64 * 1024
 // It stops with ctx.Err() as soon as ctx is cancelled.
 func Sum(ctx context.Context, r io.Reader) (string, error) {
 	h := sha256.New()
+
+	// A source that hands out its own buffers (the parallel range reader)
+	// is hashed straight from them: no copy through buf.
+	if wt, ok := r.(io.WriterTo); ok {
+		if _, err := wt.WriteTo(cancellable{ctx: ctx, w: h}); err != nil {
+			return "", err
+		}
+		return hex.EncodeToString(h.Sum(nil)), nil
+	}
+
 	buf := make([]byte, bufferSize)
 
 	for {
@@ -33,4 +43,17 @@ func Sum(ctx context.Context, r io.Reader) (string, error) {
 			return "", err
 		}
 	}
+}
+
+// cancellable stops a WriteTo between writes once ctx is cancelled.
+type cancellable struct {
+	ctx context.Context
+	w   io.Writer
+}
+
+func (c cancellable) Write(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.w.Write(p)
 }

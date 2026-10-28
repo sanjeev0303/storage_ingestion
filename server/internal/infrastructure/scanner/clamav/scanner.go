@@ -11,13 +11,34 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
 )
 
-const chunkSize = 64 * 1024
+const chunkSize = 256 * 1024
+
+// scanBuffers is what one scan needs, reused from a pool instead of
+// allocated per scan: the chunk it reads into, a writer that packs the
+// command, each chunk's length and bytes and the closing marker into as few
+// writes as it can (a small file leaves in one packet instead of four,
+// which counts when clamd is a network hop away), and the reply reader.
+type scanBuffers struct {
+	chunk []byte
+	size  [4]byte
+	out   *bufio.Writer
+	in    *bufio.Reader
+}
+
+var buffers = sync.Pool{New: func() any {
+	return &scanBuffers{
+		chunk: make([]byte, chunkSize),
+		out:   bufio.NewWriterSize(nil, 16+chunkSize),
+		in:    bufio.NewReaderSize(nil, 256),
+	}
+}}
 
 // Scanner talks to one clamd address such as "127.0.0.1:3310".
 type Scanner struct {
@@ -70,20 +91,27 @@ func (s *Scanner) Scan(ctx context.Context, content io.Reader) interfaces.ScanRe
 	}
 	defer conn.Close()
 
-	if _, err := conn.Write([]byte("zINSTREAM\x00")); err != nil {
+	b := buffers.Get().(*scanBuffers)
+	defer func() {
+		// Drop the connection before the buffers go back for the next scan.
+		b.out.Reset(nil)
+		b.in.Reset(nil)
+		buffers.Put(b)
+	}()
+	b.out.Reset(conn)
+	b.in.Reset(conn)
+
+	if _, err := b.out.WriteString("zINSTREAM\x00"); err != nil {
 		return s.failure(ctx, "start scan", err)
 	}
-
-	buf := make([]byte, chunkSize)
-	size := make([]byte, 4)
 	for {
-		n, readErr := content.Read(buf)
+		n, readErr := content.Read(b.chunk)
 		if n > 0 {
-			binary.BigEndian.PutUint32(size, uint32(n))
-			if _, err := conn.Write(size); err != nil {
+			binary.BigEndian.PutUint32(b.size[:], uint32(n))
+			if _, err := b.out.Write(b.size[:]); err != nil {
 				return s.failure(ctx, "send chunk", err)
 			}
-			if _, err := conn.Write(buf[:n]); err != nil {
+			if _, err := b.out.Write(b.chunk[:n]); err != nil {
 				return s.failure(ctx, "send chunk", err)
 			}
 		}
@@ -95,12 +123,15 @@ func (s *Scanner) Scan(ctx context.Context, content io.Reader) interfaces.ScanRe
 		}
 	}
 
-	// A zero-length chunk ends the stream.
-	if _, err := conn.Write([]byte{0, 0, 0, 0}); err != nil {
+	// A zero-length chunk ends the stream; the flush sends what is left.
+	if _, err := b.out.Write([]byte{0, 0, 0, 0}); err != nil {
+		return s.failure(ctx, "end stream", err)
+	}
+	if err := b.out.Flush(); err != nil {
 		return s.failure(ctx, "end stream", err)
 	}
 
-	reply, err := bufio.NewReader(conn).ReadString(0)
+	reply, err := b.in.ReadString(0)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return s.failure(ctx, "read verdict", err)
 	}

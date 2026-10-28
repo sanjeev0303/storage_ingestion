@@ -96,3 +96,37 @@ func TestClosingEarlyStopsTheFetches(t *testing.T) {
 		t.Fatalf("%d ranges fetched for 10 bytes read; read-ahead is not bounded", n)
 	}
 }
+
+// Chunks of the default size come from a pool. Reading the same object
+// again (through WriteTo, as io.Copy does) reuses those buffers and must
+// still return exactly the object.
+func TestPooledChunksAreReusedWithoutMixingBytes(t *testing.T) {
+	size := ChunkBytes*2 + ChunkBytes/2
+	s, data := stored(t, size)
+	cond := interfaces.ReadCondition{IfMatch: s.ETag("k")}
+	for pass := 1; pass <= 3; pass++ {
+		var got bytes.Buffer
+		n, err := io.Copy(&got, Open(context.Background(), s, "b", "k", int64(size), cond, ChunkBytes, 2))
+		if err != nil || n != int64(size) || !bytes.Equal(got.Bytes(), data) {
+			t.Fatalf("pass %d: %d bytes, err %v; want the object back unchanged", pass, n, err)
+		}
+	}
+}
+
+// BenchmarkReadAll reports what one pass over a 64 MiB object allocates.
+func BenchmarkReadAll(b *testing.B) {
+	size := 64 << 20
+	data := make([]byte, size)
+	s := memory.NewObjectStorage()
+	s.PutObject("k", data)
+	cond := interfaces.ReadCondition{IfMatch: s.ETag("k")}
+	b.SetBytes(int64(size))
+	b.ReportAllocs()
+	for b.Loop() {
+		body := Open(context.Background(), s, "b", "k", int64(size), cond, ChunkBytes, Parallel)
+		if _, err := io.Copy(io.Discard, body); err != nil {
+			b.Fatal(err)
+		}
+		body.Close()
+	}
+}
