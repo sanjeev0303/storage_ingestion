@@ -26,9 +26,17 @@ var archiveTypes = map[string]bool{
 }
 
 // scanWhole streams the object to the scanner in one piece, hashing and
-// counting exactly what the scanner reads.
+// counting exactly what the scanner reads. An object bigger than one range
+// chunk is fetched as parallel ranges pinned to its ETag, so the scanner is
+// fed at the storage's full bandwidth and an overwrite fails the read.
 func (s *Service) scanWhole(ctx context.Context, storage interfaces.MultipartStorage, bucket, key string) (interfaces.ScanResult, int64, string, error) {
-	body, err := storage.OpenObject(ctx, bucket, key)
+	scanCtx, cancel := context.WithTimeout(ctx, s.cfg.ScanTimeout)
+	defer cancel()
+	meta, err := storage.HeadObject(scanCtx, bucket, key)
+	if err != nil {
+		return interfaces.ScanResult{}, 0, "", fmt.Errorf("inspect object to scan: %w", err)
+	}
+	body, err := rangeread.OpenObject(scanCtx, storage, bucket, key, meta)
 	if err != nil {
 		return interfaces.ScanResult{}, 0, "", fmt.Errorf("open object to scan: %w", err)
 	}
@@ -36,8 +44,6 @@ func (s *Service) scanWhole(ctx context.Context, storage interfaces.MultipartSto
 
 	hasher := sha256.New()
 	var read byteCount
-	scanCtx, cancel := context.WithTimeout(ctx, s.cfg.ScanTimeout)
-	defer cancel()
 	result := s.deps.Scanner.Scan(scanCtx, io.TeeReader(body, io.MultiWriter(hasher, &read)))
 	return result, int64(read), hex.EncodeToString(hasher.Sum(nil)), nil
 }

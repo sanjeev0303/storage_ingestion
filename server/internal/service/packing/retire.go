@@ -50,6 +50,17 @@ func (s *Service) retireSources(ctx context.Context, stats *CycleStats) error {
 				"pack_id", e.PackID, "asset_id", a.ID, "status", string(a.Status))
 			continue
 		}
+		if s.deps.Shared != nil {
+			user, err := s.deps.Shared.KeyInUse(ctx, a.TenantID, e.SourceKey, a.ID)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			if user != "" {
+				// Another asset is served from these same bytes; they stay.
+				continue
+			}
+		}
 		loc, err := s.deps.Router.Locate(ctx, a.TenantID, a.StorageConnectionID)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("resolve storage connection: %w", err))

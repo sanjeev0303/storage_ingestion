@@ -277,3 +277,13 @@ type CompactionRun struct {
 	FinishedAt   time.Time
 	LastError    string
 }
+
+// ObjectLock is what the platform last applied to an asset's stored
+// version on a bucket with S3 Object Lock.
+type ObjectLock struct {
+	AssetID     string
+	TenantID    string
+	RetainUntil *time.Time
+	LegalHold   bool
+	AppliedAt   time.Time
+}

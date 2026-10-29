@@ -13,11 +13,11 @@ import { Time } from "@/components/ui/time";
 import { useSession } from "@/lib/auth/session";
 import { formatBytes, formatNumber } from "@/lib/utils/format";
 import { useConnections, useReconcileQuota } from "../hooks";
+import { WorkStatus } from "./work-status";
 import type { StorageConnection } from "../types";
 
 const notExposed = [
-  { name: "Worker and queue health", where: "Worker logs and the process metrics endpoint of each worker. The API has no route for queue depth." },
-  { name: "Processing and quarantine backlog", where: "Only per-asset records exist (Assets tab). Totals are in the metrics, not the API." },
+  { name: "Worker and queue health", where: "Worker logs and the process metrics endpoint of each worker. The counts beside this show the work waiting, not the workers." },
   { name: "Reconciliation runs", where: "Reconciler logs. The one action the API offers is the quota reconcile above." },
   { name: "Compaction and cleanup jobs", where: "Background job logs. Their results appear indirectly as lifecycle changes on assets." },
   { name: "API readiness (/ready)", where: "The readiness probe is served by the Go API directly and is not proxied to this console. Check it from the host or your orchestrator." },
@@ -29,6 +29,7 @@ export function StatusScreen() {
   return (
     <div className="grid gap-6 lg:grid-cols-3">
       <div className="flex min-w-0 flex-col gap-6 lg:col-span-2">
+        {can("ingestion.read") && <WorkStatus />}
         {can("storage.read") ? (
           <ConnectionHealth />
         ) : (

@@ -776,6 +776,35 @@ func (s *Service) VersionMembers(ctx context.Context, p model.Principal, dataset
 	return s.deps.Repo.ListVersionMembers(ctx, p.TenantID, versionID, after, size)
 }
 
+// DiffVersions compares two versions of one dataset by object: what was
+// added, removed, changed (other bytes) or relabeled (same bytes, other
+// label, split or path) going from base to target.
+func (s *Service) DiffVersions(ctx context.Context, p model.Principal, datasetID, baseID, targetID, after string, limit int) (model.VersionDiff, error) {
+	if baseID == "" {
+		return model.VersionDiff{}, fmt.Errorf("%w: against names the version to compare with", ErrInvalidRequest)
+	}
+	if _, err := s.Version(ctx, p, datasetID, targetID); err != nil {
+		return model.VersionDiff{}, err
+	}
+	// The other side may be a version of the dataset's parent or of
+	// another branch of it: what a branch changed, or will merge.
+	base, err := s.Version(ctx, p, "", baseID)
+	if err != nil {
+		return model.VersionDiff{}, err
+	}
+	if same, err := s.sameFamily(ctx, p.TenantID, datasetID, base.DatasetID); err != nil || !same {
+		if err == nil {
+			err = model.ErrDatasetVersionNotFound
+		}
+		return model.VersionDiff{}, err
+	}
+	size, err := s.pageSize(limit)
+	if err != nil {
+		return model.VersionDiff{}, err
+	}
+	return s.deps.Repo.DiffVersions(ctx, p.TenantID, baseID, targetID, after, size)
+}
+
 // ─── Lineage ──────────────────────────────────────────────────────────
 
 // LineageRequest bounds a lineage query.

@@ -8,6 +8,7 @@ import (
 	nethttp "net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sanjeev0303/object-storage-platform/internal/dto/request"
 	"github.com/sanjeev0303/object-storage-platform/internal/dto/response"
@@ -51,6 +52,9 @@ func (h *IdentityHandler) Routes() IdentityRoutes {
 			"POST /api/v1/auth/activate":       h.activate,
 			"POST /api/v1/auth/password/reset": h.resetPassword,
 			"POST /api/v1/invitations/accept":  h.acceptInvitation,
+			"POST /api/v1/auth/sso/start":      h.startSSO,
+			"POST /api/v1/auth/sso/callback":   h.finishSSO,
+			"POST /api/v1/auth/saml/acs":       h.finishSAML,
 		},
 		Account: map[string]nethttp.HandlerFunc{
 			"POST /api/v1/auth/logout":          h.logout,
@@ -78,6 +82,12 @@ func (h *IdentityHandler) Routes() IdentityRoutes {
 			"GET /api/v1/organization/quota":                         h.getQuota,
 			"GET /api/v1/organization/audit":                         h.listAudit,
 			"GET /api/v1/organization/audit/verify":                  h.verifyAudit,
+			"GET /api/v1/organization/sso":                           h.getSSO,
+			"PUT /api/v1/organization/sso":                           h.putSSO,
+			"DELETE /api/v1/organization/sso":                        h.deleteSSO,
+			"GET /api/v1/organization/scim-token":                    h.scimToken,
+			"POST /api/v1/organization/scim-token":                   h.issueSCIMToken,
+			"DELETE /api/v1/organization/scim-token":                 h.revokeSCIMToken,
 		},
 	}
 }
@@ -101,6 +111,7 @@ func userResponse(u model.User) response.UserResponse {
 	return response.UserResponse{
 		ID: u.ID, Email: u.Email, DisplayName: u.DisplayName, Status: string(u.Status),
 		PlatformRole: string(u.PlatformRole), LastLoginAt: u.LastLoginAt, CreatedAt: u.CreatedAt,
+		HasPassword: u.PasswordHash != "",
 	}
 }
 
@@ -566,4 +577,181 @@ func auditFilter(r *nethttp.Request) audit.Filter {
 		f.Action = action
 	}
 	return f
+}
+
+// ─── Single sign-on ───────────────────────────────────────────────────
+
+func (h *IdentityHandler) startSSO(w nethttp.ResponseWriter, r *nethttp.Request) {
+	var body struct {
+		Organization string `json:"organization"`
+		RedirectURI  string `json:"redirect_uri"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	url, err := h.identity.StartSSO(r.Context(), body.Organization, body.RedirectURI, client(r))
+	if err != nil {
+		writeSecurityError(w, h.log, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, nethttp.StatusOK, map[string]string{"authorization_url": url})
+}
+
+func (h *IdentityHandler) finishSSO(w nethttp.ResponseWriter, r *nethttp.Request) {
+	var body struct {
+		State string `json:"state"`
+		Code  string `json:"code"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	tokens, orgID, err := h.identity.FinishSSO(r.Context(), body.State, body.Code, client(r))
+	if err != nil {
+		writeSecurityError(w, h.log, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, nethttp.StatusOK, struct {
+		response.TokensResponse
+		OrganizationID string `json:"organization_id"`
+	}{tokensResponse(tokens), orgID})
+}
+
+type ssoResponse struct {
+	Configured     bool      `json:"configured"`
+	Protocol       string    `json:"protocol,omitempty"`
+	Issuer         string    `json:"issuer,omitempty"`
+	HasMetadata    bool      `json:"has_idp_metadata"`
+	ClientID       string    `json:"client_id,omitempty"`
+	AllowedDomains []string  `json:"allowed_domains"`
+	DefaultRole    string    `json:"default_role"`
+	Enabled        bool      `json:"enabled"`
+	UpdatedBy      string    `json:"updated_by,omitempty"`
+	UpdatedAt      time.Time `json:"updated_at,omitzero"`
+	// RedirectURIs are the callbacks to register at the provider.
+	RedirectURIs []string `json:"redirect_uris"`
+	// SAML is what to register at a SAML identity provider, when this
+	// server has SAML on.
+	SAML *samlProviderResponse `json:"saml,omitempty"`
+}
+
+type samlProviderResponse struct {
+	EntityID string `json:"entity_id"`
+	ACSURL   string `json:"acs_url"`
+}
+
+func (h *IdentityHandler) ssoAnswer(w nethttp.ResponseWriter, r *nethttp.Request, c model.SSOConnection) {
+	out := ssoResponse{AllowedDomains: []string{}, RedirectURIs: h.identity.SSORedirectURIs()}
+	if out.RedirectURIs == nil {
+		out.RedirectURIs = []string{}
+	}
+	if sp, ok := h.identity.SAMLProvider(principalOf(r).TenantID); ok {
+		out.SAML = &samlProviderResponse{EntityID: sp.EntityID, ACSURL: sp.ACSURL}
+	}
+	if c.OrgID != "" {
+		out.Configured, out.Issuer, out.ClientID, out.AllowedDomains = true, c.Issuer, c.ClientID, c.AllowedDomains
+		out.Protocol, out.HasMetadata = c.Protocol, c.IDPMetadata != ""
+		out.DefaultRole, out.Enabled, out.UpdatedBy, out.UpdatedAt = c.DefaultRole, c.Enabled, c.UpdatedBy, c.UpdatedAt
+	}
+	writeJSON(w, nethttp.StatusOK, out)
+}
+
+func (h *IdentityHandler) getSSO(w nethttp.ResponseWriter, r *nethttp.Request) {
+	c, err := h.identity.SSOSettings(r.Context(), principalOf(r))
+	if errors.Is(err, model.ErrSSONotConfigured) {
+		h.ssoAnswer(w, r, model.SSOConnection{})
+		return
+	}
+	if err != nil {
+		writeSecurityError(w, h.log, err)
+		return
+	}
+	h.ssoAnswer(w, r, c)
+}
+
+func (h *IdentityHandler) putSSO(w nethttp.ResponseWriter, r *nethttp.Request) {
+	var body struct {
+		Protocol       string   `json:"protocol"`
+		IDPMetadata    string   `json:"idp_metadata"`
+		Issuer         string   `json:"issuer"`
+		ClientID       string   `json:"client_id"`
+		ClientSecret   string   `json:"client_secret"`
+		AllowedDomains []string `json:"allowed_domains"`
+		DefaultRole    string   `json:"default_role"`
+		Enabled        bool     `json:"enabled"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	c, err := h.identity.PutSSO(r.Context(), principalOf(r), identity.SSOSettingsInput{
+		Protocol: body.Protocol, IDPMetadata: body.IDPMetadata, Issuer: body.Issuer, ClientID: body.ClientID, ClientSecret: body.ClientSecret,
+		AllowedDomains: body.AllowedDomains, DefaultRole: body.DefaultRole, Enabled: body.Enabled,
+	})
+	if err != nil {
+		writeSecurityError(w, h.log, err)
+		return
+	}
+	h.ssoAnswer(w, r, c)
+}
+
+func (h *IdentityHandler) deleteSSO(w nethttp.ResponseWriter, r *nethttp.Request) {
+	if err := h.identity.DeleteSSO(r.Context(), principalOf(r)); err != nil {
+		writeSecurityError(w, h.log, err)
+		return
+	}
+	w.WriteHeader(nethttp.StatusNoContent)
+}
+
+// finishSAML takes the SAML response the identity provider posted to the
+// console's ACS route.
+func (h *IdentityHandler) finishSAML(w nethttp.ResponseWriter, r *nethttp.Request) {
+	var body struct {
+		SAMLResponse string `json:"saml_response"`
+		RelayState   string `json:"relay_state"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	tokens, orgID, err := h.identity.FinishSAML(r.Context(), body.SAMLResponse, body.RelayState, client(r))
+	if err != nil {
+		writeSecurityError(w, h.log, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, nethttp.StatusOK, struct {
+		response.TokensResponse
+		OrganizationID string `json:"organization_id"`
+	}{tokensResponse(tokens), orgID})
+}
+
+func (h *IdentityHandler) scimToken(w nethttp.ResponseWriter, r *nethttp.Request) {
+	status, err := h.identity.SCIMTokenStatus(r.Context(), principalOf(r))
+	if err != nil {
+		writeSecurityError(w, h.log, err)
+		return
+	}
+	out := map[string]any{"enabled": status.Enabled}
+	if status.Enabled {
+		out["created_at"], out["last_used_at"] = status.Created, status.LastUsed
+	}
+	writeJSON(w, nethttp.StatusOK, out)
+}
+
+func (h *IdentityHandler) issueSCIMToken(w nethttp.ResponseWriter, r *nethttp.Request) {
+	token, err := h.identity.IssueSCIMToken(r.Context(), principalOf(r))
+	if err != nil {
+		writeSecurityError(w, h.log, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, nethttp.StatusCreated, map[string]string{"token": token})
+}
+
+func (h *IdentityHandler) revokeSCIMToken(w nethttp.ResponseWriter, r *nethttp.Request) {
+	if err := h.identity.RevokeSCIMToken(r.Context(), principalOf(r)); err != nil {
+		writeSecurityError(w, h.log, err)
+		return
+	}
+	w.WriteHeader(nethttp.StatusNoContent)
 }

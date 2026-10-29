@@ -2,10 +2,14 @@ package main
 
 import (
 	"bufio"
+	"cmp"
 	"crypto/sha256"
 	"fmt"
 	"io"
+	"io/fs"
 	"math/rand/v2"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,14 +22,68 @@ type sizeClass struct {
 	min, max int64
 }
 
-// fileSpec is one synthetic file. Its bytes are never stored: they are
-// generated again from the seed whenever they are needed.
+// fileSpec is one file. A synthetic file's bytes are never stored: they are
+// generated again from the seed whenever they are needed. A real one (-dir)
+// is read from disk at diskPath.
 type fileSpec struct {
-	index int // the manifest line is index+1
-	class string
-	path  string
-	size  int64
-	sum   [32]byte
+	index       int // the manifest line is index+1
+	class       string
+	path        string
+	size        int64
+	sum         [32]byte
+	diskPath    string
+	contentType string
+}
+
+// typesByExtension are the real files -dir uploads; anything else is skipped.
+var typesByExtension = map[string]string{
+	".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp",
+	".txt": "text/plain", ".csv": "text/csv", ".json": "application/json",
+}
+
+// scanDir lists the files under dir with a known type, as manifest entries
+// named by their path relative to dir. Each file's class is its extension.
+func scanDir(dir string) ([]fileSpec, error) {
+	var specs []fileSpec
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		contentType, ok := typesByExtension[ext]
+		if !ok {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.Size() == 0 {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		specs = append(specs, fileSpec{
+			index: len(specs), class: strings.TrimPrefix(ext, "."), path: filepath.ToSlash(rel),
+			size: info.Size(), diskPath: path, contentType: contentType,
+		})
+		return nil
+	})
+	if err == nil && len(specs) == 0 {
+		err = fmt.Errorf("no files of a known type under %s", dir)
+	}
+	return specs, err
+}
+
+// openContent opens a file's bytes: from disk for a real file, generated
+// from the seed for a synthetic one.
+func openContent(seed uint64, f fileSpec) (io.ReadCloser, error) {
+	if f.diskPath != "" {
+		return os.Open(f.diskPath)
+	}
+	return io.NopCloser(newContent(seed, f)), nil
 }
 
 // parseClasses reads "small=85:1KiB-256KiB,medium=13:1MiB-8MiB,...".
@@ -174,7 +232,11 @@ func hashAll(specs []fileSpec, seed uint64, workers int) {
 			buf := make([]byte, 256<<10)
 			for i := range next {
 				h := sha256.New()
-				_, _ = io.CopyBuffer(h, newContent(seed, specs[i]), buf)
+				body, err := openContent(seed, specs[i])
+				if err == nil {
+					_, _ = io.CopyBuffer(h, body, buf)
+					body.Close()
+				}
 				copy(specs[i].sum[:], h.Sum(nil))
 			}
 		}()
@@ -198,8 +260,9 @@ func fakeSums(specs []fileSpec, seed uint64) {
 func writeManifest(w io.Writer, specs []fileSpec) error {
 	buf := bufio.NewWriterSize(w, 256<<10)
 	for _, f := range specs {
-		if _, err := fmt.Fprintf(buf, `{"path":%q,"size":%d,"content_type":"text/plain","checksum":"sha256:%x"}`+"\n",
-			f.path, f.size, f.sum); err != nil {
+		contentType := cmp.Or(f.contentType, "text/plain")
+		if _, err := fmt.Fprintf(buf, `{"path":%q,"size":%d,"content_type":%q,"checksum":"sha256:%x"}`+"\n",
+			f.path, f.size, contentType, f.sum); err != nil {
 			return err
 		}
 	}

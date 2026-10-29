@@ -236,3 +236,25 @@ func (l *limited) WriteObject(ctx context.Context, bucket, key string, body io.R
 	})
 	return meta, err
 }
+
+// Object Lock goes through to providers that have it; others report it
+// off.
+
+func (l *limited) ObjectLockEnabled(ctx context.Context, bucket string) (bool, error) {
+	locker, ok := l.inner.(interfaces.ObjectLocker)
+	if !ok {
+		return false, nil
+	}
+	return call(l, ctx, "object_lock", func(ctx context.Context) (bool, error) { return locker.ObjectLockEnabled(ctx, bucket) })
+}
+
+func (l *limited) LockObjectVersion(ctx context.Context, bucket, key, versionID string, until time.Time, legalHold bool) error {
+	locker, ok := l.inner.(interfaces.ObjectLocker)
+	if !ok {
+		return model.ErrUnsupportedProvider
+	}
+	_, err := call(l, ctx, "object_lock", func(ctx context.Context) (struct{}, error) {
+		return struct{}{}, locker.LockObjectVersion(ctx, bucket, key, versionID, until, legalHold)
+	})
+	return err
+}

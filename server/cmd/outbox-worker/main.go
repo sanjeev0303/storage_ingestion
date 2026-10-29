@@ -137,7 +137,16 @@ func run() error {
 	log.Info("outbox worker starting", "worker_id", owner, "tenant", *tenant, "reconcile_dry_run", *dryRun,
 		"batch_size", ec.PublishBatch, "concurrency", ec.PublishConcurrency, "lease", ec.PublishLease.String(),
 		"max_attempts", ec.PublishMaxAttempts, "reconcile_interval", ec.ReconcileInterval.String())
-	outboxworker.Run(ctx, publisher, reconciler, ec.PublishInterval, ec.ReconcileInterval, log)
+	// Woken by the outbox_events trigger (migration 000018) the moment an
+	// event is committed; the interval stays as the fallback.
+	wake := make(chan struct{}, 1)
+	listening := make(chan struct{})
+	go func() {
+		defer close(listening)
+		db.Listen(ctx, "outbox_events", wake, log)
+	}()
+	outboxworker.Run(ctx, publisher, reconciler, ec.PublishInterval, ec.ReconcileInterval, wake, log)
+	<-listening
 	log.Info("outbox worker stopped")
 	return nil
 }

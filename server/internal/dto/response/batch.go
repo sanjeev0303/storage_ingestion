@@ -36,6 +36,16 @@ type DatasetResponse struct {
 	// StorageConnectionID is where the dataset's new uploads go; empty for
 	// the organization's default.
 	StorageConnectionID string `json:"storage_connection_id,omitempty"`
+	// Branch is set on a branch: its parent, its name there, the version it
+	// was branched from and the common ancestor of its next merge.
+	Branch *BranchInfo `json:"branch,omitempty"`
+}
+
+type BranchInfo struct {
+	ParentID           string `json:"parent_id"`
+	Name               string `json:"name"`
+	ForkVersionID      string `json:"fork_version_id"`
+	MergeBaseVersionID string `json:"merge_base_version_id"`
 }
 
 // DerivationInfo is what a derived dataset was made from.

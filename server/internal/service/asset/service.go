@@ -43,6 +43,19 @@ type Dependencies struct {
 	// Packs takes deleted assets out of their packs; nil when nothing is
 	// packed.
 	Packs interfaces.PackReleaser
+	// Locks records Object Lock settings applied on buckets that have it;
+	// nil leaves Object Lock alone.
+	Locks interfaces.ObjectLockRepository
+	// Shared says which other asset still points at a stored object
+	// (deduplicated content), whose bytes must then stay; nil when no
+	// content is shared.
+	Shared KeyUse
+}
+
+// KeyUse names another asset, not permanently deleted, that points at
+// objectKey (postgres.AssetRepository).
+type KeyUse interface {
+	KeyInUse(ctx context.Context, tenantID, objectKey, exceptID string) (string, error)
 }
 
 type Config struct {
@@ -85,6 +98,8 @@ type Service struct {
 	// security, when set, records principal-facing changes in the security
 	// audit log, next to the lifecycle's own event trail.
 	security interfaces.AuditRecorder
+	// locks caches which buckets have Object Lock on.
+	locks lockBuckets
 }
 
 // Guard records principal-facing deletions, restores and retention
@@ -207,6 +222,35 @@ func (s *Service) PlaceHoldFor(ctx context.Context, principal model.Principal, h
 			map[string]any{"scope": stored.Scope, "scope_key": stored.ScopeKey})
 	}
 	return stored, err
+}
+
+// PoliciesFor returns the newest version of each retention policy of the
+// caller's organization. Reading them needs the same permission as
+// setting them.
+func (s *Service) PoliciesFor(ctx context.Context, principal model.Principal) ([]model.RetentionPolicy, error) {
+	if err := audit.Require(ctx, s.security, principal, model.PermRetentionManage, "retention.policy_read", "retention_policy", ""); err != nil {
+		return nil, err
+	}
+	return s.deps.Policies.Latest(ctx, principal.TenantID)
+}
+
+// PolicyHistoryFor returns every version of one scope's retention policy,
+// newest first.
+func (s *Service) PolicyHistoryFor(ctx context.Context, principal model.Principal, scope, scopeKey string) ([]model.RetentionPolicy, error) {
+	if err := audit.Require(ctx, s.security, principal, model.PermRetentionManage, "retention.policy_read", "retention_policy", scopeKey); err != nil {
+		return nil, err
+	}
+	return s.deps.Policies.History(ctx, principal.TenantID, scope, scopeKey)
+}
+
+// HoldsFor lists the legal holds of the caller's organization, active ones
+// only unless includeReleased. Hold reasons can be confidential, so this
+// needs the permission that places and releases them.
+func (s *Service) HoldsFor(ctx context.Context, principal model.Principal, includeReleased bool) ([]model.LegalHold, error) {
+	if err := audit.Require(ctx, s.security, principal, model.PermRetentionManage, "retention.hold_read", "legal_hold", ""); err != nil {
+		return nil, err
+	}
+	return s.deps.Holds.List(ctx, principal.TenantID, includeReleased)
 }
 
 // ReleaseHoldFor releases a legal hold of the caller's organization.
@@ -407,6 +451,9 @@ type Inspection struct {
 	Holds       []model.LegalHold
 	Operations  []model.DeletionOperation
 	Events      []model.LifecycleEvent
+	// LockedUntil is the S3 Object Lock date set on the stored version,
+	// when the platform set one.
+	LockedUntil *time.Time
 }
 
 // Inspect returns an asset's lifecycle record, for operators. Unlike the
@@ -448,6 +495,15 @@ func (s *Service) inspect(ctx context.Context, asset model.Asset) (Inspection, e
 	}
 	if out.Operations, err = s.deps.Deletions.ListForAsset(ctx, asset.TenantID, asset.ID); err != nil {
 		return out, err
+	}
+	if s.deps.Locks != nil {
+		lock, found, err := s.deps.Locks.GetLock(ctx, asset.TenantID, asset.ID)
+		if err != nil {
+			return out, err
+		}
+		if found {
+			out.LockedUntil = lock.RetainUntil
+		}
 	}
 	out.Events, err = s.deps.Events.List(ctx, asset.TenantID, asset.ID, 200)
 	return out, err

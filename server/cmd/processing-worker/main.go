@@ -124,6 +124,8 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("create promotion service: %w", err)
 	}
+	// Identical bytes of one organization on one connection are stored once.
+	promoter.Dedup(assets)
 
 	validators := []interfaces.FileValidator{processingservice.BasicValidator{}, processingservice.TypeValidator{}}
 	if workerCfg.ArchiveInspection {

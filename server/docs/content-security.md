@@ -70,6 +70,35 @@ Measured locally (MinIO and ClamAV in Docker on one laptop), 1 GiB of
 random bytes: verification 3.5 s, scan 14.2 s, promotion 18.7 s, 36.4 s in
 all; before, the scan never finished and the object stayed held.
 
+## Reusing a clean verdict for the same bytes
+
+Scanning is the slowest stage, and datasets are often uploaded again
+unchanged. When a tenant uploads bytes it already had scanned CLEAN, the scan
+stage reuses that verdict instead of scanning again, if all of these hold:
+
+- the earlier asset belongs to the same tenant and has the same SHA-256 and
+  size (migration `000019`, index `ix_assets_tenant_checksum`);
+- its verdict came from the same scanner at the same engine and signature
+  version. ClamAV reports this with `VERSION` (for example
+  `ClamAV 1.4.6/28166/Tue Oct 27 06:24:12 2026`); new signatures change it,
+  and the next upload of those bytes is scanned again;
+- that scan read exactly the declared bytes. `scanner_version` is written only
+  for a CLEAN scan whose scanned bytes matched the declared SHA-256 and only
+  when the version did not change during the scan, so a scan that saw swapped
+  bytes, or spanned a signature reload, is never reused.
+
+Verification and content validation still run for every upload, and
+promotion still re-reads the published copy and checks its size and SHA-256,
+so the reused verdict is about exactly the bytes that get published. The job
+records `scan_reused_from` (the earlier asset) and `scanner_version`, and a
+`scan_reused` processing event names both. A scanner that cannot report a
+version (`interfaces.VersionedScanner`) never reuses verdicts.
+
+Measured locally: the same 174 files (1.2 GiB) ingested again with ClamAV's
+own cache cleared went from 108.4 s to 79.2 s from first upload to
+completed, and from 65.1 s to 23.7 s after the last upload; ClamAV CPU fell
+from 465% to 0.3% and all 174 scans were reused.
+
 ## Quarantine records
 
 `quarantine_records` holds one row per decision, with at most one HELD row
@@ -188,3 +217,16 @@ backlog gauges `backlog_due`, `backlog_leased`, `backlog_lease_expired`
 Only the EICAR test string is ever used as "malware". Windows Defender
 deletes an EICAR file as soon as it is written to disk, so the tests and
 the smoke script build it in memory and stream it.
+
+## Storing identical files once
+
+An upload whose verified bytes equal a file the organization already stores, on the same storage connection, is published pointing at that stored object instead of a copy (migration `000024_dedup.sql`).
+
+- **How it's found:** promotion looks for the oldest `AVAILABLE` asset with the same SHA-256 and size. The upload was already verified and scanned like any other.
+- **Within one batch:** identical files are promoted at the same moment. An asset waits while an older asset with the same bytes is still being promoted (up to a minute, polling every 250 ms), then shares it. They wait in order of age, so never in a circle. After the minute it copies as usual.
+- **Checked before sharing:** the stored object must still be exactly what was recorded when it was published (same size, ETag and version). Publication then runs in one transaction that also checks the original is still available under that object. If either check fails, it falls back to a normal copy.
+- **What changes:** the new asset keeps its own ID, catalog version, quota charge and lifecycle. `shared_from` names the asset that first stored the bytes (the ID in the object's key), even when the twin found was itself a sharer. `object_key` points at that object. Delivery serves a shared asset from that key and from no other.
+- **Deletion:** bytes are removed only with their last user. Deleting either asset first lets go of its reference without deleting bytes another live asset uses. Sharing never blocks a deletion. Packing does the same when it retires the loose copies of packed files. The orphan sweep keeps a deleted asset's object while another asset still points at it.
+- **Scope:** one organization and one connection. Bytes are never shared across organizations. A deleted user's file therefore leaves nothing behind except what another asset in the same organization legitimately holds.
+- **Visible:** `GET /api/v1/operations/status` counts shared assets and the bytes not stored twice. The console shows them on the Status page.
+- **Not deduplicated:** chunks within files, and files on different connections.

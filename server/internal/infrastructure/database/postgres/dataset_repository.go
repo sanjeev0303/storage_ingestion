@@ -204,6 +204,7 @@ func (r *DatasetRepository) ListDatasets(ctx context.Context, tenantID string, f
 	rows, err := r.db.Pool.Query(ctx, `
 		SELECT `+datasetColumns+` FROM datasets
 		WHERE tenant_id = $1 AND ($2 = '' OR lifecycle_status = $2) AND name > $3
+		  AND parent_dataset_id IS NULL -- branches are listed by their dataset
 		ORDER BY name
 		LIMIT $4
 	`, tenantID, string(f.Lifecycle), f.After, f.Limit)
@@ -909,16 +910,43 @@ func scanVersionMember(row pgx.Row) (model.VersionMember, error) {
 	return m, err
 }
 
-// ListVersionMembers pages a version's members in canonical order.
+// ListVersionMembers pages a version's members in canonical order, with
+// whether each member's pinned bytes can still be read.
 func (r *DatasetRepository) ListVersionMembers(ctx context.Context, tenantID, versionID string, after int64, limit int) ([]model.VersionMember, error) {
 	rows, err := r.db.Pool.Query(ctx, `
-		SELECT `+versionMemberColumns+` FROM dataset_version_members
-		WHERE tenant_id = $1 AND version_id = $2 AND ordinal > $3
-		ORDER BY ordinal
+		SELECT vm.ordinal, vm.object_id, vm.asset_id, vm.object_version, vm.path, COALESCE(vm.label, ''), COALESCE(vm.split, ''),
+		       vm.size_bytes, vm.content_type, COALESCE(vm.checksum_sha256, ''), vm.metadata,
+		       COALESCE(a.status, 'DELETED'), a.updated_at
+		FROM dataset_version_members AS vm
+		LEFT JOIN assets AS a ON a.id = vm.asset_id AND a.tenant_id = vm.tenant_id
+		WHERE vm.tenant_id = $1 AND vm.version_id = $2 AND vm.ordinal > $3
+		ORDER BY vm.ordinal
 		LIMIT $4
 	`, tenantID, versionID, after, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list version members: %w", err)
 	}
-	return collect(rows, scanVersionMember)
+	return collect(rows, func(row pgx.Row) (model.VersionMember, error) {
+		var m model.VersionMember
+		var metadata []byte
+		var status string
+		var changedAt *time.Time
+		err := row.Scan(&m.Ordinal, &m.ObjectID, &m.AssetID, &m.ObjectVersion, &m.Path, &m.Label, &m.Split,
+			&m.SizeBytes, &m.ContentType, &m.ChecksumSHA256, &metadata, &status, &changedAt)
+		if err != nil {
+			return m, err
+		}
+		switch model.AssetStatus(status) {
+		case model.AssetStatusAvailable:
+			m.Availability = model.MemberAvailable
+		case model.AssetStatusSoftDeleted:
+			m.Availability = model.MemberDeletionPending
+		default:
+			// DELETED, or the asset row is gone: the bytes are erased.
+			m.Availability = model.MemberErased
+			m.ErasedAt = changedAt
+		}
+		m.Metadata, err = decodeMetadata(metadata)
+		return m, err
+	})
 }

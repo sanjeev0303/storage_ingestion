@@ -12,7 +12,11 @@ import { Time } from "@/components/ui/time";
 import { formatBytes, formatNumber } from "@/lib/utils/format";
 import { validationLabels, validationTone } from "../helpers";
 import { useVersion, useVersionMembers } from "../hooks";
+import type { VersionMember } from "../types";
 import { ImmutableBadge } from "./draft-notice";
+import { SqlPanel } from "./sql-panel";
+import { StorageAuditButton } from "./storage-audit-button";
+import { VersionDiff } from "./version-diff";
 
 export function VersionDetail({ id, versionId }: { id: string; versionId: string }) {
   const version = useVersion(id, versionId);
@@ -45,6 +49,7 @@ export function VersionDetail({ id, versionId }: { id: string; versionId: string
           <ButtonLink href={`${base}/validation?version=${v.id}`} variant="primary">
             Validate this version
           </ButtonLink>
+          <StorageAuditButton datasetId={id} versionId={v.id} />
           <ButtonLink href={`${base}/lineage?version=${v.id}`}>Lineage</ButtonLink>
         </div>
       </header>
@@ -138,7 +143,14 @@ export function VersionDetail({ id, versionId }: { id: string; versionId: string
         )}
       </Panel>
 
-      <Panel title="Members of this version" description="In canonical order. Each is pinned to one exact object version.">
+      <VersionDiff id={id} versionId={v.id} version={v.version} />
+
+      <SqlPanel datasetId={id} versionId={v.id} />
+
+      <Panel
+        title="Members of this version"
+        description="In canonical order. Each is pinned to one exact object version. An erased member keeps its record; its bytes are gone."
+      >
         {members.isPending ? (
           <SkeletonRows rows={6} />
         ) : members.isError && members.items.length === 0 ? (
@@ -152,6 +164,7 @@ export function VersionDetail({ id, versionId }: { id: string; versionId: string
                 <tr>
                   <Th className="text-right">Ordinal</Th>
                   <Th>Path</Th>
+                  <Th>Bytes</Th>
                   <Th className="text-right">Object version</Th>
                   <Th>Version id</Th>
                   <Th className="text-right">Size</Th>
@@ -166,6 +179,9 @@ export function VersionDetail({ id, versionId }: { id: string; versionId: string
                   <tr key={member.ordinal}>
                     <Td className="text-right tabular-nums">{member.ordinal}</Td>
                     <Td className="mono-data">{member.path}</Td>
+                    <Td>
+                      <Availability member={member} />
+                    </Td>
                     <Td className="text-right tabular-nums">{member.object_version}</Td>
                     <Td className="mono-data">{member.version_id}</Td>
                     <Td className="text-right tabular-nums">{formatBytes(member.size_bytes)}</Td>
@@ -190,4 +206,21 @@ export function VersionDetail({ id, versionId }: { id: string; versionId: string
       </Panel>
     </div>
   );
+}
+
+function Availability({ member }: { member: VersionMember }) {
+  if (member.availability === "ERASED") {
+    return (
+      <div>
+        <StateBadge tone="failed">Erased</StateBadge>
+        {member.erased_at && (
+          <div className="mt-0.5 text-sm text-muted">
+            <Time value={member.erased_at} />
+          </div>
+        )}
+      </div>
+    );
+  }
+  if (member.availability === "DELETION_PENDING") return <StateBadge tone="warning">Being deleted</StateBadge>;
+  return <span className="text-sm">Stored</span>;
 }

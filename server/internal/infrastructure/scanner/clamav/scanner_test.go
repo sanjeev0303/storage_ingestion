@@ -90,6 +90,21 @@ func TestScanOutcomes(t *testing.T) {
 	}
 }
 
+// The buffers are pooled: a short file scanned after a longer one must not
+// carry any of the earlier bytes.
+func TestScanReusesBuffersWithoutMixingContent(t *testing.T) {
+	for _, content := range []string{"a much longer first file of plain text", "short", ""} {
+		address, got := fakeClamd(t, "stream: OK")
+		result := New(address, 5*time.Second).Scan(context.Background(), strings.NewReader(content))
+		if received := <-got; string(received) != content {
+			t.Fatalf("clamd received %q, want %q", received, content)
+		}
+		if result.Outcome != model.ScanClean {
+			t.Fatalf("got %+v, want CLEAN", result)
+		}
+	}
+}
+
 func TestScanIsAnErrorWhenClamdIsUnreachable(t *testing.T) {
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
 	address := ln.Addr().String()
@@ -149,5 +164,35 @@ func TestPing(t *testing.T) {
 	ln.Close()
 	if err := New(address, time.Second).Ping(context.Background()); err == nil {
 		t.Fatal("ping to a closed port must fail")
+	}
+}
+
+func TestVersion(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for _, reply := range []string{"ClamAV 1.4.3/27800/Mon Oct 27 08:23:00 2026\n\x00", "UNKNOWN COMMAND\x00"} {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			command, _ := bufio.NewReader(conn).ReadString(0)
+			if command == "zVERSION\x00" {
+				conn.Write([]byte(reply))
+			}
+			conn.Close()
+		}
+	}()
+
+	s := New(ln.Addr().String(), time.Second)
+	version, err := s.Version(context.Background())
+	if err != nil || version != "ClamAV 1.4.3/27800/Mon Oct 27 08:23:00 2026" {
+		t.Fatalf("version %q, %v", version, err)
+	}
+	if _, err := s.Version(context.Background()); err == nil {
+		t.Fatal("an answer that is not a version must be an error, so no verdict is reused")
 	}
 }

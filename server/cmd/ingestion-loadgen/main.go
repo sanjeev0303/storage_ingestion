@@ -54,6 +54,7 @@ type options struct {
 	containers  string
 	out         string
 	manifestOut string
+	dir         string
 }
 
 func main() {
@@ -76,6 +77,7 @@ func main() {
 	flag.StringVar(&o.containers, "containers", "", "sample `docker stats` for containers with this name prefix")
 	flag.StringVar(&o.out, "out", "", "also write the report as JSON to this file")
 	flag.StringVar(&o.manifestOut, "manifest-out", "", "only write the manifest to this file and exit (real checksums in upload mode)")
+	flag.StringVar(&o.dir, "dir", "", "upload the real files under this directory instead of synthetic ones (-files, -classes and -seed are then ignored)")
 	flag.Parse()
 
 	var err error
@@ -176,6 +178,15 @@ func run(o options) error {
 		Concurrency: o.concurrency, Started: time.Now().UTC(), ByClass: map[string]int{},
 	}
 	specs := plan(o.files, classes, o.seed)
+	if o.dir != "" {
+		if o.mode != "upload" {
+			return fmt.Errorf("-dir needs -mode upload")
+		}
+		if specs, err = scanDir(o.dir); err != nil {
+			return err
+		}
+		r.Files, r.Classes = len(specs), "dir:"+o.dir
+	}
 	for _, f := range specs {
 		r.ByClass[f.class]++
 		r.ExpectedBytes += f.size
@@ -448,7 +459,12 @@ func uploadOne(ctx context.Context, o options, a *api, f fileSpec, jobID string,
 	pos := g.Entry.Position
 	if g.Entry.Strategy == "SINGLE" {
 		err := withRetries(func() error {
-			_, err := a.put(ctx, g.UploadURL, g.Entry.ContentType, newContent(o.seed, f), f.size)
+			body, err := openContent(o.seed, f)
+			if err != nil {
+				return err
+			}
+			defer body.Close()
+			_, err = a.put(ctx, g.UploadURL, g.Entry.ContentType, body, f.size)
 			return err
 		})
 		if err != nil {
@@ -471,19 +487,39 @@ func uploadOne(ctx context.Context, o options, a *api, f fileSpec, jobID string,
 		urls = append(urls, batch...)
 	}
 
-	stream := newContent(o.seed, f)
+	// A real file is sent part by part straight from disk; a synthetic one
+	// is generated in order, one part buffered at a time.
+	var file *os.File
+	var stream io.Reader
+	if f.diskPath != "" {
+		var err error
+		if file, err = os.Open(f.diskPath); err != nil {
+			return 0, err
+		}
+		defer file.Close()
+	} else {
+		stream = newContent(o.seed, f)
+	}
 	var recorded []request.RecordPartRequest
 	var completed []request.CompletedPartRequest
 	for i, u := range urls {
-		length := min(o.partSize, f.size-int64(i)*o.partSize)
-		part := make([]byte, length)
-		if _, err := io.ReadFull(stream, part); err != nil {
-			return 0, err
+		offset := int64(i) * o.partSize
+		length := min(o.partSize, f.size-offset)
+		var part []byte
+		if file == nil {
+			part = make([]byte, length)
+			if _, err := io.ReadFull(stream, part); err != nil {
+				return 0, err
+			}
 		}
 		var etag string
 		err := withRetries(func() error {
+			var body io.Reader = bytes.NewReader(part)
+			if file != nil {
+				body = io.NewSectionReader(file, offset, length)
+			}
 			var err error
-			etag, err = a.put(ctx, u.URL, "", bytes.NewReader(part), length)
+			etag, err = a.put(ctx, u.URL, "", body, length)
 			return err
 		})
 		if err != nil {

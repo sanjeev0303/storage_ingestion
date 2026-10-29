@@ -350,7 +350,9 @@ func (h *GovernanceHandler) Routes() map[string]nethttp.HandlerFunc {
 	}
 	if h.lifecycle != nil {
 		routes["PUT /api/v1/retention/policies"] = h.setPolicy
+		routes["GET /api/v1/retention/policies"] = h.listPolicies
 		routes["POST /api/v1/legal-holds"] = h.placeHold
+		routes["GET /api/v1/legal-holds"] = h.listHolds
 		routes["DELETE /api/v1/legal-holds/{id}"] = h.releaseHold
 	}
 	return routes
@@ -372,6 +374,16 @@ func (h *GovernanceHandler) inspect(w nethttp.ResponseWriter, r *nethttp.Request
 			"id": q.ID, "category": q.Category, "reason": q.Reason, "scan_result": q.ScanResult,
 			"status": q.Status, "created_at": q.CreatedAt, "retain_until": q.RetainUntil,
 		})
+	}
+	if job := inspection.Job; job.ScanResult != "" {
+		out.Scan = &response.ScanResponse{
+			Scanner: job.Scanner, Result: job.ScanResult, ScannerVersion: job.ScannerVersion,
+			ReusedFrom: job.ScanReusedFrom, ScannedAt: job.ScannedAt,
+		}
+	}
+	out.Events = []map[string]any{}
+	for _, e := range inspection.Events {
+		out.Events = append(out.Events, map[string]any{"event": e.Event, "detail": e.Detail, "actor": e.Actor, "at": e.CreatedAt})
 	}
 	writeJSON(w, nethttp.StatusOK, out)
 }
@@ -415,6 +427,62 @@ func (h *GovernanceHandler) setPolicy(w nethttp.ResponseWriter, r *nethttp.Reque
 	}
 	writeJSON(w, nethttp.StatusOK, map[string]any{"id": stored.ID, "scope": stored.Scope, "scope_key": stored.ScopeKey,
 		"version": stored.Version, "effective_from": stored.EffectiveFrom})
+}
+
+// listPolicies answers the newest version of every policy, or with
+// ?scope= (and scope_key=) every version of that one, newest first.
+func (h *GovernanceHandler) listPolicies(w nethttp.ResponseWriter, r *nethttp.Request) {
+	scope := strings.ToUpper(r.URL.Query().Get("scope"))
+	var policies []model.RetentionPolicy
+	var err error
+	if scope == "" {
+		policies, err = h.lifecycle.PoliciesFor(r.Context(), principalOf(r))
+	} else {
+		policies, err = h.lifecycle.PolicyHistoryFor(r.Context(), principalOf(r), scope, r.URL.Query().Get("scope_key"))
+	}
+	if err != nil {
+		h.governanceError(w, err)
+		return
+	}
+	out := make([]map[string]any, 0, len(policies))
+	for _, p := range policies {
+		out = append(out, map[string]any{
+			"id": p.ID, "scope": p.Scope, "scope_key": p.ScopeKey, "version": p.Version,
+			"min_retention": durationText(p.MinRetention), "max_age": durationText(p.MaxAge),
+			"deletion_grace": durationText(p.DeletionGrace), "quarantine_retention": durationText(p.QuarantineRetention),
+			"effective_from": p.EffectiveFrom, "created_by": p.CreatedBy, "reason": p.Reason, "created_at": p.CreatedAt,
+		})
+	}
+	w.Header().Set("Cache-Control", "private, no-store")
+	writeJSON(w, nethttp.StatusOK, map[string]any{"policies": out})
+}
+
+// listHolds answers the active legal holds, or all of them with
+// ?include_released=true.
+func (h *GovernanceHandler) listHolds(w nethttp.ResponseWriter, r *nethttp.Request) {
+	holds, err := h.lifecycle.HoldsFor(r.Context(), principalOf(r), r.URL.Query().Get("include_released") == "true")
+	if err != nil {
+		h.governanceError(w, err)
+		return
+	}
+	out := make([]map[string]any, 0, len(holds))
+	for _, hold := range holds {
+		out = append(out, map[string]any{
+			"id": hold.ID, "scope": hold.Scope, "scope_key": hold.ScopeKey, "reason": hold.Reason,
+			"placed_by": hold.PlacedBy, "placed_at": hold.PlacedAt, "released_by": hold.ReleasedBy, "released_at": hold.ReleasedAt,
+		})
+	}
+	w.Header().Set("Cache-Control", "private, no-store")
+	writeJSON(w, nethttp.StatusOK, map[string]any{"holds": out})
+}
+
+// durationText writes a policy duration the way it is set ("720h0m0s"),
+// or nil when the policy leaves it unset.
+func durationText(d *time.Duration) any {
+	if d == nil {
+		return nil
+	}
+	return d.String()
 }
 
 func (h *GovernanceHandler) placeHold(w nethttp.ResponseWriter, r *nethttp.Request) {

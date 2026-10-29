@@ -509,7 +509,7 @@ func (r *DeletionRepository) References(ctx context.Context, asset model.Asset, 
 		UNION ALL
 		SELECT 'asset ' || id || ' is ' || status
 		FROM assets
-		WHERE object_key = ANY($4) AND id <> $2 AND status <> 'DELETED'
+		WHERE object_key = ANY($4) AND id <> $2 AND status <> 'DELETED' AND shared_from IS NULL
 		UNION ALL
 		SELECT 'quarantine hold ' || id
 		FROM quarantine_records

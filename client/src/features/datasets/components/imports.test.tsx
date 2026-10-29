@@ -63,7 +63,10 @@ describe("preflightManifest", () => {
 
 describe("ImportsScreen", () => {
   function setup() {
-    server.use(http.get(`${API}/datasets/ds-1`, () => HttpResponse.json(makeDataset())));
+    server.use(
+      http.get(`${API}/datasets/ds-1`, () => HttpResponse.json(makeDataset())),
+      http.get(`${API}/datasets/ds-1/manifests`, () => HttpResponse.json({ imports: [] })),
+    );
     return renderWithProviders(<ImportsScreen id="ds-1" />);
   }
 

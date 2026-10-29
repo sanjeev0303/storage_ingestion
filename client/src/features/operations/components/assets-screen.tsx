@@ -14,7 +14,7 @@ import { Time } from "@/components/ui/time";
 import { useSession } from "@/lib/auth/session";
 import { formatBytes } from "@/lib/utils/format";
 import { isNotFound, useAsset, useAssetActions, useLifecycle, useProcessing } from "../hooks";
-import type { Deletion } from "../types";
+import type { Deletion, ProcessingRecord } from "../types";
 
 function statusTone(status: string) {
   if (status === "AVAILABLE") return "done";
@@ -148,6 +148,21 @@ function AssetDetail({ id }: { id: string }) {
                     value: lifecycle.data.expires_at ? <Time value={lifecycle.data.expires_at} /> : "No expiry",
                   },
                   { label: "Deletion grace period", value: formatGrace(lifecycle.data.deletion_grace_seconds) },
+                  ...(lifecycle.data.locked_until
+                    ? [
+                        {
+                          label: "Locked at the provider until",
+                          value: (
+                            <span>
+                              <Time value={lifecycle.data.locked_until} />
+                              <span className="block text-sm text-muted">
+                                S3 Object Lock: the bucket itself refuses to delete this version earlier.
+                              </span>
+                            </span>
+                          ),
+                        },
+                      ]
+                    : []),
                   { label: "Deletion", value: deletion ? <DeletionSummary deletion={deletion} /> : "Not scheduled" },
                 ]}
               />
@@ -312,8 +327,22 @@ function ProcessingPanel({
               { label: "Stage", value: data.job_stage },
               { label: "Attempts", value: data.attempts },
               ...(data.last_error ? [{ label: "Last error", value: data.last_error }] : []),
+              ...(data.scan ? [{ label: "Malware scan", value: <ScanVerdict scan={data.scan} /> }] : []),
             ]}
           />
+          {data.events.length > 0 && (
+            <details>
+              <summary className="cursor-pointer text-base">Stage history ({data.events.length})</summary>
+              <ol className="mt-2 flex flex-col gap-2">
+                {data.events.map((e, i) => (
+                  <li key={i} className="text-sm">
+                    <span className="mono-data">{e.event}</span> <Time value={e.at} />
+                    {e.detail && <span className="block text-muted [overflow-wrap:anywhere]">{e.detail}</span>}
+                  </li>
+                ))}
+              </ol>
+            </details>
+          )}
           {data.quarantine.length === 0 ? (
             <p className="text-base text-muted">Nothing is held in quarantine for this asset.</p>
           ) : (
@@ -347,4 +376,22 @@ function formatGrace(seconds: number) {
   const hours = seconds / 3600;
   if (hours >= 48) return `${Math.round(hours)} hours (${Math.round(hours / 24)} days)`;
   return `${Math.round(hours * 10) / 10} hours`;
+}
+
+function ScanVerdict({ scan }: { scan: NonNullable<ProcessingRecord["scan"]> }) {
+  return (
+    <span>
+      <StateBadge tone={scan.result === "CLEAN" ? "done" : "failed"}>{scan.result}</StateBadge>{" "}
+      <span className="text-sm">
+        by {scan.scanner}
+        {scan.scanner_version && <span className="mono-data"> {scan.scanner_version}</span>}
+      </span>
+      {scan.reused_from && (
+        <span className="block text-sm text-muted">
+          Not scanned again: asset <span className="mono-data">{scan.reused_from}</span> has the same bytes and was scanned clean by
+          the same engine version.
+        </span>
+      )}
+    </span>
+  );
 }

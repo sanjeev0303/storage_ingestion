@@ -789,8 +789,15 @@ func (s *Service) issueToken(ctx context.Context, principal model.Principal, ass
 
 // promotedKey is where promotion puts an asset under its connection's
 // ready prefix.
+// promotedKey is where an available asset's bytes are: the key derived
+// from its tenant and ID, or, for bytes stored once for identical uploads,
+// from the asset that first stored them.
 func promotedKey(prefix string, asset model.Asset) string {
-	return fmt.Sprintf("%s/%s/%s", prefix, asset.TenantID, asset.ID)
+	owner := asset.ID
+	if asset.SharedFrom != "" {
+		owner = asset.SharedFrom
+	}
+	return fmt.Sprintf("%s/%s/%s", prefix, asset.TenantID, owner)
 }
 
 // cdnURL is the CDN URL for an object key, each segment escaped.

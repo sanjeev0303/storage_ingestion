@@ -423,3 +423,35 @@ Run older binaries only after the rollback. Phase 7 code reads `datasets` throug
 - **Lineage.** Object-version lineage is the version's member rows, not graph edges, so a walk does not descend into individual objects. Edges are written by the platform; there is no public API to add arbitrary ones.
 - **Large exports.** Reports are stored in PostgreSQL and findings are paged; there is no asynchronous export of very large reports to object storage.
 - **Readiness.** Readiness is per profile and has no score. It says nothing about semantic quality, label correctness, licensing in law, bias, or training outcomes.
+
+## Branches
+
+A branch is a dataset of its own, with a parent: `POST /api/v1/datasets/{id}/branches {"name": "exp", "from_version_id": "…"}`. Without `from_version_id`, it branches from the dataset's latest version.
+
+- **What it starts with:** that snapshot's members, pinned to the same object versions. Rows are copied; bytes are not.
+- **Everything works on a branch:** members, manifest imports, snapshots, validation, readiness, diff and lineage. Its responses carry `branch` (parent, name, the version it was branched from, and its current merge base).
+- **One level deep:** a branch is never branched again. Branch names follow dataset names. A branch's dataset name is `<parent>@<branch>`, so it is never an upload namespace. `GET /api/v1/datasets` leaves branches out; `GET /api/v1/datasets/{id}/branches` lists them.
+- **New files for a branch:** they go into the parent's namespace, as new objects or new versions of existing paths, and the branch pins them. A bulk ingestion job therefore targets the parent; one aimed at a branch is refused. The parent's own snapshots still pin the versions they pinned (`osp ingest --branch` does all of this).
+- **Diff across a family:** `GET /datasets/{id}/versions/{vid}/diff?against=` accepts a version of the dataset's parent, or of another branch of it.
+
+### Merges
+
+`POST /api/v1/datasets/{target}/merges {"source_dataset_id": "…", "source_version_id": "…", "strategy": "FAIL", "dry_run": false, "idempotency_key": "…"}` merges a version of a branch into its parent's draft, or a version of the parent into the branch's draft. Without `source_version_id`, it merges the source's latest version. The result lands in the target's draft; take a snapshot to keep it as a version.
+
+**It is a three-way merge.** The common ancestor is the branch's `merge_base_version_id`: the version it was branched from, then the last version merged between the two in either direction. For every object whose membership the source changed since that base (added, removed, a new pinned version, label, split or metadata):
+
+| The target, since the base | Result |
+|---|---|
+| unchanged | the source's change is applied (`added`, `updated`, `removed`) |
+| changed the same way | nothing to do (`already_same`) |
+| changed differently | a conflict |
+
+**Strategies for conflicts:**
+
+- **`FAIL`** (the default): changes nothing at all. Answers 409 `merge_conflict` with the conflicts: each object's path and its base, source and target membership. At most 1,000 are listed; all are counted.
+- **`SOURCE`:** takes the source's side.
+- **`TARGET`:** keeps the target's.
+
+**Dry runs and records:** `dry_run` answers the same counts and conflicts and changes nothing. Applied merges are recorded (`GET /datasets/{id}/merges`) and audited (`dataset.merge`). A repeated `idempotency_key` returns the recorded merge instead of merging again.
+
+**Concurrency:** a merge takes the target's row lock, like any change to a draft, so it never interleaves with another change or a snapshot.

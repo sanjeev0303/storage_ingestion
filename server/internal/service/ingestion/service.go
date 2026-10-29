@@ -238,8 +238,13 @@ func (s *Service) CreateJob(ctx context.Context, p model.Principal, in CreateJob
 	if in.MaxConcurrency < 0 || in.MaxConcurrency > s.cfg.JobUploadSlots {
 		return model.IngestionJob{}, false, fmt.Errorf("%w: max_concurrency must be between 0 and %d", ErrInvalidInput, s.cfg.JobUploadSlots)
 	}
-	if _, err := s.deps.Repo.GetDataset(ctx, p.TenantID, in.DatasetID); err != nil {
+	ds, err := s.deps.Repo.GetDataset(ctx, p.TenantID, in.DatasetID)
+	if err != nil {
 		return model.IngestionJob{}, false, err
+	}
+	if ds.ParentID != "" {
+		// Files land in the parent's namespace; a branch then pins them.
+		return model.IngestionJob{}, false, fmt.Errorf("%w: ingest into the dataset the branch belongs to, then add the files to the branch", ErrInvalidInput)
 	}
 	q, err := s.quota(ctx, p.TenantID)
 	if err != nil {

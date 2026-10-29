@@ -17,6 +17,9 @@ type RetentionPolicyRepository interface {
 	Effective(ctx context.Context, tenantID, scope, scopeKey string, asOf time.Time) (model.RetentionPolicy, bool, error)
 	// History returns every version of the scope's policy, newest first.
 	History(ctx context.Context, tenantID, scope, scopeKey string) ([]model.RetentionPolicy, error)
+	// Latest returns the newest version of each of the tenant's policies,
+	// ordered by scope and scope key.
+	Latest(ctx context.Context, tenantID string) ([]model.RetentionPolicy, error)
 }
 
 // LegalHoldRepository stores legal holds. Every lookup is tenant-scoped.

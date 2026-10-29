@@ -46,6 +46,9 @@ export type AssetLifecycle = {
   expires_at?: string;
   deletion_grace_seconds: number;
   deletion?: Deletion;
+  // On a bucket with S3 Object Lock, the provider refuses to delete the
+  // stored version before this.
+  locked_until?: string;
 };
 
 export type QuarantineEntry = {
@@ -66,6 +69,10 @@ export type ProcessingRecord = {
   attempts: number;
   last_error?: string;
   quarantine: QuarantineEntry[];
+  // The malware scan's verdict. reused_from names the asset with the same
+  // bytes whose clean verdict, from the same engine version, was reused.
+  scan?: { scanner: string; result: string; scanner_version?: string; reused_from?: string; scanned_at?: string };
+  events: { event: string; detail: string; actor: string; at: string }[];
 };
 
 export type ReleaseQuarantineResponse = { asset_id: string; job_state: string; stage: string };
@@ -131,4 +138,30 @@ export type QuotaReconcileResponse = {
   reserved_bytes_after: number;
   stored_bytes_before: number;
   stored_bytes_after: number;
+};
+
+export type PolicyInEffect = {
+  id: string;
+  scope: RetentionScope;
+  scope_key: string;
+  version: number;
+  min_retention: string | null;
+  max_age: string | null;
+  deletion_grace: string | null;
+  quarantine_retention: string | null;
+  effective_from: string;
+  created_by: string;
+  reason: string;
+  created_at: string;
+};
+
+export type HeldHold = {
+  id: string;
+  scope: RetentionScope;
+  scope_key: string;
+  reason: string;
+  placed_by: string;
+  placed_at: string;
+  released_by?: string;
+  released_at?: string;
 };

@@ -55,6 +55,13 @@ type Auth struct {
 	// so an address is not verified, and most deployments want accounts to
 	// come from an administrator or an invitation.
 	SelfRegistration bool
+
+	// SSORedirectURIs are the only places an OIDC sign-in may return to:
+	// the console's callback route. Empty turns single sign-on off.
+	SSORedirectURIs []string
+	// SAMLACSURL is where identity providers post SAML responses: the
+	// console's assertion consumer route. Empty turns SAML off.
+	SAMLACSURL string
 }
 
 // RateRule allows Requests per Window.
@@ -95,6 +102,8 @@ var defaultRates = map[string]string{
 	// used to probe a network.
 	"storage_test":  "10/1m",
 	"storage_admin": "60/1m",
+	// Starting and finishing single sign-on, per source address.
+	"sso": "30/1m",
 }
 
 // LoadSecurity reads and validates the security settings.
@@ -150,6 +159,8 @@ func LoadSecurity() (Security, error) {
 	s.Auth.Argon2Memory, s.Auth.Argon2Time, s.Auth.Argon2Threads = uint32(memory), uint32(passes), uint8(threads)
 	s.Auth.TrustProxyHeaders = strings.EqualFold(getEnv("AUTH_TRUST_PROXY_HEADERS", "false"), "true")
 	s.Auth.SelfRegistration = strings.EqualFold(getEnv("AUTH_SELF_REGISTRATION", "false"), "true")
+	s.Auth.SSORedirectURIs = splitList(getEnv("AUTH_SSO_REDIRECT_URIS", ""))
+	s.Auth.SAMLACSURL = strings.TrimSpace(getEnv("AUTH_SAML_ACS_URL", ""))
 
 	s.Rates = map[string]RateRule{}
 	for op, fallback := range defaultRates {

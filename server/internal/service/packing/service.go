@@ -34,6 +34,11 @@ type Dependencies struct {
 	Router  interfaces.StorageRouter
 	Metrics *metrics.Registry
 	Log     *slog.Logger
+	// Shared, when set, keeps a packed source that another asset still
+	// points at (deduplicated content).
+	Shared interface {
+		KeyInUse(ctx context.Context, tenantID, objectKey, exceptID string) (string, error)
+	}
 }
 
 // AssetReader reads an asset as it is recorded now.

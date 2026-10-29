@@ -12,6 +12,7 @@ import { describeError, readError } from "@/lib/api/errors";
 import { safeNext } from "@/lib/auth/redirect";
 import { zodResolver } from "@/lib/validation/resolver";
 import { useState } from "react";
+import { SsoForm } from "./sso-form";
 
 const schema = z.object({
   email: z.string().trim().toLowerCase().min(1, "Enter your email address.").email("Enter a valid email address."),
@@ -32,7 +33,7 @@ function messageFor(code: string | undefined, fallback: string, retryAfter?: num
   }
 }
 
-export function LoginForm() {
+export function LoginForm({ ssoError }: { ssoError?: string }) {
   const router = useRouter();
   const params = useSearchParams();
   const [formError, setFormError] = useState<string | null>(null);
@@ -90,6 +91,12 @@ export function LoginForm() {
           Sign in
         </SubmitButton>
       </form>
+
+      <div className="mt-10">
+        <h2 className="text-base font-semibold">Single sign-on</h2>
+        <p className="mt-1 mb-4 text-sm text-muted">If your organization signs in through its own identity provider.</p>
+        <SsoForm refused={ssoError} />
+      </div>
 
       <p className="mt-6 text-sm text-muted">
         New here?{" "}

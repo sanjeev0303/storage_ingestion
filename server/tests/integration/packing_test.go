@@ -85,7 +85,8 @@ func (r *packingRig) worker(t *testing.T, owner string, registry *metrics.Regist
 	if change != nil {
 		change(&cfg)
 	}
-	svc, err := packing.NewService(packing.Dependencies{Packs: r.repo, Assets: postgres.NewAssetRepository(r.s.db), Router: r.router, Metrics: registry, Log: r.s.log},
+	svc, err := packing.NewService(packing.Dependencies{Packs: r.repo, Assets: postgres.NewAssetRepository(r.s.db), Router: r.router, Metrics: registry, Log: r.s.log,
+		Shared: postgres.NewAssetRepository(r.s.db)},
 		packing.Config{Packing: cfg, Owner: owner})
 	if err != nil {
 		t.Fatal(err)

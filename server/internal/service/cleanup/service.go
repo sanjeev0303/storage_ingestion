@@ -41,6 +41,11 @@ type Dependencies struct {
 	Connections interfaces.ConnectionLister
 	// Packs finds assets whose bytes were packed; nil when nothing is.
 	Packs interfaces.PackLocator
+	// Shared names another asset still using a deleted asset's bytes
+	// (content deduplication); nil when nothing is shared.
+	Shared interface {
+		KeyInUse(ctx context.Context, tenantID, objectKey, exceptID string) (string, error)
+	}
 }
 
 type Config struct {

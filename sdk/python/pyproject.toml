@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "osp-sdk"
+version = "0.1.0"
+description = "Python SDK and CLI for the verifiable dataset storage platform"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+torch = ["torch>=2.0"]
+
+[project.scripts]
+osp = "osp.cli:main"
+
+[tool.setuptools]
+packages = ["osp"]

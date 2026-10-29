@@ -93,6 +93,15 @@ type Dataset struct {
 	// StorageConnectionID is the storage connection new uploads into the
 	// dataset go to ("" for the organization's default).
 	StorageConnectionID string
+
+	// A branch (docs/datasets.md, "Branches"): its parent dataset, its
+	// name there, the version it was branched from, and the common
+	// ancestor of its next merge. All empty on a dataset that is not a
+	// branch.
+	ParentID           string
+	BranchName         string
+	ForkVersionID      string
+	MergeBaseVersionID string
 }
 
 // DatasetSummary adds up the counters of a dataset's jobs.

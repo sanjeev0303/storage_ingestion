@@ -133,6 +133,25 @@ func (p Policy) ValidateURL(raw string) (*url.URL, error) {
 	return u, nil
 }
 
+// ValidateURLWithPath checks a webhook target or an OIDC issuer:
+// ValidateURL's rules for its scheme, host and port, but a path and query
+// are allowed. No fragment.
+func (p Policy) ValidateURLWithPath(raw string) (*url.URL, error) {
+	if len(raw) > 2048 || strings.ContainsAny(raw, " \t\r\n\\") {
+		return nil, fmt.Errorf("%w: the URL is malformed", ErrRejected)
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Fragment != "" {
+		return nil, fmt.Errorf("%w: the URL is malformed or has a fragment", ErrRejected)
+	}
+	base := *u
+	base.Path, base.RawPath, base.RawQuery, base.ForceQuery = "", "", "", false
+	if _, err := p.ValidateURL(base.String()); err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
 // validHostname accepts DNS names: labels of letters, digits and hyphens.
 func validHostname(host string) bool {
 	if len(host) > 253 {

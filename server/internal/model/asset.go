@@ -76,6 +76,10 @@ type Asset struct {
 	// "" reads as the platform connection.
 	StorageConnectionID string
 	StagingConnectionID string
+
+	// SharedFrom is the asset whose stored object this one uses: its bytes
+	// equal an object the organization already stored, so no copy was made.
+	SharedFrom string
 }
 
 // CanTransitionAsset reports whether the asset lifecycle allows from -> to:

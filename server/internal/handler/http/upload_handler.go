@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -98,6 +99,62 @@ func (h *UploadHandler) Get(w http.ResponseWriter, r *http.Request) {
 			ObjectID: asset.ObjectID, Version: asset.Version}
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// List pages the organization's uploads newest first: ?status=, ?limit=
+// (1 to 200) and ?cursor= from the previous page.
+func (h *UploadHandler) List(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	status := model.UploadStatus(strings.ToUpper(query.Get("status")))
+	switch status {
+	case "", model.UploadStatusPending, model.UploadStatusUploading, model.UploadStatusCompleting, model.UploadStatusCompleted,
+		model.UploadStatusVerified, model.UploadStatusAborting, model.UploadStatusAborted, model.UploadStatusFailed, model.UploadStatusExpired:
+	default:
+		writeError(w, http.StatusBadRequest, "unknown upload status")
+		return
+	}
+	limit := 0
+	if raw := query.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			writeError(w, http.StatusBadRequest, "limit must be a positive number")
+			return
+		}
+		limit = n
+	}
+	uploads, next, err := h.service.ListFor(r.Context(), principalOf(r), status, query.Get("cursor"), limit)
+	if errors.Is(err, model.ErrInvalidCursor) {
+		writeError(w, http.StatusBadRequest, "invalid cursor")
+		return
+	}
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	out := uploadPage{Uploads: make([]uploadListItem, 0, len(uploads)), NextCursor: next}
+	for _, u := range uploads {
+		out.Uploads = append(out.Uploads, uploadListItem{
+			UploadID: u.ID, Status: string(u.Status), FileName: u.FileName, ContentType: u.ContentType,
+			SizeBytes: u.ExpectedSize, Multipart: u.StorageUploadID != "", CreatedAt: u.CreatedAt, ExpiresAt: u.ExpiresAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+type uploadPage struct {
+	Uploads    []uploadListItem `json:"uploads"`
+	NextCursor string           `json:"next_cursor,omitempty"`
+}
+
+type uploadListItem struct {
+	UploadID    string    `json:"upload_id"`
+	Status      string    `json:"status"`
+	FileName    string    `json:"file_name"`
+	ContentType string    `json:"content_type"`
+	SizeBytes   int64     `json:"size_bytes"`
+	Multipart   bool      `json:"multipart"`
+	CreatedAt   time.Time `json:"created_at"`
+	ExpiresAt   time.Time `json:"expires_at"`
 }
 
 type uploadStatus struct {

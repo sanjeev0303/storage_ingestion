@@ -259,12 +259,13 @@ func TestConnectionTestActivatesAndReportsSanitizedFailures(t *testing.T) {
 	}
 
 	f.clients.fail = nil
-	stored, result, err = f.svc.Test(ctx, admin, c.ID, true)
+	// Asked without the probe: activation runs it anyway.
+	stored, result, err = f.svc.Test(ctx, admin, c.ID, false)
 	if err != nil || !result.OK || stored.Status != model.ConnectionActive || stored.Capabilities == nil {
 		t.Fatalf("a passing test activates: %+v %+v %v", stored, result, err)
 	}
 	if f.clients.storage.WriteCalls != 1 {
-		t.Fatalf("the probe writes once, wrote %d", f.clients.storage.WriteCalls)
+		t.Fatalf("activation always runs the write probe once, wrote %d", f.clients.storage.WriteCalls)
 	}
 	page, _ := f.clients.storage.ListObjectsPage(ctx, "team-bucket", "", "", 100)
 	if len(page.Objects) != 0 {

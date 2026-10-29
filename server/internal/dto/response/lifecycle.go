@@ -37,4 +37,7 @@ type AssetLifecycleResponse struct {
 	// DeletionGraceSeconds is how long a deletion stays restorable.
 	DeletionGraceSeconds int64             `json:"deletion_grace_seconds"`
 	Deletion             *DeletionResponse `json:"deletion,omitempty"`
+	// LockedUntil: on a bucket with S3 Object Lock, the provider refuses
+	// to delete the stored version before this.
+	LockedUntil *time.Time `json:"locked_until,omitempty"`
 }

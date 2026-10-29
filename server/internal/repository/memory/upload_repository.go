@@ -87,6 +87,54 @@ func (r *UploadRepository) GetByID(
 	return &result, nil
 }
 
+// List pages the tenant's sessions newest first. The cursor is the last
+// session's ID.
+func (r *UploadRepository) List(ctx context.Context, tenantID string, status model.UploadStatus, after string, limit int) ([]model.UploadSession, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	r.mu.RLock()
+	var all []model.UploadSession
+	for _, u := range r.uploads {
+		if u.TenantID == tenantID && (status == "" || u.Status == status) {
+			all = append(all, u)
+		}
+	}
+	r.mu.RUnlock()
+
+	slices.SortFunc(all, func(a, b model.UploadSession) int {
+		if c := b.CreatedAt.Compare(a.CreatedAt); c != 0 {
+			return c
+		}
+		if a.ID > b.ID {
+			return -1
+		}
+		if a.ID < b.ID {
+			return 1
+		}
+		return 0
+	})
+	start := 0
+	if after != "" {
+		start = -1
+		for i, u := range all {
+			if u.ID == after {
+				start = i + 1
+				break
+			}
+		}
+		if start < 0 {
+			return nil, "", model.ErrInvalidCursor
+		}
+	}
+	page := all[start:]
+	if len(page) <= limit {
+		return page, "", nil
+	}
+	page = page[:limit]
+	return page, page[limit-1].ID, nil
+}
+
 // GetByIdempotencyKey retrieves a prior request result.
 // A missning key returns ErrUploadNotFound.
 func (r *UploadRepository) GetByIdempotencyKey(

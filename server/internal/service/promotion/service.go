@@ -40,6 +40,24 @@ type Service struct {
 	// router reaches tenants' storage connections; nil keeps promotion on
 	// the platform's buckets.
 	router interfaces.StorageRouter
+	// dedup, when set, publishes an asset whose bytes the organization
+	// already stores on the same connection pointing at that object, with
+	// no copy.
+	dedup ContentDedup
+}
+
+// ContentDedup finds stored twins and publishes onto them
+// (postgres.AssetRepository).
+type ContentDedup interface {
+	FindTwin(ctx context.Context, tenantID, connectionID, sha256 string, size int64, exceptID string) (model.Asset, bool, error)
+	OlderTwinPending(ctx context.Context, asset model.Asset) (bool, error)
+	PublishShared(ctx context.Context, tenantID, assetID string, twin model.Asset, at time.Time) (bool, error)
+}
+
+// Dedup turns content deduplication on.
+func (s *Service) Dedup(d ContentDedup) *Service {
+	s.dedup = d
+	return s
 }
 
 // Route lets promotion reach tenants' storage connections.
@@ -125,7 +143,7 @@ func (s *Service) Promote(ctx context.Context, asset model.Asset, destinationKey
 
 	switch asset.Status {
 	case model.AssetStatusAvailable:
-		if asset.ObjectKey == destinationKey {
+		if asset.ObjectKey == destinationKey || asset.SharedFrom != "" {
 			// Promoted earlier; only the record of it was lost.
 			return model.AssetStatusAvailable, nil
 		}
@@ -137,6 +155,16 @@ func (s *Service) Promote(ctx context.Context, asset model.Asset, destinationKey
 
 	if asset.ObjectKey != src.StagingKey(asset.TenantID, asset.UploadID) {
 		return "", retry.Permanent(errors.New("asset source is not its verified quarantine key"))
+	}
+
+	if s.dedup != nil && asset.ChecksumSHA256 != "" {
+		if err := s.awaitOlderTwin(ctx, asset); err != nil {
+			return "", err
+		}
+		status, shared, err := s.share(ctx, dst, asset, confirm)
+		if err != nil || shared {
+			return status, err
+		}
 	}
 
 	// A crash after an earlier copy leaves a destination object behind. A
@@ -288,4 +316,68 @@ func (s *Service) reject(ctx context.Context, asset model.Asset, reason string) 
 		return "", fmt.Errorf("reject asset: %w", err)
 	}
 	return model.AssetStatusRejected, nil
+}
+
+// share publishes the asset onto an identical object the organization
+// already stores on the same connection, when there is one. The twin was
+// hashed when it was published, and its object must still be exactly that
+// one (same size, ETag and version), so the bytes are the verified bytes.
+// It reports false, having changed nothing, when there is no usable twin.
+// Identical files of one batch are promoted at the same moment, and
+// neither would find the other stored. So an asset waits while an older
+// asset with the same bytes is still being promoted, then shares it. The
+// order is by age, so nobody waits in a circle, and the wait is bounded:
+// after twinWait the asset is copied as usual.
+const (
+	twinPoll = 250 * time.Millisecond
+	twinWait = time.Minute
+)
+
+func (s *Service) awaitOlderTwin(ctx context.Context, asset model.Asset) error {
+	for waited := time.Duration(0); waited < twinWait; waited += twinPoll {
+		pending, err := s.dedup.OlderTwinPending(ctx, asset)
+		if err != nil || !pending {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(twinPoll):
+		}
+	}
+	return nil
+}
+
+func (s *Service) share(ctx context.Context, dst side, asset model.Asset, confirm func(context.Context) error) (model.AssetStatus, bool, error) {
+	twin, found, err := s.dedup.FindTwin(ctx, asset.TenantID, asset.StorageConnectionID, asset.ChecksumSHA256, asset.SizeBytes, asset.ID)
+	if err != nil || !found {
+		return "", false, err
+	}
+	stored, err := dst.storage.HeadObject(ctx, dst.ReadyBucket, twin.ObjectKey)
+	if errors.Is(err, interfaces.ErrObjectNotFound) {
+		return "", false, nil // packed, or gone: copy instead
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("inspect identical object: %w", err)
+	}
+	if stored.SizeBytes != twin.SizeBytes || stored.ETag != twin.StorageETag || stored.VersionID != twin.StorageVersionID {
+		return "", false, nil
+	}
+	if confirm != nil {
+		if err := confirm(ctx); err != nil {
+			return "", false, err
+		}
+	}
+	shared, err := s.dedup.PublishShared(ctx, asset.TenantID, asset.ID, twin, s.now())
+	if errors.Is(err, model.ErrInvalidAssetState) {
+		current, getErr := s.assets.GetByID(ctx, asset.TenantID, asset.ID)
+		if getErr != nil {
+			return "", false, getErr
+		}
+		return current.Status, true, nil
+	}
+	if err != nil || !shared {
+		return "", false, err
+	}
+	return model.AssetStatusAvailable, true, nil
 }

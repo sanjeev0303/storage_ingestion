@@ -169,6 +169,7 @@ func (e *ingestEnv) processing(t *testing.T) *processing.Service {
 	if err != nil {
 		t.Fatal(err)
 	}
+	promoter.Dedup(e.assets)
 	svc, err := processing.NewService(processing.Dependencies{
 		Jobs: e.processingEnv.jobs, Assets: e.assets, Uploads: e.uploads,
 		Quarantine: postgres.NewQuarantineRepository(e.db), Events: postgres.NewProcessingEventRepository(e.db),

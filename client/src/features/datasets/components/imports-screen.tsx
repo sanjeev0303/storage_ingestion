@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
@@ -8,7 +7,6 @@ import { Field, Select } from "@/components/ui/field";
 import { Panel } from "@/components/ui/panel";
 import { PermissionDenied } from "@/components/ui/states";
 import { SubmitButton } from "@/components/ui/submit-button";
-import { Time } from "@/components/ui/time";
 import { newIdempotencyKey } from "@/lib/api/client";
 import { useSession } from "@/lib/auth/session";
 import { putBlob } from "@/lib/upload/put";
@@ -19,11 +17,10 @@ import {
   importMessage,
   INLINE_LIMIT_BYTES,
   preflightManifest,
-  readRecentImports,
-  rememberImport,
   type PreflightResult,
 } from "../helpers";
 import { useDataset, useRefreshDatasets } from "../hooks";
+import { ImportHistory } from "./import-history";
 import type { DuplicatePolicy } from "../types";
 
 type Mode = "inline" | "staged";
@@ -44,8 +41,6 @@ export function ImportsScreen({ id }: { id: string }) {
   const { can } = useSession();
   const dataset = useDataset(id);
   const archived = dataset.data?.lifecycle_status === "ARCHIVED";
-  // Mounted only after the dataset has loaded in the browser, so reading storage here cannot mismatch server HTML.
-  const [recent] = useState(() => readRecentImports(id));
 
   return (
     <div className="grid gap-6 lg:grid-cols-3">
@@ -58,27 +53,7 @@ export function ImportsScreen({ id }: { id: string }) {
           <StartImport datasetId={id} />
         )}
 
-        <Panel title="Imports started in this browser" description="The API has no list of imports, so only the ones started here are remembered.">
-          {recent.length === 0 ? (
-            <p className="text-base text-muted">
-              Nothing yet. After you start an import you land on its progress page, and it appears here so you can come
-              back to it.
-            </p>
-          ) : (
-            <ul className="grid gap-2">
-              {recent.map((item) => (
-                <li key={item.id} className="flex flex-wrap items-baseline justify-between gap-2">
-                  <Link href={`/app/datasets/${id}/imports/${item.id}`} className="mono-data underline underline-offset-2">
-                    {item.id}
-                  </Link>
-                  <span className="text-sm text-muted">
-                    <Time value={item.at} />
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Panel>
+        <ImportHistory id={id} />
       </div>
 
       <Panel title="Manifest format" description="JSON Lines, schema version 1. One member per line.">
@@ -161,7 +136,6 @@ function StartImport({ datasetId }: { datasetId: string }) {
           job = await api.submitImport(datasetId, job.id);
         }
       }
-      rememberImport(datasetId, job.id);
       refresh();
       router.push(`/app/datasets/${datasetId}/imports/${job.id}`);
     } catch (e) {

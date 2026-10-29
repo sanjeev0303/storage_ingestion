@@ -220,24 +220,3 @@ export function importMessage(error: unknown) {
       return describeError(error);
   }
 }
-
-const RECENT_KEY = (datasetId: string) => `datasets.imports.${datasetId}`;
-
-// The API cannot list imports, so the ids this browser started are remembered per dataset.
-export function readRecentImports(datasetId: string): { id: string; at: string }[] {
-  try {
-    const raw = localStorage.getItem(RECENT_KEY(datasetId));
-    return raw ? (JSON.parse(raw) as { id: string; at: string }[]) : [];
-  } catch {
-    return [];
-  }
-}
-
-export function rememberImport(datasetId: string, id: string) {
-  try {
-    const next = [{ id, at: new Date().toISOString() }, ...readRecentImports(datasetId).filter((i) => i.id !== id)];
-    localStorage.setItem(RECENT_KEY(datasetId), JSON.stringify(next.slice(0, 10)));
-  } catch {
-    // storage can be blocked; the job page is still reached from the redirect
-  }
-}

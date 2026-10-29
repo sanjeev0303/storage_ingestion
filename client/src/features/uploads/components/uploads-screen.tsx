@@ -17,6 +17,7 @@ import { Dropzone } from "./dropzone";
 import { QueueTable } from "./queue-table";
 import { ResumePanel } from "./resume-panel";
 import { useUploadQueue } from "./use-upload-queue";
+import { RecentUploads } from "./recent-uploads";
 
 const FINISHED = ["available", "rejected", "failed", "cancelled"];
 const LARGE_BYTES = 1024 * MIB;
@@ -178,6 +179,7 @@ export function UploadsScreen() {
             />
           )}
         </Panel>
+        <RecentUploads />
         <LimitsPanel />
         {organizationId && (
           <ResumePanel store={queue.store} organizationId={organizationId} runningIds={runningIds} onResume={queue.resume} />

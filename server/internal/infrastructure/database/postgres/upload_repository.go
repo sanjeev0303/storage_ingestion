@@ -216,6 +216,43 @@ func (r *UploadRepository) GetByID(
 	return upload, nil
 }
 
+func (r *UploadRepository) List(ctx context.Context, tenantID string, status model.UploadStatus, after string, limit int) ([]model.UploadSession, string, error) {
+	at, id, err := decodeTimeCursor(after)
+	if err != nil {
+		return nil, "", err
+	}
+	rows, err := r.db.Pool.Query(ctx, `
+		SELECT `+uploadColumns+`
+		FROM upload_sessions
+		WHERE tenant_id = $1
+		  AND ($2 = '' OR status = $2)
+		  AND ($3 = '' OR (created_at, id) < ($4, $3))
+		ORDER BY created_at DESC, id DESC
+		LIMIT $5
+	`, tenantID, string(status), id, at, limit+1)
+	if err != nil {
+		return nil, "", fmt.Errorf("list upload sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var uploads []model.UploadSession
+	for rows.Next() {
+		upload, err := scanUpload(rows)
+		if err != nil {
+			return nil, "", fmt.Errorf("scan upload session: %w", err)
+		}
+		uploads = append(uploads, *upload)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("list upload sessions: %w", err)
+	}
+	if len(uploads) <= limit {
+		return uploads, "", nil
+	}
+	uploads = uploads[:limit]
+	return uploads, encodeTimeCursor(uploads[limit-1].CreatedAt, uploads[limit-1].ID), nil
+}
+
 func (r *UploadRepository) GetByIdempotencyKey(
 	ctx context.Context,
 	tenantID string,

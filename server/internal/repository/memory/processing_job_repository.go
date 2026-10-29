@@ -196,6 +196,32 @@ func (r *ProcessingJobRepository) SaveProgress(ctx context.Context, job model.Pr
 	})
 }
 
+func (r *ProcessingJobRepository) FindCleanScan(ctx context.Context, tenantID, assetID, sha256 string, size int64, scanner, version string) (string, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
+	r.mu.Lock()
+	var candidates []string
+	for _, job := range r.jobs {
+		if job.TenantID == tenantID && job.AssetID != assetID && job.ScanResult == model.ScanClean &&
+			job.VerificationStatus == model.StagePassed && job.Scanner == scanner && job.ScannerVersion == version {
+			candidates = append(candidates, job.AssetID)
+		}
+	}
+	r.mu.Unlock()
+
+	for _, id := range candidates {
+		asset, err := r.assets.GetByID(ctx, tenantID, id)
+		if err != nil {
+			continue
+		}
+		if asset.ChecksumSHA256 == sha256 && asset.SizeBytes == size {
+			return id, true, nil
+		}
+	}
+	return "", false, nil
+}
+
 func (r *ProcessingJobRepository) Renew(ctx context.Context, jobID, owner string, now time.Time, lease time.Duration) error {
 	return r.update(ctx, jobID, owner, now, func(stored *model.ProcessingJob) {
 		expires := now.Add(lease)

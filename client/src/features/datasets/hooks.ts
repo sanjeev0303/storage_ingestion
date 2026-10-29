@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useOrganizationId } from "@/lib/auth/session";
 import { orgKey } from "@/lib/query/keys";
 import { usePagedQuery } from "@/lib/query/paged";
@@ -19,12 +19,12 @@ export function useDatasets(status: string) {
   });
 }
 
-export function useDataset(id: string) {
+export function useDataset(id: string, enabled = true) {
   const organizationId = useOrganizationId();
   return useQuery({
     queryKey: orgKey(organizationId, "datasets", "detail", id),
     queryFn: ({ signal }) => api.getDataset(id, signal),
-    enabled: Boolean(organizationId),
+    enabled: Boolean(organizationId) && enabled,
   });
 }
 
@@ -103,12 +103,12 @@ export function useVersions(id: string) {
   });
 }
 
-export function useVersion(id: string, versionId: string) {
+export function useVersion(id: string, versionId: string, enabled = true) {
   const organizationId = useOrganizationId();
   return useQuery({
     queryKey: orgKey(organizationId, "datasets", "version", id, versionId),
     queryFn: ({ signal }) => api.getVersion(id, versionId, signal),
-    enabled: Boolean(organizationId),
+    enabled: Boolean(organizationId) && enabled,
   });
 }
 
@@ -173,5 +173,58 @@ export function useValidationProfiles() {
     queryFn: ({ signal }) => api.listProfiles(signal),
     enabled: Boolean(organizationId),
     staleTime: 5 * 60_000,
+  });
+}
+
+// The summary comes with every page; the differences page by object.
+export function useVersionDiff(id: string, versionId: string, against: string) {
+  const organizationId = useOrganizationId();
+  const query = useInfiniteQuery({
+    queryKey: orgKey(organizationId, "datasets", "diff", id, versionId, against),
+    enabled: Boolean(organizationId) && Boolean(against),
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam, signal }) => api.diffVersions(id, versionId, against, pageParam, signal),
+    getNextPageParam: (last) => last.next_after || undefined,
+  });
+  return {
+    ...query,
+    summary: query.data?.pages[0]?.summary,
+    items: query.data?.pages.flatMap((page) => page.differences) ?? [],
+  };
+}
+
+export function useBranches(id: string, enabled = true) {
+  const organizationId = useOrganizationId();
+  return useQuery({
+    queryKey: orgKey(organizationId, "datasets", "branches", id),
+    queryFn: ({ signal }) => api.listBranches(id, signal).then((page) => page.branches),
+    enabled: Boolean(organizationId) && enabled,
+  });
+}
+
+export function useMerges(id: string) {
+  const organizationId = useOrganizationId();
+  return useQuery({
+    queryKey: orgKey(organizationId, "datasets", "merges", id),
+    queryFn: ({ signal }) => api.listMerges(id, signal).then((page) => page.merges),
+    enabled: Boolean(organizationId),
+  });
+}
+
+export function useCreateBranch(id: string) {
+  const refresh = useRefreshDatasets();
+  return useMutation({
+    mutationFn: (input: { name: string; fromVersionId: string }) => api.createBranch(id, input.name, input.fromVersionId),
+    onSuccess: refresh,
+  });
+}
+
+export function useMerge(targetId: string) {
+  const refresh = useRefreshDatasets();
+  return useMutation({
+    mutationFn: (body: Parameters<typeof api.merge>[1]) => api.merge(targetId, body),
+    onSuccess: (result) => {
+      if (result.applied) return refresh();
+    },
   });
 }

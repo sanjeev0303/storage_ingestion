@@ -317,6 +317,15 @@ func TestContentValidationModes(t *testing.T) {
 		t.Fatalf("full findings: %v", codes)
 	}
 
+	// The built-in storage audit is this check, ready made: it finds the
+	// same damaged and missing bytes, and flags the deleted object.
+	_, report, body = s.validated(t, dev, d.ID, datasetservice.ValidationInput{ProfileID: "builtin:storage-audit", Mode: model.ModeFull}, false)
+	audit := findingCodes(s.allFindings(t, dev, report.ID, ""))
+	if report.Status != model.LifecycleFailed || body.Content.Read != 5 ||
+		audit["CHECKSUM_MISMATCH"] != 1 || audit["SIZE_MISMATCH"] != 1 || audit["CONTENT_MISSING"] != 1 {
+		t.Fatalf("storage audit: %s %+v %v", report.Status, body.Content, audit)
+	}
+
 	// SAMPLED reads a deterministic sample and says so.
 	_, report, body = s.validated(t, dev, d.ID, datasetservice.ValidationInput{ProfileID: reread.ID, Mode: model.ModeSampled, SampleSize: 2}, false)
 	if body.Content.Coverage != "SAMPLED" || body.Content.Examined+body.Content.NotExamined != 6 || body.Content.Examined > 2 ||

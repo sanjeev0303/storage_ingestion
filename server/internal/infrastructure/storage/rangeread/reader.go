@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
 )
@@ -21,6 +22,15 @@ const (
 	ChunkBytes = 8 << 20
 	Parallel   = 8
 )
+
+// chunkPool reuses ChunkBytes buffers across reads and readers. Without it
+// every pass over an object allocates the object's whole size in chunks
+// that live a few milliseconds: a 4 GiB run read three times is 12 GiB of
+// garbage for the collector. Buffers of another chunk size are not pooled.
+var chunkPool = sync.Pool{New: func() any {
+	buf := make([]byte, ChunkBytes)
+	return &buf
+}}
 
 // Ranger serves byte ranges of an object.
 type Ranger interface {
@@ -48,7 +58,9 @@ func OpenObject(ctx context.Context, storage Opener, bucket, key string, meta in
 
 type chunk struct {
 	data []byte
-	err  error
+	// pooled is the chunkPool buffer data lives in, given back once read.
+	pooled *[]byte
+	err    error
 }
 
 type reader struct {
@@ -58,7 +70,17 @@ type reader struct {
 	// buffer is what bounds how far ahead the fetches run.
 	pending chan chan chunk
 	current []byte
+	held    *[]byte
 	err     error
+}
+
+// release gives the chunk being read back to the pool.
+func (rd *reader) release() {
+	if rd.held != nil {
+		chunkPool.Put(rd.held)
+		rd.held = nil
+	}
+	rd.current = nil
 }
 
 // Open returns bytes [0, size) of an object, read as chunkSize ranges with
@@ -89,45 +111,90 @@ func fetch(ctx context.Context, r Ranger, bucket, key string, first, last int64,
 		return chunk{err: err}
 	}
 	defer body.Close()
-	data := make([]byte, last-first+1)
+	size := last - first + 1
+	var pooled *[]byte
+	var data []byte
+	if size <= ChunkBytes {
+		pooled = chunkPool.Get().(*[]byte)
+		data = (*pooled)[:size]
+	} else {
+		data = make([]byte, size)
+	}
 	if _, err := io.ReadFull(body, data); err != nil {
+		if pooled != nil {
+			chunkPool.Put(pooled)
+		}
 		return chunk{err: fmt.Errorf("read bytes %d-%d: %w", first, last, err)}
 	}
-	return chunk{data: data}
+	return chunk{data: data, pooled: pooled}
+}
+
+// next makes the following chunk current, giving the finished one back to
+// the pool. It returns false when there is nothing more to read (rd.err).
+func (rd *reader) next() bool {
+	rd.release()
+	if rd.err != nil {
+		return false
+	}
+	result, ok := <-rd.pending
+	if !ok {
+		// Every chunk was handed out, unless the read was cancelled.
+		rd.err = io.EOF
+		if err := rd.ctx.Err(); err != nil {
+			rd.err = err
+		}
+		return false
+	}
+	got := <-result
+	if got.err != nil {
+		rd.err = got.err
+		rd.cancel()
+		return false
+	}
+	rd.current, rd.held = got.data, got.pooled
+	return true
 }
 
 func (rd *reader) Read(p []byte) (int, error) {
 	for len(rd.current) == 0 {
-		if rd.err != nil {
+		if !rd.next() {
 			return 0, rd.err
 		}
-		next, ok := <-rd.pending
-		if !ok {
-			// Every chunk was handed out, unless the read was cancelled.
-			rd.err = io.EOF
-			if err := rd.ctx.Err(); err != nil {
-				rd.err = err
-			}
-			continue
-		}
-		got := <-next
-		if got.err != nil {
-			rd.err = got.err
-			rd.cancel()
-			continue
-		}
-		rd.current = got.data
 	}
 	n := copy(p, rd.current)
 	rd.current = rd.current[n:]
 	return n, nil
 }
 
+// WriteTo hands whole chunks to w, so io.Copy into a hasher or a socket
+// skips copying every byte through a small intermediate buffer. w must not
+// keep the slice (the io.Writer contract): its buffer is reused.
+func (rd *reader) WriteTo(w io.Writer) (int64, error) {
+	var total int64
+	for {
+		if len(rd.current) > 0 {
+			n, err := w.Write(rd.current)
+			total += int64(n)
+			rd.current = rd.current[n:]
+			if err != nil {
+				return total, err
+			}
+		}
+		if !rd.next() {
+			if rd.err == io.EOF {
+				return total, nil
+			}
+			return total, rd.err
+		}
+	}
+}
+
 // Close stops every fetch still running. Their results go to buffered
-// channels nobody reads, so no goroutine is left blocked.
+// channels nobody reads, so no goroutine is left blocked; those chunks are
+// left to the collector rather than the pool.
 func (rd *reader) Close() error {
 	rd.cancel()
-	rd.current = nil
+	rd.release()
 	if rd.err == nil {
 		rd.err = io.ErrClosedPipe
 	}

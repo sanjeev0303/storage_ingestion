@@ -71,6 +71,9 @@ func (h *LifecycleHandler) Get(w nethttp.ResponseWriter, r *nethttp.Request) {
 		RetainUntil:          inspection.RetainUntil,
 		ExpiresAt:            inspection.ExpiresAt,
 		DeletionGraceSeconds: int64(inspection.Policy.DeletionGrace.Seconds()),
+		// Only the date: whether a legal hold is also set is not the
+		// owner's to see.
+		LockedUntil: inspection.LockedUntil,
 	}
 	for _, op := range inspection.Operations {
 		if op.State.IsLive() || op.State == model.DeletionFailed {

@@ -38,9 +38,19 @@ type fakeScanner struct {
 	during  func(ctx context.Context) error
 	onPing  func()
 	partial int64 // when set, read only this many bytes before answering
+	version string // when set, the scanner reports it and verdicts can be reused
 }
 
 func (f *fakeScanner) Name() string { return "fake" }
+
+func (f *fakeScanner) Version(context.Context) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.version == "" {
+		return "", errors.New("no version")
+	}
+	return f.version, nil
+}
 
 func (f *fakeScanner) Ping(context.Context) error {
 	if f.onPing != nil {

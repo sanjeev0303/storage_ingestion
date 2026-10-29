@@ -21,7 +21,7 @@ function readStoredOrganization() {
   }
 }
 
-function storeOrganization(id: string | null) {
+export function storeOrganization(id: string | null) {
   try {
     if (id) sessionStorage.setItem(ORG_STORAGE_KEY, id);
     else sessionStorage.removeItem(ORG_STORAGE_KEY);

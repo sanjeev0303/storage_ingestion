@@ -57,6 +57,21 @@ func (s *Service) GetFor(ctx context.Context, p model.Principal, uploadID string
 	return s.repository.GetByID(ctx, p.TenantID, uploadID)
 }
 
+// ListFor pages the organization's upload sessions newest first, to the
+// members allowed to read one (GetFor). limit is clamped to 1..200.
+func (s *Service) ListFor(ctx context.Context, p model.Principal, status model.UploadStatus, cursor string, limit int) ([]model.UploadSession, string, error) {
+	if err := p.Require(model.PermUploadsWrite); err != nil {
+		if err := p.Require(model.PermAssetsRead); err != nil {
+			return nil, "", err
+		}
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	limit = min(limit, 200)
+	return s.repository.List(ctx, p.TenantID, status, cursor, limit)
+}
+
 // AssetOf returns the asset an upload became, or nil while there is none
 // yet (or no asset reader is set). Call it after GetFor has authorized the
 // same upload. A rejected upload never reaches the catalog, so this is the

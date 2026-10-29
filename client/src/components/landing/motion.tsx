@@ -27,9 +27,11 @@ export function LandingMotion({ children }: { children: ReactNode }) {
         } as const;
         gsap.utils.toArray<HTMLElement>("[data-reveal]").forEach((el) => {
           const kind = (el.dataset.reveal as keyof typeof from) in from ? (el.dataset.reveal as keyof typeof from) : "fade";
+          // opacity, not autoAlpha: a block hidden with visibility would drop
+          // its links and fields out of the Tab order until scrolled to.
           gsap.from(el, {
             ...from[kind],
-            autoAlpha: 0,
+            opacity: 0,
             duration: 0.8,
             ease: "power3.out",
             scrollTrigger: { trigger: el, start: "top 85%", once: true },

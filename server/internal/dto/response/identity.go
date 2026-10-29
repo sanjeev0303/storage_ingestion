@@ -24,6 +24,9 @@ type UserResponse struct {
 	PlatformRole string     `json:"platform_role,omitempty"`
 	LastLoginAt  *time.Time `json:"last_login_at,omitempty"`
 	CreatedAt    time.Time  `json:"created_at"`
+	// HasPassword is false for an account that signs in only through its
+	// organization's identity provider.
+	HasPassword bool `json:"has_password"`
 }
 
 type MembershipResponse struct {
@@ -157,4 +160,17 @@ type ProcessingRecordResponse struct {
 	Attempts    int              `json:"attempts"`
 	LastError   string           `json:"last_error,omitempty"`
 	Quarantine  []map[string]any `json:"quarantine"`
+	// Scan is the malware scan's verdict; ReusedFrom names the asset with
+	// the same bytes whose clean verdict, by the same engine version, was
+	// reused instead of scanning again.
+	Scan   *ScanResponse    `json:"scan,omitempty"`
+	Events []map[string]any `json:"events"`
+}
+
+type ScanResponse struct {
+	Scanner        string     `json:"scanner"`
+	Result         string     `json:"result"`
+	ScannerVersion string     `json:"scanner_version,omitempty"`
+	ReusedFrom     string     `json:"reused_from,omitempty"`
+	ScannedAt      *time.Time `json:"scanned_at,omitempty"`
 }

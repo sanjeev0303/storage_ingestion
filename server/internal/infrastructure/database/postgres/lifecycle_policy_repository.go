@@ -129,6 +129,29 @@ func (r *RetentionPolicyRepository) History(ctx context.Context, tenantID, scope
 	return policies, rows.Err()
 }
 
+func (r *RetentionPolicyRepository) Latest(ctx context.Context, tenantID string) ([]model.RetentionPolicy, error) {
+	rows, err := r.db.Pool.Query(ctx, `
+		SELECT DISTINCT ON (scope, scope_key) `+policyColumns+`
+		FROM retention_policies
+		WHERE tenant_id = $1
+		ORDER BY scope, scope_key, version DESC
+	`, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("list retention policies: %w", err)
+	}
+	defer rows.Close()
+
+	var policies []model.RetentionPolicy
+	for rows.Next() {
+		policy, err := scanPolicy(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan retention policy: %w", err)
+		}
+		policies = append(policies, policy)
+	}
+	return policies, rows.Err()
+}
+
 // LegalHoldRepository stores legal holds.
 type LegalHoldRepository struct {
 	db *DB

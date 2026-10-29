@@ -1,4 +1,5 @@
 import { api, apiRaw } from "@/lib/api/client";
+import { isApiError } from "@/lib/api/errors";
 import type {
   AddMembersResponse,
   CatalogObjectPage,
@@ -11,9 +12,12 @@ import type {
   ImportErrorPage,
   ManifestImport,
   MemberPage,
+  MergeRequest,
+  MergeResult,
   MemberRequest,
   UpdateDatasetRequest,
   ValidationProfileRef,
+  VersionDiff,
   VersionMemberPage,
   VersionPage,
 } from "./types";
@@ -83,6 +87,10 @@ export function listVersionMembers(id: string, versionId: string, after: number 
   return api<VersionMemberPage>(`/datasets/${id}/versions/${versionId}/members`, { query: { after }, signal });
 }
 
+export function diffVersions(id: string, versionId: string, against: string, after: string | undefined, signal?: AbortSignal) {
+  return api<VersionDiff>(`/datasets/${id}/versions/${versionId}/diff`, { query: { against, after, limit: 100 }, signal });
+}
+
 export function startInlineImport(id: string, file: Blob, key: string, policy: DuplicatePolicy, sha256?: string) {
   return api<ManifestImport>(`/datasets/${id}/manifests`, {
     method: "POST",
@@ -123,4 +131,27 @@ export function searchCatalog(prefix: string, cursor: string | undefined, signal
 
 export function listProfiles(signal?: AbortSignal) {
   return api<{ profiles: ValidationProfileRef[] }>("/validation-profiles", { signal });
+}
+
+export function listBranches(id: string, signal?: AbortSignal) {
+  return api<{ branches: Dataset[] }>(`/datasets/${id}/branches`, { signal });
+}
+
+export function createBranch(id: string, name: string, fromVersionId: string) {
+  return api<Dataset>(`/datasets/${id}/branches`, { method: "POST", body: { name, from_version_id: fromVersionId } });
+}
+
+// A merge stopped by conflicts answers 409 with the conflicts; that is a
+// result to show, not an error.
+export async function merge(targetId: string, body: MergeRequest): Promise<MergeResult> {
+  try {
+    return await api<MergeResult>(`/datasets/${targetId}/merges`, { method: "POST", body });
+  } catch (error) {
+    if (isApiError(error) && error.code === "merge_conflict" && error.body) return error.body as MergeResult;
+    throw error;
+  }
+}
+
+export function listMerges(id: string, signal?: AbortSignal) {
+  return api<{ merges: MergeResult[] }>(`/datasets/${id}/merges`, { signal });
 }

@@ -40,6 +40,12 @@ func securityStatus(err error) (int, string, bool) {
 		return nethttp.StatusUnauthorized, "unauthenticated", true
 	case errors.Is(err, identity.ErrRegistrationClosed):
 		return nethttp.StatusForbidden, "registration_closed", true
+	case errors.Is(err, model.ErrSSOFailed):
+		return nethttp.StatusUnauthorized, "sso_failed", true
+	case errors.Is(err, model.ErrSSONotConfigured):
+		return nethttp.StatusNotFound, "sso_not_configured", true
+	case errors.Is(err, identity.ErrSSOOff):
+		return nethttp.StatusNotImplemented, "sso_disabled", true
 	case errors.Is(err, model.ErrAccountInactive):
 		return nethttp.StatusForbidden, "account_inactive", true
 	case errors.Is(err, model.ErrEscalation):

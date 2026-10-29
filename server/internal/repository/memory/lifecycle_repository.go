@@ -79,6 +79,36 @@ func (r *RetentionPolicyRepository) History(ctx context.Context, tenantID, scope
 	return out, nil
 }
 
+func (r *RetentionPolicyRepository) Latest(ctx context.Context, tenantID string) ([]model.RetentionPolicy, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	newest := map[string]model.RetentionPolicy{}
+	for _, p := range r.policies {
+		if p.TenantID != tenantID {
+			continue
+		}
+		key := p.Scope + "/" + p.ScopeKey
+		if current, ok := newest[key]; !ok || p.Version > current.Version {
+			newest[key] = p
+		}
+	}
+	out := make([]model.RetentionPolicy, 0, len(newest))
+	for _, p := range newest {
+		out = append(out, p)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Scope != out[j].Scope {
+			return out[i].Scope < out[j].Scope
+		}
+		return out[i].ScopeKey < out[j].ScopeKey
+	})
+	return out, nil
+}
+
 // LegalHoldRepository keeps legal holds in memory. For tests.
 type LegalHoldRepository struct {
 	mu    sync.Mutex

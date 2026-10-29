@@ -172,23 +172,38 @@ describe("RetentionScreen", () => {
     expect(body).toEqual({ scope: "TENANT", min_retention: "720h", reason: "policy review" });
   });
 
-  it("shows a placed legal hold id with a copy button", async () => {
+  it("lists a placed legal hold and releases it from the list", async () => {
+    const hold = {
+      id: "hold-123", scope: "TENANT", scope_key: "", reason: "court order", placed_by: "user-1",
+      placed_at: "2026-10-22T10:00:00Z",
+    };
+    let holds: (typeof hold)[] = [];
+    let released = "";
     server.use(
-      http.post(`${API}/legal-holds`, () =>
-        HttpResponse.json(
-          { id: "hold-123", scope: "TENANT", scope_key: "", placed_at: "2026-10-22T10:00:00Z" },
-          { status: 201 },
-        ),
-      ),
+      http.get(`${API}/retention/policies`, () => HttpResponse.json({ policies: [] })),
+      http.get(`${API}/legal-holds`, () => HttpResponse.json({ holds })),
+      http.post(`${API}/legal-holds`, () => {
+        holds = [hold];
+        return HttpResponse.json({ id: hold.id, scope: "TENANT", scope_key: "", placed_at: hold.placed_at }, { status: 201 });
+      }),
+      http.delete(`${API}/legal-holds/:id`, ({ params }) => {
+        released = String(params.id);
+        holds = [];
+        return new HttpResponse(null, { status: 204 });
+      }),
     );
     renderWithProviders(<RetentionScreen />);
+    expect(await screen.findByText("No active holds")).toBeInTheDocument();
 
     await userEvent.type(screen.getAllByLabelText(/Reason/)[1], "court order");
     await userEvent.click(screen.getByRole("button", { name: "Place legal hold" }));
+    expect(await screen.findByText("court order")).toBeInTheDocument();
 
-    expect(await screen.findByText("hold-123")).toBeInTheDocument();
-    expect(screen.getByText("Placed in this session")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Copy id" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Release" }));
+    const dialog = await screen.findByRole("alertdialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Release hold" }));
+    expect(await screen.findByText("No active holds")).toBeInTheDocument();
+    expect(released).toBe("hold-123");
   });
 
   it("is blocked without retention.manage", () => {

@@ -3,10 +3,13 @@ package s3
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -67,8 +70,17 @@ func NewClient(
 	ctx context.Context,
 	cfg Config,
 ) (*s3.Client, error) {
+	// Every processing job reads up to rangeread.Parallel ranges at once
+	// and several jobs run side by side; the SDK's default keeps 10 idle
+	// connections per host, so the rest were closed after each request and
+	// opened again (a TCP handshake per range).
+	httpClient := awshttp.NewBuildableClient().WithTransportOptions(func(t *http.Transport) {
+		t.MaxIdleConns = 256
+		t.MaxIdleConnsPerHost = 128
+	})
 	options := []func(*awsconfig.LoadOptions) error{
 		awsconfig.WithRegion(cfg.Region),
+		awsconfig.WithHTTPClient(httpClient),
 	}
 
 	if cfg.AccessKeyID != "" {
@@ -91,6 +103,11 @@ func NewClient(
 			o.BaseEndpoint = &cfg.Endpoint
 		}
 		o.UsePathStyle = cfg.ForcePathStyle
+		// The platform checks every object's SHA-256 itself, end to end; the
+		// SDK's own CRC over every byte sent and received adds CPU and
+		// nothing more, and is kept only where an operation requires it.
+		o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
+		o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
 	})
 
 	return client, nil

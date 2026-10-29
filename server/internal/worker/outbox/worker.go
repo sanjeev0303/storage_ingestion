@@ -13,21 +13,23 @@ import (
 
 // Run publishes and reconciles until ctx is cancelled. The two run side by
 // side, so a slow reconciliation pass (a queue call waiting for its
-// timeout, say) never holds up publishing.
-func Run(ctx context.Context, publisher *events.Publisher, reconciler *events.Reconciler, interval, reconcileEvery time.Duration, log *slog.Logger) {
+// timeout, say) never holds up publishing. A signal on wake (an event was
+// just committed) starts publishing at once; nil leaves only the interval.
+func Run(ctx context.Context, publisher *events.Publisher, reconciler *events.Reconciler, interval, reconcileEvery time.Duration, wake <-chan struct{}, log *slog.Logger) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		reconcile(ctx, reconciler, reconcileEvery, log)
 	}()
-	publish(ctx, publisher, interval, log)
+	publish(ctx, publisher, interval, wake, log)
 	wg.Wait()
 }
 
-// publish sends batch after batch while events are due, then pauses for
-// interval. A failed batch is logged and tried again on the next tick.
-func publish(ctx context.Context, publisher *events.Publisher, interval time.Duration, log *slog.Logger) {
+// publish sends batch after batch while events are due, then pauses until
+// woken or for interval. A failed batch is logged and tried again on the
+// next tick.
+func publish(ctx context.Context, publisher *events.Publisher, interval time.Duration, wake <-chan struct{}, log *slog.Logger) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -55,6 +57,7 @@ func publish(ctx context.Context, publisher *events.Publisher, interval time.Dur
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		case <-wake:
 		}
 	}
 }

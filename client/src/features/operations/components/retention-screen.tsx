@@ -1,8 +1,6 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { Button } from "@/components/ui/button";
-import { CopyButton } from "@/components/ui/copy-button";
 import { ConfirmDialog } from "@/components/ui/dialog";
 import { Field, Input, Select, Textarea } from "@/components/ui/field";
 import { DefList } from "@/components/ui/page";
@@ -10,10 +8,12 @@ import { Panel } from "@/components/ui/panel";
 import { PermissionDenied } from "@/components/ui/states";
 import { SubmitButton } from "@/components/ui/submit-button";
 import { Time } from "@/components/ui/time";
+import { notify } from "@/components/ui/toast";
 import { describeError } from "@/lib/api/errors";
 import { useSession } from "@/lib/auth/session";
-import { placeLegalHold, releaseLegalHold, setRetentionPolicy } from "../api";
-import type { LegalHold, RetentionPolicyRequest, RetentionPolicyResponse, RetentionScope } from "../types";
+import { placeLegalHold, setRetentionPolicy } from "../api";
+import type { RetentionPolicyRequest, RetentionPolicyResponse, RetentionScope } from "../types";
+import { HoldsInEffect, PoliciesInEffect, useRetentionKeys } from "./retention-current";
 import { MAX_REASON, validateDuration, validateReason, validateScopeKey } from "../validate";
 
 const scopeLabels: Record<RetentionScope, string> = {
@@ -50,11 +50,10 @@ export function RetentionScreen() {
 
   return (
     <div className="flex flex-col gap-6">
-      <p className="max-w-prose text-base text-muted">
-        The API can write retention policies and legal holds but cannot list or read them back. This screen cannot show
-        what is currently set, and legal holds stay invisible to organization owners by design. To see the effective
-        result for one asset, look it up on the Assets tab and read its lifecycle.
-      </p>
+      <div className="grid gap-6 xl:grid-cols-2">
+        <PoliciesInEffect />
+        <HoldsInEffect />
+      </div>
       <div className="grid gap-6 lg:grid-cols-2">
         <PolicyForm />
         <HoldPanel />
@@ -132,6 +131,7 @@ function PolicyForm() {
   const [reason, setReason] = useState("");
   const [confirming, setConfirming] = useState(false);
   const [result, setResult] = useState<RetentionPolicyResponse | null>(null);
+  const refresh = useRetentionKeys();
 
   const key = cleanKey(scope, scopeKey);
   const keyError = validateScopeKey(scope, key);
@@ -155,6 +155,7 @@ function PolicyForm() {
       if (value) body[f.key] = value;
     }
     setResult(await setRetentionPolicy(body));
+    await refresh();
   }
 
   return (
@@ -241,16 +242,11 @@ function HoldPanel() {
   const [reason, setReason] = useState("");
   const [placing, setPlacing] = useState(false);
   const [placeError, setPlaceError] = useState<string | null>(null);
-  const [placed, setPlaced] = useState<LegalHold[]>([]);
-
-  const [releaseId, setReleaseId] = useState("");
-  const [releasing, setReleasing] = useState(false);
-  const [released, setReleased] = useState<string | null>(null);
+  const refresh = useRetentionKeys();
 
   const key = cleanKey(scope, scopeKey);
   const keyError = validateScopeKey(scope, key);
   const reasonError = validateReason(reason);
-  const cleanReleaseId = releaseId.replace(/\s+/g, "");
 
   async function place(e: FormEvent) {
     e.preventDefault();
@@ -259,12 +255,13 @@ function HoldPanel() {
 
     setPlacing(true);
     try {
-      const hold = await placeLegalHold({
+      await placeLegalHold({
         scope,
         reason: reason.trim(),
         ...(scope !== "TENANT" && { scope_key: key }),
       });
-      setPlaced((list) => [hold, ...list]);
+      await refresh();
+      notify.success("Legal hold placed");
       setReason("");
       setScopeKey("");
     } catch (error) {
@@ -275,10 +272,7 @@ function HoldPanel() {
   }
 
   return (
-    <Panel
-      title="Legal holds"
-      description="A hold blocks deletion and purge for everything in its scope until it is released."
-    >
+    <Panel title="Place a legal hold" description="A hold blocks deletion and purge for everything in its scope until it is released.">
       <form onSubmit={place} noValidate className="flex flex-col gap-4">
         <ScopeFields
           scope={scope}
@@ -301,80 +295,6 @@ function HoldPanel() {
         </SubmitButton>
       </form>
 
-      {placed.length > 0 && (
-        <div className="mt-5">
-          <h3 className="text-md font-semibold">Placed in this session</h3>
-          <p className="text-sm text-muted">
-            The API cannot list holds, so this is the only time you see these ids. Copy them now: leaving this page
-            forgets them.
-          </p>
-          <ul className="mt-3 flex flex-col gap-3">
-            {placed.map((hold) => (
-              <li key={hold.id} className="neo-in-sm flex flex-wrap items-center justify-between gap-3 p-3">
-                <div className="min-w-0">
-                  <p className="mono-data [overflow-wrap:anywhere]">{hold.id}</p>
-                  <p className="text-sm text-muted">
-                    {hold.scope}
-                    {hold.scope_key ? ` / ${hold.scope_key}` : ""}, placed <Time value={hold.placed_at} />
-                  </p>
-                </div>
-                <CopyButton value={hold.id} label="Copy id" />
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      <div className="mt-6 border-t-2 border-faint pt-5">
-        <h3 className="text-md font-semibold">Release a legal hold</h3>
-        <p className="mb-3 text-sm text-muted">Paste the hold id you saved when you placed it.</p>
-        <div className="flex flex-wrap items-end gap-3">
-          <Field
-            label="Hold id"
-            required
-            className="min-w-56 flex-1"
-            error={cleanReleaseId === "" ? "Enter the id of the hold to release." : undefined}
-          >
-            {(props) => (
-              <Input
-                {...props}
-                value={releaseId}
-                onChange={(e) => setReleaseId(e.target.value)}
-                className="mono-data"
-                autoComplete="off"
-                spellCheck={false}
-              />
-            )}
-          </Field>
-          <Button onClick={() => setReleasing(true)} disabled={cleanReleaseId === ""}>
-            Release hold
-          </Button>
-        </div>
-        {released && (
-          <p role="status" className="mt-3 text-base font-medium">
-            Hold <span className="mono-data">{released}</span> was released.
-          </p>
-        )}
-      </div>
-
-      <ConfirmDialog
-        open={releasing}
-        onOpenChange={setReleasing}
-        title="Release this legal hold?"
-        description={
-          <>
-            Hold <span className="mono-data">{cleanReleaseId}</span> stops protecting its scope. Anything already due
-            for deletion becomes eligible for purge.
-          </>
-        }
-        confirmLabel="Release hold"
-        onConfirm={async () => {
-          const id = cleanReleaseId;
-          await releaseLegalHold(id);
-          setReleased(id);
-          setReleaseId("");
-        }}
-      />
     </Panel>
   );
 }
