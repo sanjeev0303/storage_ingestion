@@ -95,7 +95,7 @@ Permissions are the backend's strings. The console hides actions the user's role
 
 | Screen | Endpoint | Method | Permission | Pagination | Status |
 | --- | --- | --- | --- | --- | --- |
-| Asset state and lifecycle | `/assets/{id}`, `/assets/{id}/lifecycle` | GET | `assets.read` | n/a | Verified. `locked_until` (S3 Object Lock date) is shown when the platform set one; whether a legal hold is also set is never sent to owners |
+| Asset state and lifecycle | `/assets/{id}`, `/assets/{id}/lifecycle` | GET | `assets.read` | n/a | Verified. `locked_until` (S3 Object Lock date) is shown when the platform set one; whether a legal hold is also set is never sent to owners. On AWS S3 (2026-10-29): a retention policy and a legal hold set in the console were applied to the stored version (GOVERNANCE until upload + 24 h, legal hold ON), and S3 refused an administrator's early delete of that version |
 | Soft delete, restore | `/assets/{id}`, `/assets/{id}/restore` | DELETE, POST | `assets.delete` | n/a | Verified |
 | Quarantine record, release | `/assets/{id}/quarantine` (with `scan`: verdict, engine version, `reused_from`; and `events`: the stage history), `/quarantine/release` | GET, POST | `quarantine.read`, `quarantine.release` | n/a | Verified (empty record), release on a real QUARANTINED asset: not run |
 | Retention policy, legal holds | `/retention/policies` (and `?scope=&scope_key=` for a scope's earlier versions), `/legal-holds`, `/legal-holds/{id}` | GET, PUT, POST, DELETE | `retention.manage` | none | Verified |
