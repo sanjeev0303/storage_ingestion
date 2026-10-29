@@ -88,7 +88,8 @@ Permissions are the backend's strings. The console hides actions the user's role
 | Branches | `/datasets/{id}/branches` | GET, POST | `datasets.read`, `datasets.write` | none | Verified (created and listed live through the SDK; screen read live) |
 | Merges | `/datasets/{id}/merges` | GET, POST | `datasets.read`, `datasets.write` | none (latest 100) | Verified (dry run, conflict 409, SOURCE merge and history live) |
 | Imports of a dataset | `/datasets/{id}/manifests` | GET | `datasets.read` | `next_cursor` | Verified |
-| Lineage | `/datasets/{id}/lineage`, `/dataset-versions/{vid}/lineage` | GET | `datasets.read` | `next_cursor`, depth 1 to 10 | Verified (both directions, by dataset and by version) |
+| Lineage | `/datasets/{id}/lineage`, `/dataset-versions/{vid}/lineage` | GET | `datasets.read` | `next_cursor`, depth 1 to 10 | Verified (both directions, by dataset and by version; branches, training runs and models included) |
+| Training runs of a version | `/training-runs?dataset_version_id=` (recorded by the SDK with `POST` and `PATCH /training-runs`) | GET | `datasets.read` | `next_cursor` | Verified (a run recorded live by the SDK while streaming from AWS S3, shown with its model and metrics) |
 
 ## Lifecycle, operations, audit
 

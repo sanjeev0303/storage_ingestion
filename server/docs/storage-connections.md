@@ -76,7 +76,7 @@ Grant the platform these, scoped to the one bucket or container (and ideally to 
 - `s3:GetBucketVersioning`: without it versioning is reported `UNKNOWN`;
 - `s3:GetObjectVersion`, `s3:DeleteObjectVersion` and `s3:ListBucketVersions`: for versioned buckets, where deleting an object removes every version of its key.
 
-For `ASSUME_ROLE`, the role's trust policy must allow the platform's AWS principal and require the connection's `external_id`:
+For `ASSUME_ROLE`, the platform requests one-hour sessions and renews them while 45 minutes remain, so URLs it presigns hold for up to 45 minutes; keep the platform's URL lifetimes at or below that. The role's maximum session duration must be at least one hour (the AWS default). Its trust policy must allow the platform's AWS principal and require the connection's `external_id`:
 
 ```json
 {"Effect": "Allow", "Principal": {"AWS": "<platform role ARN>"}, "Action": "sts:AssumeRole",

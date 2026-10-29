@@ -15,6 +15,8 @@ export const KIND_LABELS: Record<NodeKind, string> = {
   VALIDATION_REPORT: "Validation report",
   TRANSFORMATION: "Transformation",
   OBJECT_VERSION: "Object version",
+  TRAINING_RUN: "Training run",
+  MODEL: "Model",
 };
 
 export const RELATION_LABELS: Record<Relation, string> = {
@@ -24,6 +26,8 @@ export const RELATION_LABELS: Record<Relation, string> = {
   VALIDATED_BY: "validated by",
   CREATED_FROM_SNAPSHOT: "created from snapshot",
   TRANSFORMED_BY: "transformed by",
+  TRAINED_ON: "trained on",
+  PRODUCED_BY: "produced by",
 };
 
 export const nodeKey = (ref: Ref) => `${ref.kind}:${ref.id}`;
@@ -148,14 +152,16 @@ export function nodeHref(node: Ref, datasetIds: Record<string, string>): string 
   }
 }
 
-// Names are not part of the lineage response. A transformation's name is in the details of its edge.
-export function transformationNames(edges: Edge[]): Record<string, string> {
+// Names are not part of the lineage response. Transformations, training
+// runs and models carry theirs in the details of the edge that names them.
+export function edgeNames(edges: Edge[]): Record<string, string> {
   const names: Record<string, string> = {};
   for (const edge of edges) {
-    if (edge.to.kind === "TRANSFORMATION" && typeof edge.details?.name === "string") {
-      const version = typeof edge.details.version === "string" ? ` ${edge.details.version}` : "";
-      names[nodeKey(edge.to)] = `${edge.details.name}${version}`;
-    }
+    if (typeof edge.details?.name !== "string") continue;
+    const version = typeof edge.details.version === "string" ? ` ${edge.details.version}` : "";
+    if (edge.to.kind === "TRANSFORMATION") names[nodeKey(edge.to)] = `${edge.details.name}${version}`;
+    if (edge.relation === "TRAINED_ON") names[nodeKey(edge.from)] = edge.details.name;
+    if (edge.relation === "PRODUCED_BY") names[nodeKey(edge.from)] = `${edge.details.name}${version}`;
   }
   return names;
 }

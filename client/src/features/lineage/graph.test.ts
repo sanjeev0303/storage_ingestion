@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { datasetIdsByNode, deriveNodes, layoutGraph, MAX_GRAPH_EDGES, nodeHref, nodeKey, transformationNames } from "./graph";
+import { datasetIdsByNode, deriveNodes, layoutGraph, MAX_GRAPH_EDGES, nodeHref, nodeKey, edgeNames } from "./graph";
 import type { Edge, Ref } from "./types";
 
 const ds: Ref = { kind: "DATASET", id: "ds-1" };
@@ -91,6 +91,14 @@ describe("links and labels", () => {
 
   it("names a transformation from its edge details", () => {
     const t: Ref = { kind: "TRANSFORMATION", id: "t1" };
-    expect(transformationNames([edge(ds, "TRANSFORMED_BY", t, 1, { name: "dedupe", version: "1" })])).toEqual({ [nodeKey(t)]: "dedupe 1" });
+    expect(edgeNames([edge(ds, "TRANSFORMED_BY", t, 1, { name: "dedupe", version: "1" })])).toEqual({ [nodeKey(t)]: "dedupe 1" });
+    const run = { kind: "TRAINING_RUN" as const, id: "run-1" };
+    const model = { kind: "MODEL" as const, id: "model-1" };
+    expect(
+      edgeNames([
+        edge(run, "TRAINED_ON", ds, 1, { name: "resnet-run", source: "MLFLOW" }),
+        edge(model, "PRODUCED_BY", run, 2, { name: "resnet", version: "3" }),
+      ]),
+    ).toEqual({ [nodeKey(run)]: "resnet-run", [nodeKey(model)]: "resnet 3" });
   });
 });

@@ -16,6 +16,7 @@ import type { VersionMember } from "../types";
 import { ImmutableBadge } from "./draft-notice";
 import { SqlPanel } from "./sql-panel";
 import { StorageAuditButton } from "./storage-audit-button";
+import { TrainingRuns } from "./training-runs";
 import { VersionDiff } from "./version-diff";
 
 export function VersionDetail({ id, versionId }: { id: string; versionId: string }) {
@@ -146,6 +147,8 @@ export function VersionDetail({ id, versionId }: { id: string; versionId: string
       <VersionDiff id={id} versionId={v.id} version={v.version} />
 
       <SqlPanel datasetId={id} versionId={v.id} />
+
+      <TrainingRuns datasetId={id} versionId={v.id} />
 
       <Panel
         title="Members of this version"

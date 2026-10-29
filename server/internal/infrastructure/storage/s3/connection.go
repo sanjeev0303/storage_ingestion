@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -22,6 +23,16 @@ import (
 )
 
 var _ interfaces.StorageProvider = (*ObjectStorage)(nil)
+
+// Assumed-role sessions last an hour, the most every role allows by
+// default, and are renewed while 45 minutes are left. So a URL presigned
+// with them works for up to 45 minutes; the platform's default URL
+// lifetimes are 15 minutes or less.
+// ponytail: fixed reserve, derive it from the longest configured URL TTL if those grow past 45m.
+const (
+	roleSession        = time.Hour
+	roleSessionReserve = 45 * time.Minute
+)
 
 // ConnectionConfig is one customer connection's S3 settings: AWS S3,
 // Cloudflare R2 or another S3-compatible service. Nothing is read from
@@ -69,8 +80,14 @@ func NewConnectionClient(ctx context.Context, cfg ConnectionConfig) (*s3.Client,
 		provider := stscreds.NewAssumeRoleProvider(sts.NewFromConfig(base), cfg.RoleARN, func(o *stscreds.AssumeRoleOptions) {
 			o.ExternalID = aws.String(cfg.ExternalID)
 			o.RoleSessionName = cfg.SessionName
+			o.Duration = roleSession
 		})
-		awsCfg.Credentials = aws.NewCredentialsCache(provider)
+		// A presigned URL stops working when the session that signed it
+		// ends. Sessions are renewed while roleSessionReserve of them is
+		// left, so every URL outlives its stated expiry up to that long.
+		awsCfg.Credentials = aws.NewCredentialsCache(provider, func(o *aws.CredentialsCacheOptions) {
+			o.ExpiryWindow = roleSessionReserve
+		})
 	default:
 		return nil, fmt.Errorf("%w: the connection has no credentials", model.ErrCredentialMissing)
 	}

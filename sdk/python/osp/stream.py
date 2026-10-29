@@ -38,6 +38,8 @@ KINDS = ("files", "tar", "records")
 class SnapshotStream:
     def __init__(self, client, dataset_id, version_id, split=None, cache_dir=None, shuffle_seed=None):
         self.client = client
+        # Kept so a training run can name the version it read (osp.runs).
+        self.dataset_id, self.version_id = dataset_id, version_id
         self.cache_dir = cache_dir
         self.shuffle_seed = shuffle_seed
         self.epoch = 0

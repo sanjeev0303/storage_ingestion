@@ -51,6 +51,24 @@ The same stream feeds TensorFlow (`osp.tf.as_tf_dataset`), Hugging Face
 WebDataset shards, and `kind="records"` reads CSV, TSV, JSON Lines and
 Parquet members row by row.
 
+## Recording training runs
+
+```python
+from osp import track_run
+
+with track_run(client, "resnet50", versions=[stream], params={"lr": 0.01}) as run:
+    for sample in stream.samples():
+        ...
+    run.log_metrics(accuracy=0.91)
+    run.log_model("resnet50", "3", uri="s3://models/resnet50/3")
+```
+
+The run is recorded when the block starts and finished when it ends, as
+FAILED if it raises. Inside an active MLflow or Weights & Biases run, its id
+and URL are recorded too, so the console links to it. `versions` takes
+version ids, version dicts or a `SnapshotStream`. `osp runs pets` lists the
+runs that trained on each version of a dataset.
+
 ## Branches and merges
 
 ```python

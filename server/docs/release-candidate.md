@@ -87,6 +87,20 @@ Every fix has a test. Each new test was run against an export of the original co
 | M1 | Low (tooling) | `scripts/migrate.ps1` records a version outside the migration's transaction and takes no lock, so two concurrent runs can both apply one file. `-Baseline` compares versions as strings | `scripts/migrate.ps1` | one transaction per file with the version insert; `pg_advisory_lock` |
 | D9 | Info | `processing.recordStorage` falls back to the platform bucket when the asset is missing. This is unreachable: quarantine records cascade with their asset (`fk_quarantine_asset_tenant`) | `internal/service/processing/service.go` | remove the fallback or return an error |
 
+### 3.3 Recheck of the open D-items (2026-10-29)
+
+The D-items above were rechecked against the code after the competitor-gap work. D13 was fixed earlier (the write probe is on by default).
+
+| # | Now | Evidence |
+|---|---|---|
+| D2 | Fixed | `storageconn.Service.Update` tests a connection that holds work before storing a new region, endpoint or addressing; a failed test keeps the stored settings and the connection keeps serving. It no longer drops to PENDING |
+| D3 | Fixed | `s3/connection.go`: assumed-role sessions are requested for an hour and renewed while 45 minutes remain, so a presigned URL stays valid for up to 45 minutes. The SDK default was a 15-minute session renewed only once expired, so a URL could die seconds after it was signed. Keep `DELIVERY_URL_MAX_TTL` and the upload URL TTLs at 45 minutes or less for these connections. Not yet run against a real IAM role |
+| D4 | Fixed | `s3.DeleteObject` removes every version and delete marker of the key on a versioned bucket (`deleteVersions`); Azure and GCS do the same, and lifecycle deletes the recorded version first |
+| D7 | Fixed | `reconciliation.Service.places` scans the staging prefix of every tenant connection that holds work, each with its own cursor, besides the platform's |
+| D8 | Fixed | `GET /catalog/capabilities` reports the caller's default connection as its last passing test found it, and the platform's bucket only when that is the default. Verified on AWS S3: versioning on (Enabled) |
+| D9 | Fixed | `processing.recordStorage` returns the error when the asset is missing; there is no fallback to the platform bucket |
+| D11 | Fixed | `s3/copy.go`: one `CopyObject` up to 5 GiB, a multipart `UploadPartCopy` above, to 5 TiB |
+
 Unverified behaviour, not counted as defects:
 
 - **S5:** GCS composes at most 32 sources per call. Very many parts are composed in rounds; only the emulator's behaviour was seen.

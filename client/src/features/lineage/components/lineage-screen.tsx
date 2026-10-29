@@ -12,7 +12,7 @@ import { Table, Td, Th } from "@/components/ui/table";
 import { Time } from "@/components/ui/time";
 import { isApiError } from "@/lib/api/errors";
 import { useVersions } from "@/features/validation/hooks";
-import { datasetIdsByNode, KIND_LABELS, layoutGraph, MAX_GRAPH_EDGES, nodeHref, nodeKey, RELATION_LABELS, transformationNames } from "../graph";
+import { datasetIdsByNode, KIND_LABELS, layoutGraph, MAX_GRAPH_EDGES, nodeHref, nodeKey, RELATION_LABELS, edgeNames } from "../graph";
 import { nodeLabel, useLineage, useNodeLabels } from "../hooks";
 import type { Direction, Edge, Ref } from "../types";
 import { LineageGraph } from "./lineage-graph";
@@ -34,7 +34,7 @@ export function LineageScreen({ datasetId, versionId: initialVersionId }: { data
   const known: Record<string, string> = versionId ? { [`DATASET_VERSION:${versionId}`]: datasetId } : {};
   const datasetIds = datasetIdsByNode(edges, known);
   const refs = collectRefs(startRef, edges);
-  const labels = useNodeLabels(refs, datasetIds, transformationNames(edges));
+  const labels = useNodeLabels(refs, datasetIds, edgeNames(edges));
   const layout = startRef ? layoutGraph(startRef, edges, direction) : null;
   const selected = refs.find((r) => nodeKey(r) === selectedKey) ?? null;
 

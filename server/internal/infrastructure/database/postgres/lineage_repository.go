@@ -124,7 +124,7 @@ func link(ctx context.Context, tx pgx.Tx, tenantID string, e model.LineageEdge, 
 func acyclicRelations() []string {
 	var out []string
 	for _, r := range []model.LineageRelation{model.RelContains, model.RelDerivedFrom, model.RelImportedFrom,
-		model.RelValidatedBy, model.RelCreatedFromSnapshot, model.RelTransformedBy} {
+		model.RelValidatedBy, model.RelCreatedFromSnapshot, model.RelTransformedBy, model.RelTrainedOn, model.RelProducedBy} {
 		if r.Acyclic() {
 			out = append(out, string(r))
 		}
@@ -147,6 +147,10 @@ func refExists(ctx context.Context, tx pgx.Tx, tenantID string, ref model.Lineag
 		table = "validation_reports"
 	case model.NodeObjectVersion:
 		table = "assets"
+	case model.NodeTrainingRun:
+		table = "training_runs"
+	case model.NodeModel:
+		table = "models"
 	case model.NodeTransformation:
 		return true, nil
 	default:

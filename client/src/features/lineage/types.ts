@@ -1,5 +1,13 @@
 // OBJECT_VERSION is reserved by the server and never appears in a response.
-export type NodeKind = "DATASET" | "DATASET_VERSION" | "MANIFEST_IMPORT" | "VALIDATION_REPORT" | "TRANSFORMATION" | "OBJECT_VERSION";
+export type NodeKind =
+  | "DATASET"
+  | "DATASET_VERSION"
+  | "MANIFEST_IMPORT"
+  | "VALIDATION_REPORT"
+  | "TRANSFORMATION"
+  | "OBJECT_VERSION"
+  | "TRAINING_RUN"
+  | "MODEL";
 
 export type Relation =
   | "CONTAINS"
@@ -7,7 +15,9 @@ export type Relation =
   | "IMPORTED_FROM"
   | "VALIDATED_BY"
   | "CREATED_FROM_SNAPSHOT"
-  | "TRANSFORMED_BY";
+  | "TRANSFORMED_BY"
+  | "TRAINED_ON"
+  | "PRODUCED_BY";
 
 export type Direction = "upstream" | "downstream";
 

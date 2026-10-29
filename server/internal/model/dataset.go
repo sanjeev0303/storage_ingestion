@@ -675,6 +675,8 @@ const (
 	NodeManifestImport   LineageKind = "MANIFEST_IMPORT"
 	NodeValidationReport LineageKind = "VALIDATION_REPORT"
 	NodeTransformation   LineageKind = "TRANSFORMATION"
+	NodeTrainingRun      LineageKind = "TRAINING_RUN"
+	NodeModel            LineageKind = "MODEL"
 )
 
 // LineageRelation is an edge's meaning, read "from <relation> to".
@@ -687,6 +689,8 @@ const (
 	RelValidatedBy         LineageRelation = "VALIDATED_BY"
 	RelCreatedFromSnapshot LineageRelation = "CREATED_FROM_SNAPSHOT"
 	RelTransformedBy       LineageRelation = "TRANSFORMED_BY"
+	RelTrainedOn           LineageRelation = "TRAINED_ON"
+	RelProducedBy          LineageRelation = "PRODUCED_BY"
 )
 
 // lineageRules are the node kinds each relation may connect.
@@ -697,6 +701,8 @@ var lineageRules = map[LineageRelation][2][]LineageKind{
 	RelValidatedBy:         {{NodeDatasetVersion}, {NodeValidationReport}},
 	RelCreatedFromSnapshot: {{NodeDataset}, {NodeDatasetVersion}},
 	RelTransformedBy:       {{NodeDataset, NodeDatasetVersion}, {NodeTransformation}},
+	RelTrainedOn:           {{NodeTrainingRun}, {NodeDatasetVersion}},
+	RelProducedBy:          {{NodeModel}, {NodeTrainingRun}},
 }
 
 // ValidLineage reports whether relation may connect a from node to a to
@@ -709,7 +715,7 @@ func ValidLineage(relation LineageRelation, from, to LineageKind) bool {
 // Acyclic reports whether edges of this relation must never form a cycle
 // (provenance: nothing derives from itself).
 func (r LineageRelation) Acyclic() bool {
-	return r == RelDerivedFrom || r == RelCreatedFromSnapshot || r == RelContains
+	return r == RelDerivedFrom || r == RelCreatedFromSnapshot || r == RelContains || r == RelTrainedOn || r == RelProducedBy
 }
 
 // LineageRef names a record in the lineage graph.

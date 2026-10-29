@@ -273,3 +273,22 @@ export type MergeRequest = {
   dry_run: boolean;
   idempotency_key?: string;
 };
+
+export type TrainingModel = { id: string; name: string; version: string; uri?: string; created_at: string };
+
+// A training run that read dataset versions, recorded by the SDK or an MLflow or W&B integration.
+export type TrainingRun = {
+  id: string;
+  name: string;
+  source: "SDK" | "MLFLOW" | "WANDB" | "OTHER";
+  external_id?: string;
+  url?: string;
+  status: "RUNNING" | "FINISHED" | "FAILED";
+  params: Record<string, string>;
+  metrics: Record<string, number>;
+  dataset_version_ids: string[];
+  models: TrainingModel[];
+  created_by: string;
+  created_at: string;
+  finished_at?: string;
+};
