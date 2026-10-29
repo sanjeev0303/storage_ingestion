@@ -27,7 +27,6 @@ import random
 import shutil
 import tarfile
 import tempfile
-import urllib.request
 
 from . import snapshots
 
@@ -109,7 +108,7 @@ class SnapshotStream:
         h = hashlib.sha256()
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target), prefix=".osp-")
         try:
-            with os.fdopen(fd, "wb") as out, urllib.request.urlopen(url, timeout=600) as resp:
+            with os.fdopen(fd, "wb") as out, self.client.fetch(url) as resp:
                 while True:
                     block = resp.read(BLOCK)
                     if not block:

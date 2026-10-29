@@ -7,6 +7,7 @@ import types
 import unittest
 
 from osp import snapshots
+from osp.client import Client
 from osp.stream import SnapshotStream
 
 from test_sdk import Server, sha
@@ -46,8 +47,11 @@ class StreamTest(unittest.TestCase):
                         for i, p in enumerate(names)]
         members, storage_url = self.members, self.storage.url
 
-        class FakeClient:
-            base_url = "http://api"
+        class FakeClient(Client):
+            """The real client's fetch, with the API's answers faked."""
+
+            def __init__(self):
+                super().__init__("http://api")
 
             def get(self, path, **params):
                 return {"members": members}

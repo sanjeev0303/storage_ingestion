@@ -8,6 +8,7 @@ import (
 
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
+	"github.com/sanjeev0303/object-storage-platform/internal/platform/retry"
 )
 
 // Object Lock (docs/lifecycle.md): on a bucket with S3 Object Lock, an
@@ -140,3 +141,63 @@ func (s *Service) releaseLockHold(ctx context.Context, asset model.Asset) error 
 	lock.LegalHold, lock.AppliedAt = false, s.now()
 	return s.deps.Locks.PutLock(ctx, lock)
 }
+
+// requestLockSync queues a changed policy's or hold's scope. A request
+// that cannot be queued is only logged: the sweep still reaches every
+// asset, just later.
+func (s *Service) requestLockSync(ctx context.Context, tenantID, scope, key, reason string) {
+	if s.deps.LockSync == nil {
+		return
+	}
+	err := s.deps.LockSync.Request(ctx, model.LockSyncRequest{
+		ID: s.newID(), TenantID: tenantID, Scope: scope, ScopeKey: key, Reason: reason, CreatedAt: s.now(),
+	})
+	if err != nil {
+		s.log.Warn("lock sync not queued; the retention sweep applies it later", "tenant_id", tenantID, "error", err)
+	}
+}
+
+// SyncRequestedLocks applies Object Lock to the assets of queued scopes,
+// up to lockSyncBudget assets a cycle, oldest request first. A failure on
+// one asset is left to the sweep, like any other lock error.
+func (s *Service) SyncRequestedLocks(ctx context.Context, stats *CycleStats) error {
+	if s.deps.LockSync == nil || s.deps.Locks == nil || s.cfg.DryRun {
+		return nil
+	}
+	batch := max(s.cfg.BatchSize, 1)
+	for budget := batch * lockSyncBatches; budget > 0; {
+		req, found, err := s.deps.LockSync.Next(ctx, s.cfg.TenantID)
+		if err != nil || !found {
+			return err
+		}
+		limit := min(batch, budget)
+		assets, err := s.deps.LockSync.Assets(ctx, req, limit)
+		if err != nil {
+			return err
+		}
+		asOf := s.now()
+		for _, asset := range assets {
+			if ctx.Err() != nil {
+				return nil
+			}
+			policy, err := s.policyFor(ctx, asset, asOf)
+			if err != nil {
+				return err
+			}
+			if err := s.syncLock(ctx, asset, policy); err != nil {
+				s.deps.Metrics.Add("object_lock_errors", 1)
+				s.log.Warn("object lock not applied", "asset_id", asset.ID, "tenant_id", asset.TenantID, "error", retry.Sanitize(err))
+			}
+			req.Position = asset.ID
+			stats.LocksSynced++
+		}
+		budget -= len(assets)
+		if err := s.deps.LockSync.Advance(ctx, req.ID, req.Position, len(assets) < limit, s.now()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// lockSyncBatches is how many batches of queued assets one cycle locks.
+const lockSyncBatches = 10

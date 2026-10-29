@@ -140,7 +140,7 @@ func run() error {
 		Assets: assets, Uploads: uploads, Jobs: jobs, Quarantine: postgres.NewQuarantineRepository(db),
 		Policies: postgres.NewRetentionPolicyRepository(db), Holds: holds, Deletions: postgres.NewDeletionRepository(db),
 		Events: events, Cursors: cursors, Storage: storage, Metrics: registry, Router: router, Packs: packs,
-		Locks: postgres.NewObjectLockRepository(db), Shared: assets,
+		Locks: postgres.NewObjectLockRepository(db), Shared: assets, LockSync: postgres.NewLockSyncRepository(db),
 	}, assetservice.Config{
 		Owner: owner, QuarantineBucket: bucket, DeliveryBucket: deliveryBucket, DeliveryPrefix: lc.PromotionPrefix,
 		Platform: assetservice.PlatformRetention{

@@ -5,7 +5,6 @@ import time
 import hashlib
 import os
 import tempfile
-import urllib.request
 import uuid
 
 from .ingest import sha256_file
@@ -122,7 +121,7 @@ def fetch_member(client, member, timeout=600):
     """Returns a member's bytes, refusing any that do not hash to the
     SHA-256 the snapshot pinned."""
     url = download_url(client, member["version_id"])
-    with urllib.request.urlopen(url, timeout=timeout) as resp:
+    with client.fetch(url, timeout=timeout) as resp:
         data = resp.read()
     digest = hashlib.sha256(data).hexdigest()
     if len(data) != member["size_bytes"] or digest != member.get("checksum_sha256"):
@@ -178,7 +177,7 @@ def download(client, dataset_id, version_id, folder, workers=8, remove_erased=Fa
         h = hashlib.sha256()
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target), prefix=".osp-")
         try:
-            with os.fdopen(fd, "wb") as out, urllib.request.urlopen(url, timeout=600) as resp:
+            with os.fdopen(fd, "wb") as out, client.fetch(url) as resp:
                 while True:
                     block = resp.read(1024 * 1024)
                     if not block:

@@ -278,6 +278,19 @@ type CompactionRun struct {
 	LastError    string
 }
 
+// LockSyncRequest asks the cleanup worker to apply Object Lock to every
+// available asset in a scope whose retention policy or holds changed.
+type LockSyncRequest struct {
+	ID       string
+	TenantID string
+	Scope    string // ScopeTenant, ScopeDataset or ScopeAsset
+	ScopeKey string
+	// Position is the last asset applied; the next batch starts after it.
+	Position  string
+	Reason    string
+	CreatedAt time.Time
+}
+
 // ObjectLock is what the platform last applied to an asset's stored
 // version on a bucket with S3 Object Lock.
 type ObjectLock struct {

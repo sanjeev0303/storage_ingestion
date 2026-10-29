@@ -17,11 +17,16 @@ def sha(data):
 class Server:
     """A local HTTP server answering with handler(method, path, body, headers)."""
 
-    def __init__(self, handler):
+    def __init__(self, handler, keep_alive=False):
         outer = self
+        outer.ports = set()
 
         class H(http.server.BaseHTTPRequestHandler):
+            if keep_alive:
+                protocol_version = "HTTP/1.1"
+
             def _do(self):
+                outer.ports.add(self.client_address[1])
                 length = int(self.headers.get("Content-Length") or 0)
                 body = self.rfile.read(length) if length else b""
                 status, payload, extra = handler(self.command, self.path, body, self.headers)
@@ -81,8 +86,11 @@ class SnapshotTest(unittest.TestCase):
         self.members = members
         storage_url = self.storage.url
 
-        class FakeClient:
-            base_url = "http://api"
+        class FakeClient(Client):
+            """The real client's fetch, with the API's answers faked."""
+
+            def __init__(self):
+                super().__init__("http://api")
 
             def get(self, path, **params):
                 return {"members": members}
@@ -176,6 +184,23 @@ class ClientTest(unittest.TestCase):
             self.assertEqual(ctx.exception.code, "dataset_not_found")
         finally:
             server.close()
+
+class ConnectionReuseTest(unittest.TestCase):
+    def test_calls_share_a_connection_and_a_dead_one_is_replaced(self):
+        server = Server(lambda method, path, body, headers: (200, {"ok": True}, None), keep_alive=True)
+        try:
+            client = Client(server.url)
+            for _ in range(5):
+                self.assertEqual(client.get("/api/v1/thing"), {"ok": True})
+            self.assertEqual(len(server.ports), 1, "five calls, one connection")
+            # The idle connection dies; the next call goes out on a new one.
+            for conn in client._local.conns.values():
+                conn.sock.close()
+            self.assertEqual(client.get("/api/v1/thing"), {"ok": True})
+            self.assertEqual(len(server.ports), 2)
+        finally:
+            server.close()
+
 
 class SafePathTest(unittest.TestCase):
     def test_paths_that_could_leave_the_folder_are_refused(self):

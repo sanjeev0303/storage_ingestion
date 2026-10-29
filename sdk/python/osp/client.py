@@ -1,11 +1,13 @@
 """HTTP client for the platform API: sign-in, token refresh, retries."""
 
+import http.client
 import json
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 
 
 class APIError(Exception):
@@ -52,18 +54,24 @@ class Client:
         # can save them.
         self.on_tokens = on_tokens
         self._refresh_lock = threading.Lock()
+        # Kept-alive connections, one per host for each thread: a file
+        # costs two requests (its link, then its bytes), and a new TLS
+        # handshake for each would dominate small files.
+        self._local = threading.local()
 
     # DataLoader workers get a copy of the client; a lock cannot be copied
     # across processes, so each copy makes its own.
     def __getstate__(self):
         state = self.__dict__.copy()
         state.pop("_refresh_lock", None)
+        state.pop("_local", None)
         state["on_tokens"] = None
         return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)
         self._refresh_lock = threading.Lock()
+        self._local = threading.local()
 
     # ─── Authentication ───────────────────────────────────────────────
 
@@ -126,26 +134,81 @@ class Client:
 
         delay = 1.0
         for attempt in range(1, self.max_attempts + 1):
-            req = urllib.request.Request(self.base_url + path, data=data, method=method, headers=all_headers)
             try:
-                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                    payload = resp.read()
-                    if resp.status == 204 or not payload:
-                        return None
-                    return json.loads(payload)
-            except urllib.error.HTTPError as err:
-                text = err.read().decode("utf-8", "replace")
-                if err.code in RETRY_STATUSES and attempt < self.max_attempts:
-                    time.sleep(_retry_after(err) or delay)
-                    delay = min(delay * 2, 30)
-                    continue
-                raise APIError(err.code, method, path, text) from None
-            except urllib.error.URLError:
+                resp = self._roundtrip(method, self.base_url + path, data, all_headers, self.timeout)
+                payload = resp.read()
+            except (http.client.HTTPException, OSError):
                 if attempt == self.max_attempts:
                     raise
                 time.sleep(delay)
                 delay = min(delay * 2, 30)
+                continue
+            if resp.status in RETRY_STATUSES and attempt < self.max_attempts:
+                time.sleep(_retry_after(resp.headers) or delay)
+                delay = min(delay * 2, 30)
+                continue
+            if resp.status >= 300:
+                raise APIError(resp.status, method, path, payload.decode("utf-8", "replace"))
+            if resp.status == 204 or not payload:
+                return None
+            return json.loads(payload)
         raise RuntimeError("unreachable")
+
+    # ─── Connections ──────────────────────────────────────────────────
+
+    def _connection(self, key, timeout):
+        """This thread's connection to scheme://netloc, and whether it was
+        used before."""
+        conns = getattr(self._local, "conns", None)
+        if conns is None:
+            conns = self._local.conns = {}
+        conn = conns.get(key)
+        if conn is not None:
+            conn.timeout = timeout
+            return conn, True
+        scheme, netloc = key
+        kind = http.client.HTTPSConnection if scheme == "https" else http.client.HTTPConnection
+        conn = conns[key] = kind(netloc, timeout=timeout)
+        return conn, False
+
+    def _drop(self, key):
+        conn = getattr(self._local, "conns", {}).pop(key, None)
+        if conn is not None:
+            conn.close()
+
+    def _roundtrip(self, method, url, body, headers, timeout):
+        """Sends one request over a kept-alive connection and returns the
+        response, whose body the caller reads in full."""
+        parts = urllib.parse.urlsplit(url)
+        key = (parts.scheme, parts.netloc)
+        target = (parts.path or "/") + ("?" + parts.query if parts.query else "")
+        while True:
+            conn, reused = self._connection(key, timeout)
+            try:
+                conn.request(method, target, body=body, headers=headers)
+                return conn.getresponse()
+            except (http.client.HTTPException, OSError):
+                self._drop(key)
+                if reused:
+                    continue  # the server had closed the idle connection: once more, on a new one
+                raise
+
+    @contextmanager
+    def fetch(self, url, timeout=600):
+        """GETs url, a download link from the API or storage, over a
+        kept-alive connection, and yields the response to read from. A
+        response not read to its end closes its connection."""
+        key = (urllib.parse.urlsplit(url).scheme, urllib.parse.urlsplit(url).netloc)
+        resp = self._roundtrip("GET", url, None, {}, timeout)
+        try:
+            if resp.status >= 300:
+                raise APIError(resp.status, "GET", urllib.parse.urlsplit(url).path, resp.read().decode("utf-8", "replace"))
+            yield resp
+            if not resp.isclosed():
+                self._drop(key)
+        except BaseException:
+            self._drop(key)
+            raise
 
     def get(self, path, **params):
         return self.request("GET", path, params=params)
@@ -165,8 +228,8 @@ class Client:
                 return
 
 
-def _retry_after(err):
-    value = err.headers.get("Retry-After") if err.headers else None
+def _retry_after(headers):
+    value = headers.get("Retry-After") if headers else None
     try:
         return min(float(value), 60.0)
     except (TypeError, ValueError):

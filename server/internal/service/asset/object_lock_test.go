@@ -3,6 +3,7 @@ package asset
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -187,5 +188,98 @@ func TestOwnerInspectShowsTheLockDate(t *testing.T) {
 	}
 	if inspection.LockedUntil == nil || !inspection.LockedUntil.Equal(until) || inspection.Holds != nil {
 		t.Fatalf("owner inspection: locked until %v, holds %v", inspection.LockedUntil, inspection.Holds)
+	}
+}
+
+// memLockSync is the lock sync queue over the env's assets.
+type memLockSync struct {
+	e        *env
+	requests []model.LockSyncRequest
+	done     map[string]bool
+}
+
+func (m *memLockSync) Request(_ context.Context, r model.LockSyncRequest) error {
+	m.requests = append(m.requests, r)
+	return nil
+}
+
+func (m *memLockSync) Next(context.Context, string) (model.LockSyncRequest, bool, error) {
+	for _, r := range m.requests {
+		if !m.done[r.ID] {
+			return r, true, nil
+		}
+	}
+	return model.LockSyncRequest{}, false, nil
+}
+
+func (m *memLockSync) Assets(ctx context.Context, r model.LockSyncRequest, limit int) ([]model.Asset, error) {
+	all, err := m.e.assets.ListAfter(ctx, r.Position, r.TenantID, []model.AssetStatus{model.AssetStatusAvailable}, 1000)
+	if err != nil {
+		return nil, err
+	}
+	var out []model.Asset
+	for _, a := range all {
+		if (r.Scope == model.ScopeAsset && a.ID != r.ScopeKey) || (r.Scope == model.ScopeDataset && a.Dataset != r.ScopeKey) {
+			continue
+		}
+		if len(out) == limit {
+			break
+		}
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+func (m *memLockSync) Advance(_ context.Context, id, position string, done bool, _ time.Time) error {
+	for i := range m.requests {
+		if m.requests[i].ID == id {
+			m.requests[i].Position = position
+		}
+	}
+	if done {
+		m.done[id] = true
+	}
+	return nil
+}
+
+// A hold placed on one asset reaches its stored version on the next
+// cycle, however far the sweep is from that asset; its release does too.
+func TestPolicyAndHoldChangesAreLockedAheadOfTheSweep(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	locker := &lockingStorage{ObjectStorage: e.storage, enabled: true, clock: &e.clock, until: map[string]time.Time{}, hold: map[string]bool{}}
+	e.storageAPI = locker
+	for i := 0; i < 30; i++ {
+		e.versioned(fmt.Sprintf("a%02d", i), fmt.Sprintf("v%02d", i))
+	}
+	svc := e.service("worker-a")
+	svc.deps.Locks = memLocks{}
+	queue := &memLockSync{e: e, done: map[string]bool{}}
+	svc.deps.LockSync = queue
+
+	// The sweep evaluates 10 assets a cycle, a00 to a09 first; a29 is
+	// three cycles away.
+	hold, err := svc.PlaceHold(ctx, model.LegalHold{TenantID: "tenant-1", Scope: model.ScopeAsset, ScopeKey: "a29", Reason: "case", PlacedBy: "legal"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, err := svc.RunOnce(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !locker.hold["v29"] || stats.LocksSynced != 1 {
+		t.Fatalf("after one cycle: hold on a29 %v, synced %d", locker.hold["v29"], stats.LocksSynced)
+	}
+	if err := svc.ReleaseHold(ctx, "tenant-1", hold.ID, "legal"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if locker.hold["v29"] {
+		t.Fatal("the released hold stayed on the stored version for another cycle")
+	}
+	if _, found, _ := queue.Next(ctx, ""); found {
+		t.Fatal("a finished request is still queued")
 	}
 }

@@ -46,6 +46,10 @@ is keyed by SHA-256: later epochs read local disk, and a cached file can
 never be stale. Members are shared out across DataLoader workers and
 distributed ranks.
 
+Each thread keeps one connection per host alive (API and storage), so a
+file's two requests (its link, then its bytes) cost no new handshake; a
+connection the server closed while idle is replaced transparently.
+
 The same stream feeds TensorFlow (`osp.tf.as_tf_dataset`), Hugging Face
 (`osp.hf.as_hf_dataset`) and JAX (`osp.jax.batches`). `kind="tar"` reads
 WebDataset shards, and `kind="records"` reads CSV, TSV, JSON Lines and
