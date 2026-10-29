@@ -282,7 +282,7 @@ func (e *securityEnv) orgIDs(ctx context.Context) []string {
 // reference.
 var tenantTables = []string{
 	"webhook_deliveries", "webhook_endpoints",
-	"training_run_inputs", "models", "training_runs", "dataset_merges", "validation_findings", "validation_reports", "validation_jobs", "lineage_edges", "lineage_nodes",
+	"lock_sync_requests", "training_run_inputs", "models", "training_runs", "dataset_merges", "validation_findings", "validation_reports", "validation_jobs", "lineage_edges", "lineage_nodes",
 	"dataset_manifest_imports", "dataset_version_members", "dataset_versions", "dataset_members", "validation_profiles",
 	"download_tokens", "delivery_audit_events", "deletion_operations", "lifecycle_events", "legal_holds",
 	"retention_policies", "orphan_candidates", "quarantine_records", "processing_events", "processing_jobs",

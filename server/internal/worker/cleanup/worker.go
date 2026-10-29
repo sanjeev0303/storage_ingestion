@@ -69,7 +69,11 @@ func RunCycle(ctx context.Context, lifecycle *assetservice.Service, cleanup *cle
 		on  bool
 		run func() error
 	}{
-		{phases.Retention, func() error { return lifecycle.EvaluateRetention(ctx, &report.Lifecycle) }},
+		// Scopes whose policy or holds changed are locked first, then the
+		// regular sweep's next batch.
+		{phases.Retention, func() error {
+			return errors.Join(lifecycle.SyncRequestedLocks(ctx, &report.Lifecycle), lifecycle.EvaluateRetention(ctx, &report.Lifecycle))
+		}},
 		{phases.Deletions, func() error { return lifecycle.ProcessDeletions(ctx, &report.Lifecycle) }},
 		{phases.Scan, func() error { return cleanup.Scan(ctx, &report.Cleanup) }},
 		{phases.Sweep, func() error { return cleanup.Sweep(ctx, &report.Cleanup) }},
@@ -98,7 +102,7 @@ func Run(ctx context.Context, lifecycle *assetservice.Service, cleanup *cleanups
 		}
 		l, c := report.Lifecycle, report.Cleanup
 		log.Info("lifecycle cycle",
-			"evaluated", l.Evaluated, "expired", l.Expired, "held_from_expiry", l.HeldFromExpiry,
+			"evaluated", l.Evaluated, "locks_synced", l.LocksSynced, "expired", l.Expired, "held_from_expiry", l.HeldFromExpiry,
 			"claimed", l.Claimed, "completed", l.Completed, "protected", l.Protected, "retried", l.Retried,
 			"failed", l.Failed, "cancelled", l.Cancelled, "lease_lost", l.LeaseLost,
 			"pages_scanned", c.PagesScanned, "objects_seen", c.ObjectsSeen, "marked", c.Marked,

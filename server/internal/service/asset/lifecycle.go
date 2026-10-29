@@ -35,6 +35,9 @@ type CycleStats struct {
 	Failed    int
 	Cancelled int
 	LeaseLost int
+	// LocksSynced counts assets locked ahead of the sweep because their
+	// policy or holds changed.
+	LocksSynced int
 	// WaitingForPack counts deletions waiting for a pack to let go of the
 	// asset's bytes.
 	WaitingForPack int
@@ -47,7 +50,7 @@ type CycleStats struct {
 // deletions. A failing step is reported but does not stop the other.
 func (s *Service) RunOnce(ctx context.Context) (CycleStats, error) {
 	stats := CycleStats{DryRun: s.cfg.DryRun}
-	err := s.EvaluateRetention(ctx, &stats)
+	err := errors.Join(s.SyncRequestedLocks(ctx, &stats), s.EvaluateRetention(ctx, &stats))
 	if ctx.Err() != nil {
 		return stats, err
 	}

@@ -50,6 +50,19 @@ type Dependencies struct {
 	// (deduplicated content), whose bytes must then stay; nil when no
 	// content is shared.
 	Shared KeyUse
+	// LockSync queues the scope of each policy or hold change, so its
+	// assets are locked within a cycle instead of on the sweep's next
+	// pass; nil leaves that to the sweep.
+	LockSync LockSync
+}
+
+// LockSync is the queue of scopes to lock ahead of the sweep
+// (postgres.LockSyncRepository).
+type LockSync interface {
+	Request(ctx context.Context, r model.LockSyncRequest) error
+	Next(ctx context.Context, tenantID string) (model.LockSyncRequest, bool, error)
+	Assets(ctx context.Context, r model.LockSyncRequest, limit int) ([]model.Asset, error)
+	Advance(ctx context.Context, id, position string, done bool, at time.Time) error
 }
 
 // KeyUse names another asset, not permanently deleted, that points at
@@ -380,6 +393,7 @@ func (s *Service) SetPolicy(ctx context.Context, policy model.RetentionPolicy) (
 	if err != nil {
 		return model.RetentionPolicy{}, err
 	}
+	s.requestLockSync(ctx, policy.TenantID, policy.Scope, policy.ScopeKey, "policy "+stored.ID)
 	s.record(ctx, s.newEvent(policy.TenantID, assetIDOf(policy.Scope, policy.ScopeKey), "", "policy_changed", "",
 		fmt.Sprintf("%s %s v%d effective %s: %s", policy.Scope, policy.ScopeKey, stored.Version,
 			stored.EffectiveFrom.Format(time.RFC3339), policy.Reason), policy.CreatedBy))
@@ -414,6 +428,7 @@ func (s *Service) PlaceHold(ctx context.Context, hold model.LegalHold) (model.Le
 	if err != nil {
 		return model.LegalHold{}, err
 	}
+	s.requestLockSync(ctx, hold.TenantID, hold.Scope, hold.ScopeKey, "hold "+stored.ID)
 	s.deps.Metrics.Add("legal_holds_placed", 1)
 	s.record(ctx, s.newEvent(hold.TenantID, assetIDOf(hold.Scope, hold.ScopeKey), "", "hold_placed", "",
 		fmt.Sprintf("hold %s on %s %s: %s", stored.ID, hold.Scope, hold.ScopeKey, hold.Reason), hold.PlacedBy))
@@ -423,10 +438,26 @@ func (s *Service) PlaceHold(ctx context.Context, hold model.LegalHold) (model.Le
 // ReleaseHold ends a legal hold. Its legal_hold.released event, written in
 // the same transaction, makes the deletions it blocked due again at once.
 func (s *Service) ReleaseHold(ctx context.Context, tenantID, holdID, actor string) error {
+	// The hold's scope, for taking it off locked versions promptly.
+	var scope model.LegalHold
+	if s.deps.LockSync != nil {
+		active, err := s.deps.Holds.List(ctx, tenantID, false)
+		if err != nil {
+			return err
+		}
+		for _, h := range active {
+			if h.ID == holdID {
+				scope = h
+			}
+		}
+	}
 	now := s.now()
 	released := events.NewHoldReleased(tenantID, holdID, now, correlation.From(ctx))
 	if err := s.deps.Holds.Release(ctx, tenantID, holdID, actor, now, released); err != nil {
 		return err
+	}
+	if scope.ID != "" {
+		s.requestLockSync(ctx, tenantID, scope.Scope, scope.ScopeKey, "released hold "+holdID)
 	}
 	s.record(ctx, s.newEvent(tenantID, "", "", "hold_released", "", "hold "+holdID, actor))
 	return nil

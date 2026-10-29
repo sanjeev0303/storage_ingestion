@@ -101,6 +101,8 @@ The D-items above were rechecked against the code after the competitor-gap work.
 | D9 | Fixed | `processing.recordStorage` returns the error when the asset is missing; there is no fallback to the platform bucket |
 | D11 | Fixed | `s3/copy.go`: one `CopyObject` up to 5 GiB, a multipart `UploadPartCopy` above, to 5 TiB |
 
+Also rechecked: R1 (processing leases are renewed while a job runs), R2 (bulk ingestion has its own `ingestion_entry` budget, 3,000 a minute), P1 (every worker takes `PROMOTION_PREFIX`), H1 (a readiness endpoint checks the database) and S3 (Disable locks the organization's row first) are fixed. M1 is fixed in `scripts/migrate.ps1` (an advisory lock, and each file recorded in its own transaction), and `cmd/migrate` now does the same from any machine (`docs/migrations.md`). R5 (slow cancellation of a million-entry job) was not rechecked.
+
 Unverified behaviour, not counted as defects:
 
 - **S5:** GCS composes at most 32 sources per call. Very many parts are composed in rounds; only the emulator's behaviour was seen.

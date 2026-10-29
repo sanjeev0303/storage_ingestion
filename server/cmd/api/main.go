@@ -368,7 +368,7 @@ func lifecycleService(db *postgres.DB, storage *s3storage.ObjectStorage, quarant
 		Policies: postgres.NewRetentionPolicyRepository(db), Holds: postgres.NewLegalHoldRepository(db),
 		Deletions: postgres.NewDeletionRepository(db), Events: postgres.NewLifecycleEventRepository(db),
 		Cursors: postgres.NewCursorRepository(db), Storage: storage, Packs: postgres.NewPackRepository(db),
-		Locks: postgres.NewObjectLockRepository(db),
+		Locks: postgres.NewObjectLockRepository(db), LockSync: postgres.NewLockSyncRepository(db),
 	}, assetservice.Config{
 		Owner: "api", QuarantineBucket: quarantineBucket, DeliveryBucket: deliveryBucket, DeliveryPrefix: prefix,
 		Platform: assetservice.PlatformRetention{
