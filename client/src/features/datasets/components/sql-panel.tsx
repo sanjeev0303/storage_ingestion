@@ -10,6 +10,7 @@ import { api as callApi, apiRaw } from "@/lib/api/client";
 import { describeError } from "@/lib/api/errors";
 import { sha256Blob } from "@/lib/upload/sha256";
 import { formatBytes, formatNumber } from "@/lib/utils/format";
+import { downloadHref } from "@/features/catalog/preview";
 import * as api from "../api";
 import {
   cellText,
@@ -187,11 +188,13 @@ export function SqlPanel({
         const file = `${name}_${i}.${kind}`;
         if (remote) {
           setBusy(`Opening ${i + 1} of ${groupFiles.length}: ${member.path}`);
+          // An API link, not a presigned storage URL: DuckDB sizes a file
+          // with HEAD, and a URL presigned for GET refuses HEAD on AWS S3.
           const { url } = await callApi<{ url: string }>(`/assets/${encodeURIComponent(member.version_id)}/download-url`, {
             method: "POST",
-            body: { mode: "storage" },
+            body: { mode: "token" },
           });
-          await registerRemote(db, file, url);
+          await registerRemote(db, file, new URL(downloadHref(url, "token"), window.location.origin).href);
         } else {
           const step = (text: string) => setBusy(`${i + 1} of ${groupFiles.length}: ${text}`);
           await db.registerFileBuffer(file, await fetchChecked(member, step));

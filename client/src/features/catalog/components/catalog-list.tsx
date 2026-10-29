@@ -27,9 +27,10 @@ function Capabilities() {
   if (!data) return null;
   return (
     <p className="neo-in-sm px-4 py-3 text-base">
-      Versioning: logical versions are {data.logical_versioning ? "supported" : "not supported"}; the storage provider
+      Versioning: logical versions are {data.logical_versioning ? "supported" : "not supported"}; platform-managed storage
       reports versioning as {data.provider_versioning ? "on" : "off"}
-      {data.provider_versioning_status ? ` (${data.provider_versioning_status})` : ""}.
+      {data.provider_versioning_status ? ` (${data.provider_versioning_status})` : ""}. Each storage connection reports its
+      own on its page, and each object shows its version from the provider.
     </p>
   );
 }

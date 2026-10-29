@@ -45,6 +45,14 @@ func (r *DatasetRepository) CreateBranch(ctx context.Context, parent model.Datas
 		if err != nil {
 			return fmt.Errorf("copy branch members: %w", err)
 		}
+		// Lineage: the branch was created from that snapshot of its parent.
+		err = link(ctx, tx, parent.TenantID, model.LineageEdge{
+			From: model.LineageRef{Kind: model.NodeDataset, RefID: branchID}, To: model.LineageRef{Kind: model.NodeDatasetVersion, RefID: forkVersionID},
+			Relation: model.RelCreatedFromSnapshot, Actor: actor, Details: map[string]any{"branch": name},
+		}, now, true)
+		if err != nil {
+			return err
+		}
 		branch, err = scanDataset(tx.QueryRow(ctx, `
 			UPDATE datasets SET member_count = $2, members_revision = 1 WHERE id = $1 RETURNING `+datasetColumns,
 			branchID, tag.RowsAffected()))

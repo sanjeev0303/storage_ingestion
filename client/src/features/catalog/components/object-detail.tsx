@@ -96,7 +96,7 @@ export function ObjectDetail({ id }: { id: string }) {
       {object.deleted_at && (
         <p role="note" className="neo-in-sm mb-6 p-4 text-base">
           This object was deleted on <Time value={object.deleted_at} />. Its path and history are still reserved, and its
-          versions can be restored until their purge time. The next upload to this path becomes the next version.
+          versions can be restored until their purge time: open a version below and choose Restore in Operations. The next upload to this path becomes the next version.
         </p>
       )}
 
