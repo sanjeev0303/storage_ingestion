@@ -1,5 +1,7 @@
 "use client";
 
+import { useQueryClient } from "@tanstack/react-query";
+import { useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/panel";
 import { DefList, Meter } from "@/components/ui/page";
@@ -7,6 +9,7 @@ import { EmptyState, SkeletonRows } from "@/components/ui/states";
 import { useStorageConnections } from "@/features/storage-connections/hooks";
 import { isApiError } from "@/lib/api/errors";
 import { useSession } from "@/lib/auth/session";
+import { orgKey } from "@/lib/query/keys";
 import { MIB } from "@/lib/upload/parts";
 import { formatBytes, formatNumber } from "@/lib/utils/format";
 import { useQuota } from "../api";
@@ -93,6 +96,14 @@ export function UploadsScreen() {
     maxObjectBytes: quota.data?.limits.max_object_bytes,
   });
   const { entries, snapshots } = queue;
+
+  // A finished file changes the organization's recent uploads and quota usage.
+  const client = useQueryClient();
+  const finishedCount = snapshots.filter((s) => FINISHED.includes(s.state)).length;
+  useEffect(() => {
+    if (finishedCount === 0) return;
+    void client.invalidateQueries({ queryKey: orgKey(organizationId, "uploads") });
+  }, [finishedCount, client, organizationId]);
   const needFix = entries.filter(
     (entry, i) => snapshots[i]?.state === "queued" && Object.values(queue.errors.get(entry.id) ?? {}).some(Boolean),
   ).length;

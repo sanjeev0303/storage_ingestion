@@ -59,6 +59,18 @@ func TestHTTPDatasetBranchAndMerge(t *testing.T) {
 		t.Fatalf("branch: %+v %+v", branch, branch.Branch)
 	}
 	branchPath := "/api/v1/datasets/" + branch.ID
+	// Lineage: the branch was created from the parent's snapshot.
+	var lineage response.LineageResponse
+	s.expect(t, tok, "", http.MethodGet, branchPath+"/lineage", "", http.StatusOK, &lineage)
+	fromSnapshot := false
+	for _, e := range lineage.Edges {
+		if e.Relation == "CREATED_FROM_SNAPSHOT" && e.Depth == 1 && e.To.ID == v1.ID {
+			fromSnapshot = true
+		}
+	}
+	if !fromSnapshot {
+		t.Fatalf("branch lineage: %+v", lineage.Edges)
+	}
 	for body, want := range map[string]int{`{"name":"exp"}`: http.StatusConflict, `{"name":"Not Valid!"}`: http.StatusBadRequest} {
 		if r := s.call(t, tok, "", http.MethodPost, mainPath+"/branches", body); r.status != want {
 			t.Fatalf("branch %s: %s, want %d", body, r, want)

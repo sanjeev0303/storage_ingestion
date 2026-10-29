@@ -112,7 +112,14 @@ export type ManifestReport = {
   invalid_samples?: IngestionEntry[];
 };
 
-export type Dataset = { id: string; name: string; completion_policy?: string; status?: string; storage_connection_id?: string };
+export type Dataset = {
+  id: string;
+  name: string;
+  completion_policy?: string;
+  status?: string;
+  lifecycle_status?: string;
+  storage_connection_id?: string;
+};
 
 export type JobsPage = { jobs: IngestionJob[]; next_after?: string };
 export type EntriesPage = { entries: IngestionEntry[]; next_after?: number };

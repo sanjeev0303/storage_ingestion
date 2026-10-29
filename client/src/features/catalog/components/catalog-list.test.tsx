@@ -110,7 +110,7 @@ describe("CatalogList", () => {
       ),
     );
     renderWithProviders(<CatalogList />);
-    expect(await screen.findByText(/provider reports versioning as off/)).toBeInTheDocument();
+    expect(await screen.findByText(/platform-managed storage reports versioning as off/)).toBeInTheDocument();
   });
 
   it("keeps Open object disabled until a path is typed", async () => {

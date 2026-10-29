@@ -33,6 +33,8 @@ export function NewJobForm() {
   const organizationId = useOrganizationId();
   const { can } = useSession();
   const datasets = useDatasets();
+  // Archived datasets refuse new files, so they are not offered.
+  const open = datasets.items.filter((d) => d.lifecycle_status !== "ARCHIVED");
   const quota = useManifestLimits();
 
   const [datasetId, setDatasetId] = useState("");
@@ -44,7 +46,7 @@ export function NewJobForm() {
   const attempt = useRef({ signature: "", key: "" });
 
   // A lone dataset is picked for the person.
-  const effectiveDatasetId = datasetId || (datasets.items.length === 1 ? datasets.items[0].id : "");
+  const effectiveDatasetId = datasetId || (open.length === 1 ? open[0].id : "");
   const datasetError = effectiveDatasetId ? undefined : "Choose a dataset.";
 
   const cleanedConcurrency = cleanWholeNumber(concurrency);
@@ -86,7 +88,7 @@ export function NewJobForm() {
   }
   if (datasets.isPending) return <SkeletonRows rows={3} />;
   if (datasets.isError) return <ErrorState error={datasets.error} onRetry={() => datasets.refetch()} />;
-  if (datasets.items.length === 0) {
+  if (open.length === 0 && !datasets.hasNextPage) {
     return (
       <EmptyState
         title="Create a dataset first"
@@ -96,7 +98,7 @@ export function NewJobForm() {
           </ButtonLink>
         }
       >
-        An ingestion job loads files into an existing dataset. This organization has none yet.
+        An ingestion job loads files into an existing dataset that is not archived. This organization has none yet.
       </EmptyState>
     );
   }
@@ -110,7 +112,7 @@ export function NewJobForm() {
           {(props) => (
             <Select {...props} value={effectiveDatasetId} onChange={(e) => setDatasetId(e.target.value)} required>
               <option value="">Choose a dataset</option>
-              {datasets.items.map((d) => (
+              {open.map((d) => (
                 <option key={d.id} value={d.id}>
                   {d.name}
                 </option>
