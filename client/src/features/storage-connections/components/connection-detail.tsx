@@ -168,9 +168,16 @@ function Loaded({ connection }: { connection: StorageConnection }) {
             <Panel title="Test" description="Checks the endpoint, the credentials, the bucket and a listing.">
               <Checkbox
                 label="Also write, read back and delete one small test object under the ready prefix"
-                checked={probe}
+                checked={probe || connection.status === "PENDING"}
+                disabled={connection.status === "PENDING"}
                 onChange={(e) => setProbe(e.target.checked)}
               />
+              {connection.status === "PENDING" && (
+                <p className="mt-2 max-w-prose text-sm text-muted">
+                  Always done before a new connection becomes Active: every connection takes uploads, so a key that can only read
+                  must fail here, not on the first upload.
+                </p>
+              )}
               <div className="mt-4">
                 <Button
                   variant="primary"

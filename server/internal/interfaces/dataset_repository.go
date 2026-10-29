@@ -18,6 +18,12 @@ type DatasetRepository interface {
 	// filled from its source versions in the same transaction.
 	CreateDataset(ctx context.Context, d model.Dataset) (model.Dataset, bool, error)
 	GetDataset(ctx context.Context, tenantID, datasetID string) (model.Dataset, error)
+
+	// Branches and merges (docs/datasets.md, "Branches").
+	CreateBranch(ctx context.Context, parent model.Dataset, name, forkVersionID, branchID, actor string, now time.Time) (model.Dataset, error)
+	ListBranches(ctx context.Context, tenantID, parentID string) ([]model.Dataset, error)
+	Merge(ctx context.Context, in model.MergeInput) (model.MergeResult, error)
+	ListMerges(ctx context.Context, tenantID, targetID string, limit int) ([]model.MergeResult, error)
 	ListDatasets(ctx context.Context, tenantID string, f DatasetFilter) ([]model.Dataset, error)
 	UpdateDataset(ctx context.Context, tenantID, datasetID string, revision int64, patch DatasetPatch, actor string, now time.Time) (model.Dataset, error)
 	ArchiveDataset(ctx context.Context, tenantID, datasetID, actor string, now time.Time) (model.Dataset, error)
@@ -43,7 +49,16 @@ type DatasetRepository interface {
 	CreateImport(ctx context.Context, imp model.ManifestImport, inline []byte, maxActive int, ev *model.OutboxEvent) (model.ManifestImport, bool, error)
 	SubmitImport(ctx context.Context, tenantID, importID, etag string, size int64, now time.Time, ev model.OutboxEvent) (model.ManifestImport, error)
 	GetImport(ctx context.Context, tenantID, importID string) (model.ManifestImport, error)
+	// DiffVersions compares two versions by object: counts of each kind of
+	// difference, and one page of differences after the object ID after.
+	DiffVersions(ctx context.Context, tenantID, baseID, targetID, after string, limit int) (model.VersionDiff, error)
+	// ListImports pages a dataset's imports, newest first.
+	ListImports(ctx context.Context, tenantID, datasetID, after string, limit int) (imports []model.ManifestImport, next string, err error)
 	ListImportErrors(ctx context.Context, tenantID, importID string, afterLine int64, limit int) ([]model.ImportError, error)
+	// ObjectDatasets returns the datasets whose draft holds the catalog
+	// object and the snapshots that pinned one of its versions, at most
+	// limit of each.
+	ObjectDatasets(ctx context.Context, tenantID, objectID string, limit int) (model.ObjectDatasets, error)
 	// ClaimImports leases due imports: importID alone, or any when it is "".
 	ClaimImports(ctx context.Context, owner, importID string, now time.Time, lease time.Duration, limit int) ([]model.ManifestImport, error)
 	InlineManifest(ctx context.Context, importID string, offset int64) ([]byte, error)

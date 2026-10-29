@@ -80,6 +80,26 @@ var builtinProfiles = func() []model.ValidationProfile {
 					`{"proportions":{"train":[0.5,0.9],"validation":[0.05,0.3],"test":[0.05,0.3]}}`),
 				rule("class-balance", "label_distribution", model.SeverityWarning, `{"min_per_class":1,"max_class_share":0.9}`),
 			)}},
+		// Run in FULL mode: every pinned file is read back from storage and
+		// hashed again, even when processing verified it at upload. It is
+		// the check for bytes changed, removed or corrupted after the
+		// snapshot, including out-of-band edits in a customer's own bucket
+		// that the platform could not see.
+		{ID: "builtin:storage-audit", Name: "Storage audit (re-read every file)",
+			Description: "Reads every pinned file back from storage and checks its size and SHA-256 again; finds files changed, missing or corrupted since the snapshot. Run it in FULL mode.",
+			Definition: model.ProfileDefinition{Kind: "storage-audit", Rules: []model.Rule{
+				rule("object-exists", "object_exists", model.SeverityError, ""),
+				rule("lifecycle-state", "lifecycle_state", model.SeverityError, ""),
+				rule("size-consistency", "size_consistency", model.SeverityError, ""),
+				rule("content-reread", "content_checksum", model.SeverityError, `{"reverify":true}`),
+			}}},
+		// Training data with no licence or source on record is a legal risk
+		// the platform can name before training, not after.
+		{ID: "builtin:provenance", Name: "Provenance and licence",
+			Description: "The general checks, and every file must carry license and source metadata.",
+			Definition: model.ProfileDefinition{Kind: "provenance", Rules: append(generalRules(),
+				rule("license-and-source", "governance_metadata", model.SeverityError, `{"keys":["license","source"]}`),
+			)}},
 	}
 	for i := range profiles {
 		profiles[i].Version = 1

@@ -91,7 +91,12 @@ type ProcessingJob struct {
 	ScanSignature       string
 	ScanError           string
 	ScannedAt           *time.Time
-	PromotionStatus     string
+	// ScannerVersion is the engine and signature version of a CLEAN
+	// verdict about exactly the declared bytes; empty otherwise.
+	ScannerVersion string
+	// ScanReusedFrom is the asset whose verdict this job reused.
+	ScanReusedFrom  string
+	PromotionStatus string
 	PromotionKey        string
 	PromotedAt          *time.Time
 

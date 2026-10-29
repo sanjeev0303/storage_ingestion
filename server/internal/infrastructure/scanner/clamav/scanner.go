@@ -46,7 +46,10 @@ type Scanner struct {
 	timeout time.Duration
 }
 
-var _ interfaces.MalwareScanner = (*Scanner)(nil)
+var (
+	_ interfaces.MalwareScanner   = (*Scanner)(nil)
+	_ interfaces.VersionedScanner = (*Scanner)(nil)
+)
 
 func New(address string, timeout time.Duration) *Scanner {
 	return &Scanner{address: address, timeout: timeout}
@@ -73,6 +76,30 @@ func (s *Scanner) Ping(ctx context.Context) error {
 		return errors.New("clamd did not answer PONG")
 	}
 	return nil
+}
+
+// Version answers clamd's VERSION, such as "ClamAV 1.4.3/27800/Mon Oct 27
+// 08:23:00 2026": the engine, the signature database number and its date.
+// It changes whenever clamd loads new signatures.
+func (s *Scanner) Version(ctx context.Context) (string, error) {
+	conn, err := s.dial(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+
+	if _, err := conn.Write([]byte("zVERSION\x00")); err != nil {
+		return "", fmt.Errorf("clamd version: %w", err)
+	}
+	reply, err := bufio.NewReader(conn).ReadString(0)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", fmt.Errorf("clamd version: %w", err)
+	}
+	version := strings.TrimRight(reply, "\x00\n")
+	if !strings.HasPrefix(version, "ClamAV ") {
+		return "", errors.New("clamd sent no version")
+	}
+	return version, nil
 }
 
 // Scan streams content to clamd and maps its single-line answer:

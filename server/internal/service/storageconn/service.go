@@ -332,7 +332,8 @@ func (s *Service) RotateCredentials(ctx context.Context, p model.Principal, conn
 		return model.StorageConnection{}, TestResult{}, err
 	}
 
-	result, err := s.runTest(ctx, c, secrets, false)
+	// New credentials must be able to write, as the old ones could.
+	result, err := s.runTest(ctx, c, secrets, true)
 	if err != nil {
 		return model.StorageConnection{}, TestResult{}, err
 	}

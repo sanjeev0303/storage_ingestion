@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -24,8 +25,10 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/config"
+	"github.com/sanjeev0303/object-storage-platform/internal/platform/netguard"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/ratelimit"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/retry"
+	"github.com/sanjeev0303/object-storage-platform/internal/platform/secretbox"
 	"github.com/sanjeev0303/object-storage-platform/internal/server"
 	"github.com/sanjeev0303/object-storage-platform/internal/server/middleware"
 	assetservice "github.com/sanjeev0303/object-storage-platform/internal/service/asset"
@@ -39,6 +42,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/service/processing"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/quota"
 	uploadservice "github.com/sanjeev0303/object-storage-platform/internal/service/upload"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/webhook"
 )
 
 // Phase 8 against PostgreSQL: TEST_DATABASE_URL with every migration
@@ -277,7 +281,8 @@ func (e *securityEnv) orgIDs(ctx context.Context) []string {
 // tenantTables hold tenant data, children before the tables they
 // reference.
 var tenantTables = []string{
-	"validation_findings", "validation_reports", "validation_jobs", "lineage_edges", "lineage_nodes",
+	"webhook_deliveries", "webhook_endpoints",
+	"dataset_merges", "validation_findings", "validation_reports", "validation_jobs", "lineage_edges", "lineage_nodes",
 	"dataset_manifest_imports", "dataset_version_members", "dataset_versions", "dataset_members", "validation_profiles",
 	"download_tokens", "delivery_audit_events", "deletion_operations", "lifecycle_events", "legal_holds",
 	"retention_policies", "orphan_candidates", "quarantine_records", "processing_events", "processing_jobs",
@@ -332,6 +337,9 @@ func (e *securityEnv) cleanup(t *testing.T) {
 	domain := "%@" + e.run + ".example.test"
 	for _, q := range []string{
 		`DELETE FROM invitations WHERE org_id = ANY($1)`,
+		`DELETE FROM sso_connections WHERE org_id = ANY($1)`,
+		`DELETE FROM scim_tokens WHERE org_id = ANY($1)`,
+		`DELETE FROM sso_login_states WHERE org_id = ANY($1)`,
 		`DELETE FROM memberships WHERE org_id = ANY($1)`,
 		`DELETE FROM org_roles WHERE org_id = ANY($1)`,
 		`DELETE FROM organizations WHERE id = ANY($1)`,
@@ -343,6 +351,7 @@ func (e *securityEnv) cleanup(t *testing.T) {
 	for _, q := range []string{
 		`DELETE FROM auth_credential_tokens WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`,
 		`DELETE FROM auth_sessions WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`,
+		`DELETE FROM sso_identities WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`,
 		`DELETE FROM memberships WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`,
 		`DELETE FROM users WHERE email LIKE $1`,
 	} {
@@ -387,6 +396,10 @@ type securityStack struct {
 	// datasets is the API's dataset service; worker builds the worker's.
 	datasets  *datasetservice.Service
 	datasetDB *postgres.DatasetRepository
+	// hookKeys seals webhook secrets; hookPolicy lets deliveries reach the
+	// test's own receivers on 127.0.0.1.
+	hookKeys   *secretbox.Keyring
+	hookPolicy netguard.Policy
 }
 
 // datasetConfig is the dataset limits tests run with: the defaults, with
@@ -467,7 +480,7 @@ func openSecurityStack(t *testing.T, settings map[string]string) *securityStack 
 		Quarantine: postgres.NewQuarantineRepository(e.db), Policies: postgres.NewRetentionPolicyRepository(e.db),
 		Holds: postgres.NewLegalHoldRepository(e.db), Deletions: postgres.NewDeletionRepository(e.db),
 		Events: postgres.NewLifecycleEventRepository(e.db), Cursors: postgres.NewCursorRepository(e.db), Storage: ie.storage,
-		Packs: packs,
+		Packs: packs, Shared: ie.assets,
 	}, assetservice.Config{
 		Owner: "it-lifecycle", QuarantineBucket: ie.bucket, DeliveryBucket: ie.bucket, DeliveryPrefix: "published",
 		Platform:  assetservice.PlatformRetention{DefaultQuarantineRetention: time.Hour, QuarantineRetentionFloor: time.Hour},
@@ -495,6 +508,13 @@ func openSecurityStack(t *testing.T, settings map[string]string) *securityStack 
 	s := &securityStack{securityEnv: e, ie: ie, delivery: deliverer, lifecycle: lifecycle, catalog: catalogService,
 		reconciler: reconciler, catalogDB: catalogDB, dead: dead, datasetDB: postgres.NewDatasetRepository(e.db)}
 	s.datasets = s.newDatasetService(t, nil)
+	s.hookKeys, err = secretbox.NewKeyring(map[int][]byte{1: bytes.Repeat([]byte{7}, secretbox.KeySize)}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.hookPolicy = netguard.DefaultPolicy()
+	s.hookPolicy.AllowPrivate = true
+	e.identity.EnableSSO(postgres.NewSSORepository(e.db), s.hookKeys, s.hookPolicy)
 	s.api = httptest.NewServer(server.NewRouter(server.Routes{
 		Resolver: middleware.BearerResolver[identity.Identity](e.identity),
 		Identity: e.identity, Quotas: e.quotas, Audit: e.audit,
@@ -507,6 +527,8 @@ func openSecurityStack(t *testing.T, settings map[string]string) *securityStack 
 		Quarantine: processing.NewQuarantine(ie.assets, ie.processingEnv.jobs, postgres.NewQuarantineRepository(e.db),
 			postgres.NewProcessingEventRepository(e.db), e.audit),
 		ProxyEnabled: true, Limiter: e.limiter, Rates: rates, Log: e.log,
+		Operations: e.db.OperationsStatus,
+		Webhooks:   webhook.NewService(postgres.NewWebhookRepository(e.db), s.hookKeys, s.hookPolicy, e.audit),
 	}))
 	t.Cleanup(s.api.Close)
 	return s

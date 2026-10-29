@@ -22,7 +22,8 @@ export function SnapshotStage() {
   const timeline = useRef<gsap.core.Timeline | null>(null);
   const clause = useRef<HTMLParagraphElement>(null);
   const root = useRef<HTMLDivElement>(null);
-  // Scrolling steps through the stages until the reader takes the slider or presses Play.
+  // Scrolling steps through the stages until the reader takes the slider (by
+  // pointer or keyboard) or presses Play.
   const manual = useRef(false);
   const timers = useRef<number[]>([]);
   const reduced = usePrefersReducedMotion();
@@ -46,18 +47,24 @@ export function SnapshotStage() {
     };
   }, [stage, reduced]);
 
+  // matchMedia, not the hook: during hydration the hook still reports the
+  // server's "no preference", and a trigger created then would set the stage
+  // from wherever the page is already scrolled.
   useEffect(() => {
-    if (reduced) return;
-    const trigger = ScrollTrigger.create({
-      trigger: root.current,
-      start: "top 60%",
-      end: "bottom 55%",
-      onUpdate: (self) => {
-        if (!manual.current) setStage(Math.round(self.progress * last));
-      },
+    const mm = gsap.matchMedia();
+    mm.add("(prefers-reduced-motion: no-preference)", () => {
+      const trigger = ScrollTrigger.create({
+        trigger: root.current,
+        start: "top 60%",
+        end: "bottom 55%",
+        onUpdate: (self) => {
+          if (!manual.current) setStage(Math.round(self.progress * last));
+        },
+      });
+      return () => trigger.kill();
     });
-    return () => trigger.kill();
-  }, [reduced]);
+    return () => mm.revert();
+  }, []);
 
   useEffect(() => () => timers.current.forEach(window.clearTimeout), []);
 
@@ -118,6 +125,11 @@ export function SnapshotStage() {
                 value={stage}
                 aria-label={copy.snapshot.sliderLabel}
                 aria-valuetext={stages[stage].name}
+                // Reaching the slider by keyboard scrolls the page; that scroll
+                // must not pick the stage the reader is about to choose.
+                onFocus={() => {
+                  manual.current = true;
+                }}
                 onChange={(event) => {
                   manual.current = true;
                   stopPlaying();

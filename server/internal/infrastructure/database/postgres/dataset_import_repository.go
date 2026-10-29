@@ -337,3 +337,141 @@ func writeImportProgress(ctx context.Context, tx pgx.Tx, cp *interfaces.ImportCh
 	}
 	return nil
 }
+
+// ListImports pages a dataset's imports, newest first.
+func (r *DatasetRepository) ListImports(ctx context.Context, tenantID, datasetID, after string, limit int) ([]model.ManifestImport, string, error) {
+	at, id, err := decodeTimeCursor(after)
+	if err != nil {
+		return nil, "", err
+	}
+	rows, err := r.db.Pool.Query(ctx, `
+		SELECT `+importColumns+` FROM dataset_manifest_imports
+		WHERE tenant_id = $1 AND dataset_id = $2 AND ($3 = '' OR (created_at, id) < ($4, $3))
+		ORDER BY created_at DESC, id DESC
+		LIMIT $5
+	`, tenantID, datasetID, id, at, limit+1)
+	if err != nil {
+		return nil, "", fmt.Errorf("list imports: %w", err)
+	}
+	imports, err := collect(rows, scanImport)
+	if err != nil || len(imports) <= limit {
+		return imports, "", err
+	}
+	imports = imports[:limit]
+	return imports, encodeTimeCursor(imports[limit-1].CreatedAt, imports[limit-1].ID), nil
+}
+
+// ObjectDatasets finds where a catalog object is used. Draft members are
+// found by object; snapshot members by the object's assets (one per
+// version), which is how they are indexed.
+func (r *DatasetRepository) ObjectDatasets(ctx context.Context, tenantID, objectID string, limit int) (model.ObjectDatasets, error) {
+	var out model.ObjectDatasets
+	rows, err := r.db.Pool.Query(ctx, `
+		SELECT d.id, d.name, COALESCE(m.label, ''), COALESCE(m.split, ''), m.created_at
+		FROM dataset_members AS m
+		JOIN datasets AS d ON d.id = m.dataset_id AND d.tenant_id = m.tenant_id
+		WHERE m.tenant_id = $1 AND m.object_id = $2
+		ORDER BY d.name
+		LIMIT $3
+	`, tenantID, objectID, limit)
+	if err != nil {
+		return out, fmt.Errorf("list object memberships: %w", err)
+	}
+	out.Members, err = collect(rows, func(row pgx.Row) (model.ObjectMembership, error) {
+		var m model.ObjectMembership
+		err := row.Scan(&m.DatasetID, &m.DatasetName, &m.Label, &m.Split, &m.AddedAt)
+		return m, err
+	})
+	if err != nil {
+		return out, err
+	}
+
+	rows, err = r.db.Pool.Query(ctx, `
+		SELECT d.id, d.name, v.id, v.version, vm.object_version
+		FROM assets AS a
+		JOIN dataset_version_members AS vm ON vm.asset_id = a.id AND vm.tenant_id = a.tenant_id
+		JOIN dataset_versions AS v ON v.id = vm.version_id AND v.tenant_id = vm.tenant_id
+		JOIN datasets AS d ON d.id = v.dataset_id AND d.tenant_id = v.tenant_id
+		WHERE a.tenant_id = $1 AND a.object_id = $2
+		ORDER BY d.name, v.version DESC
+		LIMIT $3
+	`, tenantID, objectID, limit)
+	if err != nil {
+		return out, fmt.Errorf("list object snapshots: %w", err)
+	}
+	out.Snapshots, err = collect(rows, func(row pgx.Row) (model.ObjectSnapshot, error) {
+		var s model.ObjectSnapshot
+		err := row.Scan(&s.DatasetID, &s.DatasetName, &s.VersionID, &s.Version, &s.ObjectVersion)
+		return s, err
+	})
+	return out, err
+}
+
+// versionDiffSQL pairs two versions' members by object. Both sides are
+// read through ux_dataset_version_members_object (version_id, object_id).
+const versionDiffSQL = `
+	WITH base AS (
+	    SELECT object_id, path, COALESCE(checksum_sha256, '') AS sum, COALESCE(label, '') AS label, COALESCE(split, '') AS split
+	    FROM dataset_version_members WHERE tenant_id = $1 AND version_id = $2
+	), target AS (
+	    SELECT object_id, path, COALESCE(checksum_sha256, '') AS sum, COALESCE(label, '') AS label, COALESCE(split, '') AS split
+	    FROM dataset_version_members WHERE tenant_id = $1 AND version_id = $3
+	), paired AS (
+	    SELECT COALESCE(b.object_id, t.object_id) AS object_id,
+	           CASE WHEN b.object_id IS NULL THEN 'ADDED'
+	                WHEN t.object_id IS NULL THEN 'REMOVED'
+	                WHEN b.sum <> t.sum THEN 'CHANGED'
+	                WHEN b.label <> t.label OR b.split <> t.split OR b.path <> t.path THEN 'RELABELED'
+	                ELSE 'UNCHANGED' END AS kind,
+	           COALESCE(b.path, ''), COALESCE(t.path, ''), COALESCE(b.sum, ''), COALESCE(t.sum, ''),
+	           COALESCE(b.label, ''), COALESCE(t.label, ''), COALESCE(b.split, ''), COALESCE(t.split, '')
+	    FROM base AS b FULL OUTER JOIN target AS t ON t.object_id = b.object_id
+	)`
+
+// DiffVersions compares two versions by object: counts of every kind, and
+// one page of the differences after the object ID after.
+func (r *DatasetRepository) DiffVersions(ctx context.Context, tenantID, baseID, targetID, after string, limit int) (model.VersionDiff, error) {
+	diff := model.VersionDiff{BaseVersionID: baseID, TargetVersionID: targetID}
+	rows, err := r.db.Pool.Query(ctx, versionDiffSQL+` SELECT kind, count(*) FROM paired GROUP BY kind`, tenantID, baseID, targetID)
+	if err != nil {
+		return diff, fmt.Errorf("count version differences: %w", err)
+	}
+	counts := map[string]*int64{
+		model.DiffAdded: &diff.Added, model.DiffRemoved: &diff.Removed, model.DiffChanged: &diff.Changed,
+		model.DiffRelabeled: &diff.Relabeled, "UNCHANGED": &diff.Unchanged,
+	}
+	for rows.Next() {
+		var kind string
+		var n int64
+		if err := rows.Scan(&kind, &n); err != nil {
+			rows.Close()
+			return diff, fmt.Errorf("scan version difference count: %w", err)
+		}
+		*counts[kind] = n
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return diff, fmt.Errorf("count version differences: %w", err)
+	}
+
+	rows, err = r.db.Pool.Query(ctx, versionDiffSQL+`
+		SELECT * FROM paired WHERE kind <> 'UNCHANGED' AND object_id > $4
+		ORDER BY object_id LIMIT $5`, tenantID, baseID, targetID, after, limit+1)
+	if err != nil {
+		return diff, fmt.Errorf("list version differences: %w", err)
+	}
+	diff.Entries, err = collect(rows, func(row pgx.Row) (model.VersionDiffEntry, error) {
+		var e model.VersionDiffEntry
+		err := row.Scan(&e.ObjectID, &e.Kind, &e.BasePath, &e.TargetPath, &e.BaseSHA256, &e.TargetSHA256,
+			&e.BaseLabel, &e.TargetLabel, &e.BaseSplit, &e.TargetSplit)
+		return e, err
+	})
+	if err != nil {
+		return diff, err
+	}
+	if len(diff.Entries) > limit {
+		diff.Entries = diff.Entries[:limit]
+		diff.Next = diff.Entries[limit-1].ObjectID
+	}
+	return diff, nil
+}

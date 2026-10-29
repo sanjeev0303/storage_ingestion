@@ -160,7 +160,10 @@ async function handle(req: NextRequest, ctx: RouteContext<"/api/proxy/[...path]"
     upstream = await send();
     if (upstream.status === 401 && refresh && !renewed && !sessionEnded) {
       await upstream.body?.cancel();
-      if (await renew()) upstream = await send();
+      // The 401's body is gone now; when the session cannot be renewed
+      // (revoked, expired), answer with our own 401.
+      if (!(await renew())) return unauthenticated(true);
+      upstream = await send();
     }
   } catch (error) {
     logServerError("upstream_unreachable", { where, error: String(error) });

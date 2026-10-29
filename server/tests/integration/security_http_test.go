@@ -47,7 +47,9 @@ func TestHTTPSignInFlow(t *testing.T) {
 	if me.User.ID != acme.devUser.ID || len(me.Memberships) != 1 || me.Memberships[0].RoleID != model.RoleDeveloper {
 		t.Fatalf("me: %+v", me)
 	}
-	if strings.Contains(string(r.body), "argon2") || strings.Contains(string(r.body), "password") {
+	// has_password says only whether one is set; the hash and the password itself never appear.
+	if strings.Contains(string(r.body), "argon2") || strings.Contains(string(r.body), "password_hash") ||
+		strings.Contains(string(r.body), acme.devPW) {
 		t.Fatalf("no password material in responses: %s", r.body)
 	}
 	// One organization: it applies without naming it.
@@ -125,6 +127,34 @@ func TestHTTPCrossTenantAccessIsHidden(t *testing.T) {
 	}
 	if r := s.call(t, globexTok, "", http.MethodGet, "/api/v1/uploads/"+secret.UploadID, ""); r.status != http.StatusNotFound {
 		t.Fatalf("another tenant's upload: %s", r)
+	}
+	// The upload list holds the organization's own uploads only.
+	var listed struct {
+		Uploads []struct {
+			UploadID string `json:"upload_id"`
+			Status   string `json:"status"`
+		} `json:"uploads"`
+	}
+	s.expect(t, auditorTok, "", http.MethodGet, "/api/v1/uploads?status=verified", "", http.StatusOK, &listed)
+	found := false
+	for _, u := range listed.Uploads {
+		found = found || u.UploadID == secret.UploadID
+		if u.Status != "VERIFIED" {
+			t.Fatalf("the status filter let through %+v", u)
+		}
+	}
+	if !found {
+		t.Fatalf("acme's upload is in its list: %+v", listed)
+	}
+	listed.Uploads = nil
+	s.expect(t, globexTok, "", http.MethodGet, "/api/v1/uploads", "", http.StatusOK, &listed)
+	for _, u := range listed.Uploads {
+		if u.UploadID == secret.UploadID {
+			t.Fatal("globex lists acme's upload")
+		}
+	}
+	if r := s.call(t, acmeTok, "", http.MethodGet, "/api/v1/uploads?status=nonsense", ""); r.status != http.StatusBadRequest {
+		t.Fatalf("an unknown status: %s", r)
 	}
 	// Naming the other organization does not help: membership decides.
 	if r := s.call(t, globexTok, acme.org.ID, http.MethodGet, "/api/v1/assets/"+secret.ID, ""); r.status != http.StatusForbidden ||
@@ -539,5 +569,46 @@ func TestSensitiveDataStaysOutOfLogsAndAudit(t *testing.T) {
 	}
 	if checked < 10 {
 		t.Fatalf("expected the flow to write audit events, found %d", checked)
+	}
+}
+
+func TestHTTPOperationsStatusCountsOnlyTheOrganization(t *testing.T) {
+	s := openSecurityStack(t, nil)
+	acme := s.team(t, "ops-a")
+	globex := s.team(t, "ops-b")
+	acmeTok := s.signIn(t, acme.devUser.Email, acme.devPW).AccessToken
+	auditorTok := s.signIn(t, acme.auditorUser.Email, acme.auditorPW).AccessToken
+	globexTok := s.signIn(t, globex.devUser.Email, globex.devPW).AccessToken
+
+	type status struct {
+		Processing struct {
+			Waiting int64 `json:"waiting"`
+			Held    int64 `json:"held"`
+		} `json:"processing"`
+		Ingestion struct {
+			ActiveJobs int64 `json:"active_jobs"`
+		} `json:"ingestion"`
+	}
+	var before status
+	s.expect(t, globexTok, "", http.MethodGet, "/api/v1/operations/status", "", http.StatusOK, &before)
+
+	// Acme starts an ingestion job; only acme's status counts it.
+	var ds response.DatasetResponse
+	s.expect(t, acmeTok, "", http.MethodPost, "/api/v1/datasets", `{"name":"ops-set"}`, http.StatusCreated, &ds)
+	var job response.IngestionJobResponse
+	s.expect(t, acmeTok, "", http.MethodPost, "/api/v1/ingestion/jobs", fmt.Sprintf(`{"dataset_id":%q,"idempotency_key":"ops-1"}`, ds.ID), http.StatusCreated, &job)
+
+	var mine status
+	s.expect(t, auditorTok, "", http.MethodGet, "/api/v1/operations/status", "", http.StatusOK, &mine)
+	if mine.Ingestion.ActiveJobs != 1 {
+		t.Fatalf("acme's active ingestion job is counted: %+v", mine)
+	}
+	var theirs status
+	s.expect(t, globexTok, "", http.MethodGet, "/api/v1/operations/status", "", http.StatusOK, &theirs)
+	if theirs != before {
+		t.Fatalf("globex's status changed with acme's work: before %+v after %+v", before, theirs)
+	}
+	if r := s.call(t, "", "", http.MethodGet, "/api/v1/operations/status", ""); r.status != http.StatusUnauthorized {
+		t.Fatalf("anonymous status: %s", r)
 	}
 }

@@ -149,6 +149,17 @@ describe("API proxy", () => {
     expect(cookies).toContain("osp_rt=;");
   });
 
+  it("answers 401, not a broken response, when a revoked session cannot be refreshed", async () => {
+    server.use(
+      http.get(`${BACKEND}/auth/sessions`, () => HttpResponse.json({ error: "session revoked", code: "unauthenticated" }, { status: 401 })),
+      http.post(`${BACKEND}/auth/refresh`, () => HttpResponse.json({ error: "no", code: "unauthenticated" }, { status: 401 })),
+    );
+    const res = await call(GET, "auth/sessions", { cookie: "osp_at=sat_revoked; osp_rt=srt_revoked" });
+    expect(res.status).toBe(401);
+    expect(await res.json()).toMatchObject({ code: "unauthenticated" });
+    expect(res.headers.getSetCookie().join(" ")).toContain("osp_rt=;");
+  });
+
   it("passes download headers and the body through", async () => {
     server.use(
       http.get(`${BACKEND}/assets/a1/content`, () =>

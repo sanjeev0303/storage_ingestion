@@ -140,6 +140,7 @@ func run() error {
 		Assets: assets, Uploads: uploads, Jobs: jobs, Quarantine: postgres.NewQuarantineRepository(db),
 		Policies: postgres.NewRetentionPolicyRepository(db), Holds: holds, Deletions: postgres.NewDeletionRepository(db),
 		Events: events, Cursors: cursors, Storage: storage, Metrics: registry, Router: router, Packs: packs,
+		Locks: postgres.NewObjectLockRepository(db), Shared: assets,
 	}, assetservice.Config{
 		Owner: owner, QuarantineBucket: bucket, DeliveryBucket: deliveryBucket, DeliveryPrefix: lc.PromotionPrefix,
 		Platform: assetservice.PlatformRetention{
@@ -178,7 +179,7 @@ func run() error {
 	cleanup, err := cleanupservice.NewService(cleanupservice.Dependencies{
 		Storage: storage, Inventory: postgres.NewInventoryRepository(db), Cursors: cursors, Uploads: uploads,
 		Assets: assets, Jobs: jobs, Holds: holds, Events: events, Metrics: registry,
-		Router: router, Connections: postgres.NewStorageConnectionRepository(db), Packs: packs,
+		Router: router, Connections: postgres.NewStorageConnectionRepository(db), Packs: packs, Shared: assets,
 	}, cleanupservice.Config{
 		Owner: owner, QuarantineBucket: bucket, DeliveryBucket: deliveryBucket, DeliveryPrefix: lc.PromotionPrefix,
 		TenantID: *tenant, PageSize: lc.ScanPageSize, PagesPerRun: lc.ScanPages, Lease: lc.LeaseDuration,

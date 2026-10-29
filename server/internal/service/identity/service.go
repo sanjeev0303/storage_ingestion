@@ -54,6 +54,8 @@ type Service struct {
 	// sign-in takes as long whether or not the account exists.
 	dummyHash string
 	now       func() time.Time
+	// sso is nil while single sign-on is off (EnableSSO).
+	sso *sso
 }
 
 func NewService(deps Dependencies, sec config.Security) (*Service, error) {

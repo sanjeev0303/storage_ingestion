@@ -111,6 +111,14 @@ func (s *Service) evaluate(ctx context.Context, asset model.Asset, asOf time.Tim
 	if err != nil {
 		return err
 	}
+	if !s.cfg.DryRun {
+		if err := s.syncLock(ctx, asset, policy); err != nil {
+			// The next pass tries again; the platform's own checks still
+			// protect the asset meanwhile.
+			s.deps.Metrics.Add("object_lock_errors", 1)
+			s.log.Warn("object lock not applied", "asset_id", asset.ID, "tenant_id", asset.TenantID, "error", retry.Sanitize(err))
+		}
+	}
 	if !policy.Expired(asset.CreatedAt, asOf) {
 		return nil
 	}
@@ -439,6 +447,16 @@ func (s *Service) blockers(ctx context.Context, asset model.Asset) ([]string, ti
 		reasons = append(reasons, fmt.Sprintf("retention until %s (%s)", retainUntil.Format(time.RFC3339), policy.MinRetentionFrom))
 		until = earlier(until, retainUntil)
 	}
+	// A lock applied under an earlier, longer policy still binds the
+	// provider.
+	reason, lockedUntil, err := s.lockBlocker(ctx, asset)
+	if err != nil {
+		return nil, until, err
+	}
+	if reason != "" {
+		reasons = append(reasons, reason)
+		until = earlier(until, lockedUntil)
+	}
 
 	records, err := s.deps.Quarantine.ListForAsset(ctx, asset.TenantID, asset.ID)
 	if err != nil {
@@ -488,6 +506,9 @@ type target struct {
 	bucket    string
 	key       string
 	versionID string
+	// shared is the stored object of the asset this one shares content
+	// with: it goes only with its last user.
+	shared bool
 }
 
 // place resolves one of an asset's connections.
@@ -535,6 +556,10 @@ func (s *Service) targets(ctx context.Context, asset model.Asset, job model.Proc
 	if job.PromotionKey != "" && job.PromotionKey != delivery {
 		targets = append(targets, target{storage: ready, bucket: readyPlace.ReadyBucket, key: job.PromotionKey})
 	}
+	if asset.SharedFrom != "" && asset.ObjectKey != delivery {
+		targets = append(targets, target{storage: ready, bucket: readyPlace.ReadyBucket, key: asset.ObjectKey,
+			versionID: asset.StorageVersionID, shared: true})
+	}
 	return targets, nil
 }
 
@@ -545,7 +570,11 @@ func (s *Service) objectKeys(ctx context.Context, asset model.Asset, job model.P
 	}
 	var keys []string
 	for _, t := range targets {
-		keys = append(keys, t.key)
+		// Others using shared bytes never block a deletion: the bytes stay
+		// until their last user goes (removeObjects).
+		if !t.shared {
+			keys = append(keys, t.key)
+		}
 	}
 	return keys, nil
 }
@@ -562,7 +591,22 @@ func (s *Service) removeObjects(ctx context.Context, asset model.Asset) error {
 	if err != nil {
 		return err
 	}
+	if err := s.releaseLockHold(ctx, asset); err != nil {
+		return err
+	}
 	for _, t := range targets {
+		if s.deps.Shared != nil {
+			user, err := s.deps.Shared.KeyInUse(ctx, asset.TenantID, t.key, asset.ID)
+			if err != nil {
+				return err
+			}
+			if user != "" {
+				// Deduplicated content: another asset still serves these
+				// bytes, so this asset lets go of them without deleting.
+				s.deps.Metrics.Add("shared_bytes_kept", 1)
+				continue
+			}
+		}
 		if err := s.removeExact(ctx, t); err != nil {
 			return err
 		}

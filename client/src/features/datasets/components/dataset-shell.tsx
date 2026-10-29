@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import type { ReactNode } from "react";
 import { PageHeader, TabNav } from "@/components/ui/page";
 import { ErrorState, Skeleton } from "@/components/ui/states";
@@ -10,6 +11,8 @@ import { DraftBadge } from "./draft-notice";
 
 export function DatasetShell({ id, children }: { id: string; children: ReactNode }) {
   const dataset = useDataset(id);
+  const parentId = dataset.data?.branch?.parent_id ?? "";
+  const parent = useDataset(parentId, Boolean(parentId));
   const base = `/app/datasets/${id}`;
   const tabs = [
     { href: base, label: "Overview" },
@@ -18,6 +21,7 @@ export function DatasetShell({ id, children }: { id: string; children: ReactNode
     { href: `${base}/imports`, label: "Imports" },
     { href: `${base}/validation`, label: "Validation" },
     { href: `${base}/lineage`, label: "Lineage" },
+    { href: `${base}/branches`, label: dataset.data?.branch ? "Branch" : "Branches" },
   ];
 
   if (dataset.isPending) {
@@ -34,6 +38,15 @@ export function DatasetShell({ id, children }: { id: string; children: ReactNode
   }
 
   const archived = dataset.data.lifecycle_status === "ARCHIVED";
+  const branch = dataset.data.branch;
+  const parentName = parent.data?.name ?? "parent dataset";
+  const crumbs = branch
+    ? [
+        { label: "Datasets", href: "/app/datasets" },
+        { label: parentName, href: `/app/datasets/${branch.parent_id}` },
+        { label: `Branch ${branch.name}` },
+      ]
+    : [{ label: "Datasets", href: "/app/datasets" }, { label: dataset.data.name }];
 
   return (
     <>
@@ -47,8 +60,18 @@ export function DatasetShell({ id, children }: { id: string; children: ReactNode
             {!archived && <DraftBadge />}
           </span>
         }
-        crumbs={[{ label: "Datasets", href: "/app/datasets" }, { label: dataset.data.name }]}
+        crumbs={crumbs}
       />
+      {branch && (
+        <p role="note" className="neo-in-sm mb-6 px-4 py-3 text-base">
+          A branch of{" "}
+          <Link href={`/app/datasets/${branch.parent_id}`} className="font-semibold underline underline-offset-2">
+            {parentName}
+          </Link>
+          . Its changes reach the parent only through a merge. New files land in the parent&apos;s namespace and are
+          pinned here.
+        </p>
+      )}
       {archived && (
         <div role="status" className="neo-in mb-6 p-5">
           <h2 className="text-md font-semibold">This dataset is archived</h2>

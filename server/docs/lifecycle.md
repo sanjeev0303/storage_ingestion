@@ -279,3 +279,14 @@ TEST_CLAMAV_ADDRESS=127.0.0.1:3310 go test ./tests/integration/
 - Datasets are fixed at upload; there is no API to move an asset between datasets.
 - Retention is by age since creation; there is no "last access" tracking.
 - Reconciliation's own `RECONCILIATION_UNRECORDED_ACTION=delete` still deletes unrecorded quarantine objects on one sighting. Keep it at `report` and let the cleanup worker's mark-and-sweep handle them.
+
+## Object Lock
+
+On a bucket created with S3 Object Lock, retention and legal holds are also set on each asset's stored version. The provider itself then refuses to delete it early, whoever holds the bucket's keys: a leaked key, a careless script or a lifecycle rule in the customer's own account.
+
+- **When:** retention evaluation (cleanup worker) applies them to every `AVAILABLE` asset whose delivery copy has a recorded version. It sets the retention date `created_at + min_retention` in GOVERNANCE mode, and a legal hold while any hold covers the asset. The bucket's setting is read once per ten minutes per connection.
+- **What is recorded:** applied settings go to `object_locks` (migration `000023_object_lock.sql`). An unchanged lock is not sent again.
+- **Retention only grows:** a lock's date is extended, never shortened. A deletion waits (`PROTECTED`, "object lock until …") for the lock's date even when the policy was lowered since.
+- **Holds:** a hold that is no longer active is taken off the version before its deletion, so a soft-deleted asset is not stuck behind its own lock.
+- **Other providers:** GCS, Azure and S3 buckets without Object Lock are left alone.
+- **Changing it:** GOVERNANCE can be shortened only by a principal allowed `s3:BypassGovernanceRetention`. COMPLIANCE mode is not used, because nobody could undo a mistaken date.

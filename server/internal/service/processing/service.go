@@ -641,6 +641,32 @@ func (s *Service) scan(ctx context.Context, job *model.ProcessingJob, asset mode
 	}
 	s.deps.Metrics.Set("scanner_up", 1)
 
+	// Bytes the tenant already had scanned CLEAN by this scanner at this
+	// signature version need no second scan. Promotion still checks that the
+	// published copy has exactly these bytes (size and SHA-256), so the
+	// verdict is about what gets published. New signatures change the
+	// version, and the next upload is scanned again.
+	version := s.scannerVersion(ctx)
+	if version != "" {
+		from, ok, err := s.deps.Jobs.FindCleanScan(ctx, asset.TenantID, asset.ID, asset.ChecksumSHA256, asset.SizeBytes, job.Scanner, version)
+		if err != nil {
+			return "", err
+		}
+		if ok {
+			scannedAt := s.now()
+			job.ScannedAt = &scannedAt
+			job.ScanResult = model.ScanClean
+			job.ScanSignature = ""
+			job.ScanError = ""
+			job.ScannerVersion = version
+			job.ScanReusedFrom = from
+			job.Stage = model.StagePromote
+			s.deps.Metrics.Add("scan_reused", 1)
+			s.event(ctx, *job, "scan_reused", "CLEAN: the same SHA-256 and size were scanned clean for asset "+from+" by "+version)
+			return s.save(ctx, job)
+		}
+	}
+
 	storage, bucket, key, err := s.staging(ctx, asset)
 	if err != nil {
 		return "", err
@@ -685,6 +711,13 @@ func (s *Service) scan(ctx context.Context, job *model.ProcessingJob, asset mode
 			return s.reject(ctx, job, asset, model.QuarantineVerificationFailed, model.FailureChecksumMismatch)
 		}
 		job.ScanSignature = ""
+		job.ScanReusedFrom = ""
+		// Kept only if the signatures did not change during the scan, so a
+		// later upload of these bytes can rely on it.
+		job.ScannerVersion = ""
+		if version != "" && s.scannerVersion(ctx) == version {
+			job.ScannerVersion = version
+		}
 		job.Stage = model.StagePromote
 		s.event(ctx, *job, "scanned", "CLEAN")
 		return s.save(ctx, job)
@@ -699,6 +732,20 @@ func (s *Service) scan(ctx context.Context, job *model.ProcessingJob, asset mode
 	default:
 		return s.scanIncomplete(ctx, job, result)
 	}
+}
+
+// scannerVersion is the scanner's current engine and signature version, or
+// "" when it cannot say, which turns verdict reuse off.
+func (s *Service) scannerVersion(ctx context.Context) string {
+	versioned, ok := s.deps.Scanner.(interfaces.VersionedScanner)
+	if !ok {
+		return ""
+	}
+	version, err := versioned.Version(ctx)
+	if err != nil {
+		return ""
+	}
+	return version
 }
 
 // byteCount counts the bytes written to it.

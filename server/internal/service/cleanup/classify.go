@@ -137,6 +137,18 @@ func (s *Service) classifyDelivery(ctx context.Context, a area, key string) (ver
 		return skipped("other_connection", "the asset is stored on another storage connection"), nil
 	}
 
+	// Bytes stored once for identical uploads outlive the asset that first
+	// stored them while any other asset still points at them.
+	if s.deps.Shared != nil && (asset.Status == model.AssetStatusDeleted || asset.Status == model.AssetStatusRejected) {
+		user, err := s.deps.Shared.KeyInUse(ctx, tenantID, key, asset.ID)
+		if err != nil {
+			return verdict{}, err
+		}
+		if user != "" {
+			return skipped("shared", "asset "+user+" still uses these bytes"), nil
+		}
+	}
+
 	owned := verdict{tenantID: tenantID, assetID: asset.ID, dataset: asset.Dataset}
 	switch asset.Status {
 	case model.AssetStatusAvailable:

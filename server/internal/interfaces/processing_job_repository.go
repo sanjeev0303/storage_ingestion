@@ -38,6 +38,11 @@ type ProcessingJobRepository interface {
 	// still holds the lease, keeping the lease. model.ErrLeaseLost otherwise.
 	SaveProgress(ctx context.Context, job model.ProcessingJob, owner string, now time.Time) error
 
+	// FindCleanScan returns another of the tenant's assets with the same
+	// SHA-256 and size whose job recorded a CLEAN verdict from scanner at
+	// version. ok is false when there is none.
+	FindCleanScan(ctx context.Context, tenantID, assetID, sha256 string, size int64, scanner, version string) (fromAssetID string, ok bool, err error)
+
 	// Renew extends owner's unexpired lease to now+lease.
 	// model.ErrLeaseLost when the lease expired, the job ended or another
 	// claim holds it.

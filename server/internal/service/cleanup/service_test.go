@@ -491,3 +491,36 @@ func TestTenantScopeOnlyTouchesThatTenant(t *testing.T) {
 		t.Fatal("a tenant-scoped cleanup must touch only that tenant's objects")
 	}
 }
+
+type sharedKeys map[string]string
+
+func (k sharedKeys) KeyInUse(_ context.Context, _, key, exceptID string) (string, error) {
+	if user := k[key]; user != exceptID {
+		return user, nil
+	}
+	return "", nil
+}
+
+func TestSharedBytesOutliveTheirDeletedOwner(t *testing.T) {
+	e := newEnv(t)
+	e.clock = e.clock.Add(-2 * time.Hour)
+	e.asset("first", model.AssetStatusDeleted, "assets/t1/first")
+	e.storage.PutObject("assets/t1/first", []byte("data"))
+	e.asset("gone", model.AssetStatusDeleted, "assets/t1/gone")
+	e.storage.PutObject("assets/t1/gone", []byte("data"))
+	e.clock = e.clock.Add(2 * time.Hour)
+	start := e.clock
+
+	svc := e.service()
+	svc.deps.Shared = sharedKeys{"assets/t1/first": "second"}
+	cycle(t, svc)
+	e.clock = start.Add(25 * time.Hour)
+	cycle(t, svc)
+
+	if !e.present("assets/t1/first") {
+		t.Fatal("bytes another asset still uses were swept")
+	}
+	if e.present("assets/t1/gone") {
+		t.Fatal("a deleted asset's unshared bytes were kept")
+	}
+}

@@ -237,7 +237,21 @@ type VersionMember struct {
 	ContentType    string
 	ChecksumSHA256 string
 	Metadata       map[string]string
+	// Availability says whether the pinned bytes can still be read:
+	// AVAILABLE, DELETION_PENDING (soft-deleted, restorable) or ERASED
+	// (deleted for good since ErasedAt). A snapshot keeps the record of
+	// every member it pinned; erasure removes the bytes, not the record.
+	// Not part of the canonical line.
+	Availability string
+	ErasedAt     *time.Time
 }
+
+// Availability of a version member's bytes.
+const (
+	MemberAvailable       = "AVAILABLE"
+	MemberDeletionPending = "DELETION_PENDING"
+	MemberErased          = "ERASED"
+)
 
 // CanonicalLine is the member's line in its version's canonical manifest:
 // a JSON object with the keys below in this order, as Go's encoding/json
@@ -288,6 +302,31 @@ const (
 	ManifestSourceInline = "INLINE"
 	ManifestSourceStaged = "STAGED"
 )
+
+// ObjectDatasets says where one catalog object is used: the datasets whose
+// draft holds it, and the snapshots that pinned one of its versions.
+type ObjectDatasets struct {
+	Members   []ObjectMembership
+	Snapshots []ObjectSnapshot
+}
+
+// ObjectMembership is a dataset whose draft holds the object.
+type ObjectMembership struct {
+	DatasetID   string
+	DatasetName string
+	Label       string
+	Split       string
+	AddedAt     time.Time
+}
+
+// ObjectSnapshot is a snapshot that pinned one version of the object.
+type ObjectSnapshot struct {
+	DatasetID     string
+	DatasetName   string
+	VersionID     string
+	Version       int
+	ObjectVersion int
+}
 
 // ManifestImport reads a JSONL manifest into a dataset's draft.
 type ManifestImport struct {
@@ -698,4 +737,117 @@ type LineagePage struct {
 	After string
 	// Truncated: the traversal reached its depth limit with edges beyond.
 	Truncated bool
+}
+
+// Kinds of difference between two dataset versions, per catalog object.
+const (
+	DiffAdded     = "ADDED"     // in the target version only
+	DiffRemoved   = "REMOVED"   // in the base version only
+	DiffChanged   = "CHANGED"   // in both, with different bytes (SHA-256)
+	DiffRelabeled = "RELABELED" // same bytes, different label, split or path
+)
+
+// VersionDiff compares two versions of one dataset by object. Summary
+// counts every member; Entries is one page of the differences, ordered by
+// object ID, and Next is the object ID to continue after ("" at the end).
+type VersionDiff struct {
+	BaseVersionID   string
+	TargetVersionID string
+	Added           int64
+	Removed         int64
+	Changed         int64
+	Relabeled       int64
+	Unchanged       int64
+	Entries         []VersionDiffEntry
+	Next            string
+}
+
+type VersionDiffEntry struct {
+	ObjectID     string
+	Kind         string
+	BasePath     string
+	TargetPath   string
+	BaseSHA256   string
+	TargetSHA256 string
+	BaseLabel    string
+	TargetLabel  string
+	BaseSplit    string
+	TargetSplit  string
+}
+
+// ─── Branches and merges ──────────────────────────────────────────────
+
+// ErrMergeConflict: the merge found objects both sides changed since their
+// common ancestor, and its strategy says to stop.
+var ErrMergeConflict = errors.New("the merge has conflicts")
+
+// ErrBranchExists: the dataset already has a branch of that name.
+var ErrBranchExists = errors.New("the dataset already has a branch of that name")
+
+type MergeStrategy string
+
+const (
+	// MergeFail changes nothing when there is a conflict.
+	MergeFail MergeStrategy = "FAIL"
+	// MergeSource takes the source's side of every conflict.
+	MergeSource MergeStrategy = "SOURCE"
+	// MergeTarget keeps the target's side of every conflict.
+	MergeTarget MergeStrategy = "TARGET"
+)
+
+// MergeSide is one object's membership on one side of a merge.
+type MergeSide struct {
+	Present  bool
+	AssetID  string
+	Label    string
+	Split    string
+	Metadata map[string]string
+}
+
+type MergeConflict struct {
+	ObjectID  string
+	Namespace string
+	Path      string
+	Base      MergeSide
+	Source    MergeSide
+	Target    MergeSide
+}
+
+type MergeInput struct {
+	TenantID        string
+	TargetID        string
+	SourceID        string
+	SourceVersionID string
+	BaseVersionID   string
+	// BranchID is whichever of the two is the branch: its merge base moves
+	// to the source version.
+	BranchID       string
+	Strategy       MergeStrategy
+	DryRun         bool
+	IdempotencyKey string
+	Actor          string
+	Now            time.Time
+	// MaxConflicts bounds the conflicts returned (all are counted).
+	MaxConflicts int
+}
+
+// MergeResult is what a merge changed in the target's draft, or would
+// change on a dry run. AlreadySame counts objects the source changed that
+// the target already has the same way.
+type MergeResult struct {
+	ID              string
+	TargetID        string
+	SourceID        string
+	SourceVersionID string
+	BaseVersionID   string
+	Strategy        MergeStrategy
+	Added           int64
+	Updated         int64
+	Removed         int64
+	AlreadySame     int64
+	Conflicts       int64
+	ConflictList    []MergeConflict
+	Applied         bool
+	CreatedBy       string
+	CreatedAt       time.Time
 }

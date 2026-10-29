@@ -86,6 +86,12 @@ func (s *Service) Test(ctx context.Context, p model.Principal, connectionID stri
 	if c.Status == model.ConnectionDisabled {
 		return model.StorageConnection{}, TestResult{}, fmt.Errorf("%w: enable it to test it", model.ErrConnectionNotActive)
 	}
+	// Every connection takes uploads, so the test that activates one must
+	// prove it can write; otherwise a read-only key passes and uploads fail
+	// later.
+	if c.Status == model.ConnectionPending {
+		probe = true
+	}
 	return s.test(ctx, p, c, probe)
 }
 

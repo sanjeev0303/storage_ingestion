@@ -166,3 +166,33 @@ func TestPing(t *testing.T) {
 		t.Fatal("ping to a closed port must fail")
 	}
 }
+
+func TestVersion(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for _, reply := range []string{"ClamAV 1.4.3/27800/Mon Oct 27 08:23:00 2026\n\x00", "UNKNOWN COMMAND\x00"} {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			command, _ := bufio.NewReader(conn).ReadString(0)
+			if command == "zVERSION\x00" {
+				conn.Write([]byte(reply))
+			}
+			conn.Close()
+		}
+	}()
+
+	s := New(ln.Addr().String(), time.Second)
+	version, err := s.Version(context.Background())
+	if err != nil || version != "ClamAV 1.4.3/27800/Mon Oct 27 08:23:00 2026" {
+		t.Fatalf("version %q, %v", version, err)
+	}
+	if _, err := s.Version(context.Background()); err == nil {
+		t.Fatal("an answer that is not a version must be an error, so no verdict is reused")
+	}
+}

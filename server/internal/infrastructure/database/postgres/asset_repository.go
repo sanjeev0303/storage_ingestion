@@ -61,7 +61,8 @@ const assetColumns = `
 	content_type, size_bytes, COALESCE(checksum_sha256, ''), status,
 	COALESCE(rejection_reason, ''), COALESCE(storage_etag, ''), COALESCE(storage_version_id, ''),
 	published_at, created_at, updated_at, COALESCE(dataset, ''),
-	COALESCE(object_id, ''), COALESCE(version, 0), metadata, storage_connection_id, staging_connection_id
+	COALESCE(object_id, ''), COALESCE(version, 0), metadata, storage_connection_id, staging_connection_id,
+	COALESCE(shared_from, '')
 `
 
 func scanAsset(row pgx.Row) (*model.Asset, error) {
@@ -74,6 +75,7 @@ func scanAsset(row pgx.Row) (*model.Asset, error) {
 		&asset.RejectionReason, &asset.StorageETag, &asset.StorageVersionID,
 		&asset.PublishedAt, &asset.CreatedAt, &asset.UpdatedAt, &asset.Dataset,
 		&asset.ObjectID, &asset.Version, &metadata, &asset.StorageConnectionID, &asset.StagingConnectionID,
+		&asset.SharedFrom,
 	)
 	if err != nil {
 		return nil, err

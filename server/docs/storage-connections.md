@@ -140,7 +140,7 @@ Every route needs a signed-in member of the organization. The `storage.*` permis
 | `GET /api/v1/storage-connections` | `storage.read` | the platform connection, the organization's own, `default_connection_id` |
 | `GET /api/v1/storage-connections/{id}` | `storage.read` | `ETag` is the revision |
 | `PATCH /api/v1/storage-connections/{id}` | `storage.manage` | name, region, endpoint, path style, staging mode; `If-Match` or `revision`; on an `ACTIVE` or `DISABLED` connection a new endpoint, region or path style is tested first and refused with 422 and the test result if it fails (see below) |
-| `POST /api/v1/storage-connections/{id}/test` | `storage.manage` | `{"write_probe": true}` also writes, reads back and deletes one small object of its own under the ready prefix; also reads the metadata of one published object the connection holds, if any; a pass activates a `PENDING` connection |
+| `POST /api/v1/storage-connections/{id}/test` | `storage.manage` | `{"write_probe": true}` also writes, reads back and deletes one small object of its own under the ready prefix; also reads the metadata of one published object the connection holds, if any; a pass activates a `PENDING` connection. Testing a `PENDING` connection, and rotating credentials, always runs the write probe, so a read-only key cannot be activated |
 | `POST /api/v1/storage-connections/{id}/rotate-credentials` | `storage.manage` | tested before stored; 422 with the test result when refused |
 | `POST /api/v1/storage-connections/{id}/set-default` | `storage.manage` | `ACTIVE` connections or `platform` |
 | `POST /api/v1/storage-connections/{id}/disable` | `storage.manage` | not the default; existing work keeps draining |

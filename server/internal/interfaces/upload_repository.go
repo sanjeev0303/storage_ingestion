@@ -35,6 +35,10 @@ type UploadRepository interface {
 		key string,
 	) (*model.UploadSession, error)
 
+	// List pages the tenant's upload sessions newest first, of one status
+	// when status is not empty. next is "" on the last page.
+	List(ctx context.Context, tenantID string, status model.UploadStatus, after string, limit int) (uploads []model.UploadSession, next string, err error)
+
 	Update(
 		ctx context.Context,
 		upload *model.UploadSession,

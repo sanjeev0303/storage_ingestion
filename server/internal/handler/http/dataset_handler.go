@@ -42,11 +42,17 @@ func (h *DatasetHandler) Routes() map[string]nethttp.HandlerFunc {
 		"GET /api/v1/datasets/{id}":                              h.get,
 		"PATCH /api/v1/datasets/{id}":                            h.update,
 		"POST /api/v1/datasets/{id}/archive":                     h.archive,
+		"POST /api/v1/datasets/{id}/branches":                    h.createBranch,
+		"GET /api/v1/datasets/{id}/branches":                     h.branches,
+		"POST /api/v1/datasets/{id}/merges":                      h.merge,
+		"GET /api/v1/datasets/{id}/merges":                       h.merges,
 		"GET /api/v1/datasets/{id}/members":                      h.members,
 		"POST /api/v1/datasets/{id}/members":                     h.addMembers,
 		"DELETE /api/v1/datasets/{id}/members/{memberID}":        h.removeMember,
 		"POST /api/v1/datasets/{id}/manifests":                   h.importManifest,
+		"GET /api/v1/datasets/{id}/manifests":                    h.manifestImports,
 		"GET /api/v1/datasets/{id}/manifests/{jobID}":            h.manifestImport,
+		"GET /api/v1/catalog/objects/{id}/datasets":              h.objectDatasets,
 		"GET /api/v1/datasets/{id}/manifests/{jobID}/errors":     h.importErrors,
 		"POST /api/v1/datasets/{id}/manifests/{jobID}/submit":    h.submitManifest,
 		"POST /api/v1/datasets/{id}/manifests/{jobID}/cancel":    h.cancelImport,
@@ -54,6 +60,7 @@ func (h *DatasetHandler) Routes() map[string]nethttp.HandlerFunc {
 		"GET /api/v1/datasets/{id}/versions":                     h.versions,
 		"GET /api/v1/datasets/{id}/versions/{versionID}":         h.version,
 		"GET /api/v1/datasets/{id}/versions/{versionID}/members": h.versionMembers,
+		"GET /api/v1/datasets/{id}/versions/{versionID}/diff":    h.versionDiff,
 		"POST /api/v1/datasets/{id}/validations":                 h.validate,
 		"GET /api/v1/datasets/{id}/validations":                  h.validations,
 		"GET /api/v1/validation-jobs/{jobID}":                    h.validationJob,
@@ -93,6 +100,10 @@ func managedDatasetResponse(d model.Dataset) response.DatasetResponse {
 		ProfileID: d.ProfileID, ProfileVersion: d.ProfileVersion, LatestReportID: d.LatestReportID,
 		Derivation: derivationInfo(d.Derivation), CreatedBy: d.CreatedBy, UpdatedBy: d.UpdatedBy, ArchivedAt: d.ArchivedAt,
 		StorageConnectionID: d.StorageConnectionID,
+	}
+	if d.ParentID != "" {
+		out.Branch = &response.BranchInfo{ParentID: d.ParentID, Name: d.BranchName, ForkVersionID: d.ForkVersionID,
+			MergeBaseVersionID: d.MergeBaseVersionID}
 	}
 	if out.Tags == nil {
 		out.Tags = []string{}
@@ -533,7 +544,8 @@ func (h *DatasetHandler) versionMembers(w nethttp.ResponseWriter, r *nethttp.Req
 		out.Members = append(out.Members, response.VersionMemberResponse{
 			Ordinal: m.Ordinal, ObjectID: m.ObjectID, VersionID: m.AssetID, ObjectVersion: m.ObjectVersion, Path: m.Path,
 			Label: m.Label, Split: m.Split, SizeBytes: m.SizeBytes, ContentType: m.ContentType, ChecksumSHA256: m.ChecksumSHA256,
-			Metadata: metadata,
+			Metadata:                  metadata,
+			VersionMemberAvailability: response.VersionMemberAvailability{Availability: m.Availability, ErasedAt: m.ErasedAt},
 		})
 	}
 	if n := len(members); n > 0 && (limit == 0 || n == limit) {
@@ -601,6 +613,84 @@ func (h *DatasetHandler) validations(w nethttp.ResponseWriter, r *nethttp.Reques
 		out.Jobs = append(out.Jobs, validationJobResponse(j))
 	}
 	writeJSON(w, nethttp.StatusOK, out)
+}
+
+// versionDiff compares the version in the path with ?against=, by object.
+func (h *DatasetHandler) versionDiff(w nethttp.ResponseWriter, r *nethttp.Request) {
+	q := r.URL.Query()
+	limit, err := datasetInt(q.Get("limit"))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	diff, err := h.service.DiffVersions(r.Context(), principalOf(r), r.PathValue("id"), q.Get("against"), r.PathValue("versionID"), q.Get("after"), limit)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	entries := make([]map[string]any, 0, len(diff.Entries))
+	for _, e := range diff.Entries {
+		entry := map[string]any{"object_id": e.ObjectID, "kind": e.Kind}
+		if e.Kind != model.DiffAdded {
+			entry["base"] = map[string]any{"path": e.BasePath, "checksum_sha256": e.BaseSHA256, "label": e.BaseLabel, "split": e.BaseSplit}
+		}
+		if e.Kind != model.DiffRemoved {
+			entry["target"] = map[string]any{"path": e.TargetPath, "checksum_sha256": e.TargetSHA256, "label": e.TargetLabel, "split": e.TargetSplit}
+		}
+		entries = append(entries, entry)
+	}
+	out := map[string]any{
+		"base_version_id": diff.BaseVersionID, "target_version_id": diff.TargetVersionID,
+		"summary": map[string]int64{
+			"added": diff.Added, "removed": diff.Removed, "changed": diff.Changed,
+			"relabeled": diff.Relabeled, "unchanged": diff.Unchanged,
+		},
+		"differences": entries,
+	}
+	if diff.Next != "" {
+		out["next_after"] = diff.Next
+	}
+	writeJSON(w, nethttp.StatusOK, out)
+}
+
+func (h *DatasetHandler) manifestImports(w nethttp.ResponseWriter, r *nethttp.Request) {
+	limit, err := datasetInt(r.URL.Query().Get("limit"))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	page, err := h.service.Imports(r.Context(), principalOf(r), r.PathValue("id"), r.URL.Query().Get("cursor"), limit)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	out := response.ManifestImportPageResponse{Imports: make([]response.ManifestImportResponse, 0, len(page.Items)), NextCursor: page.NextCursor}
+	for _, imp := range page.Items {
+		out.Imports = append(out.Imports, importResponse(imp))
+	}
+	writeJSON(w, nethttp.StatusOK, out)
+}
+
+func (h *DatasetHandler) objectDatasets(w nethttp.ResponseWriter, r *nethttp.Request) {
+	found, err := h.service.ObjectDatasets(r.Context(), principalOf(r), r.PathValue("id"))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	members := make([]map[string]any, 0, len(found.Members))
+	for _, m := range found.Members {
+		members = append(members, map[string]any{
+			"dataset_id": m.DatasetID, "dataset_name": m.DatasetName, "label": m.Label, "split": m.Split, "added_at": m.AddedAt,
+		})
+	}
+	snapshots := make([]map[string]any, 0, len(found.Snapshots))
+	for _, s := range found.Snapshots {
+		snapshots = append(snapshots, map[string]any{
+			"dataset_id": s.DatasetID, "dataset_name": s.DatasetName, "version_id": s.VersionID,
+			"version": s.Version, "object_version": s.ObjectVersion,
+		})
+	}
+	writeJSON(w, nethttp.StatusOK, map[string]any{"datasets": members, "snapshots": snapshots})
 }
 
 func (h *DatasetHandler) validationJob(w nethttp.ResponseWriter, r *nethttp.Request) {
@@ -830,6 +920,8 @@ func (h *DatasetHandler) fail(w nethttp.ResponseWriter, err error) {
 		status, code = nethttp.StatusConflict, "invalid_state"
 	case errors.Is(err, dataset.ErrManifestNotStaged):
 		status, code = nethttp.StatusConflict, "manifest_not_uploaded"
+	case errors.Is(err, model.ErrBranchExists):
+		status, code = nethttp.StatusConflict, "branch_exists"
 	case errors.Is(err, model.ErrLineageCycle):
 		status, code = nethttp.StatusConflict, "lineage_cycle"
 	case errors.Is(err, dataset.ErrManifestTooLarge):
@@ -847,4 +939,109 @@ func (h *DatasetHandler) fail(w nethttp.ResponseWriter, err error) {
 		return
 	}
 	writeJSON(w, status, problem{Error: err.Error(), Code: code})
+}
+
+// ─── Branches and merges ──────────────────────────────────────────────
+
+func (h *DatasetHandler) createBranch(w nethttp.ResponseWriter, r *nethttp.Request) {
+	var body struct {
+		Name          string `json:"name"`
+		FromVersionID string `json:"from_version_id"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	d, err := h.service.CreateBranch(r.Context(), principalOf(r), r.PathValue("id"), body.Name, body.FromVersionID)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	writeDataset(w, nethttp.StatusCreated, d)
+}
+
+func (h *DatasetHandler) branches(w nethttp.ResponseWriter, r *nethttp.Request) {
+	list, err := h.service.Branches(r.Context(), principalOf(r), r.PathValue("id"))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	out := make([]response.DatasetResponse, 0, len(list))
+	for _, d := range list {
+		out = append(out, managedDatasetResponse(d))
+	}
+	writeJSON(w, nethttp.StatusOK, map[string]any{"branches": out})
+}
+
+type mergeSideResponse struct {
+	Present  bool              `json:"present"`
+	AssetID  string            `json:"version_id,omitempty"`
+	Label    string            `json:"label,omitempty"`
+	Split    string            `json:"split,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
+func mergeSide(s model.MergeSide) mergeSideResponse {
+	return mergeSideResponse{Present: s.Present, AssetID: s.AssetID, Label: s.Label, Split: s.Split, Metadata: s.Metadata}
+}
+
+func mergeResponse(m model.MergeResult) map[string]any {
+	conflicts := make([]map[string]any, 0, len(m.ConflictList))
+	for _, c := range m.ConflictList {
+		conflicts = append(conflicts, map[string]any{
+			"object_id": c.ObjectID, "namespace": c.Namespace, "path": c.Path,
+			"base": mergeSide(c.Base), "source": mergeSide(c.Source), "target": mergeSide(c.Target),
+		})
+	}
+	out := map[string]any{
+		"target_dataset_id": m.TargetID, "source_dataset_id": m.SourceID, "source_version_id": m.SourceVersionID,
+		"base_version_id": m.BaseVersionID, "strategy": m.Strategy, "applied": m.Applied,
+		"added": m.Added, "updated": m.Updated, "removed": m.Removed, "already_same": m.AlreadySame,
+		"conflicts": m.Conflicts, "conflict_list": conflicts,
+	}
+	if m.Applied {
+		out["id"], out["created_by"], out["created_at"] = m.ID, m.CreatedBy, m.CreatedAt
+	}
+	return out
+}
+
+func (h *DatasetHandler) merge(w nethttp.ResponseWriter, r *nethttp.Request) {
+	var body struct {
+		SourceDatasetID string `json:"source_dataset_id"`
+		SourceVersionID string `json:"source_version_id"`
+		Strategy        string `json:"strategy"`
+		DryRun          bool   `json:"dry_run"`
+		IdempotencyKey  string `json:"idempotency_key"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	res, err := h.service.Merge(r.Context(), principalOf(r), r.PathValue("id"), dataset.MergeRequest{
+		SourceDatasetID: body.SourceDatasetID, SourceVersionID: body.SourceVersionID,
+		Strategy: model.MergeStrategy(strings.ToUpper(body.Strategy)), DryRun: body.DryRun, IdempotencyKey: body.IdempotencyKey,
+	})
+	if errors.Is(err, model.ErrMergeConflict) {
+		// The conflicts are the answer: nothing was changed.
+		out := mergeResponse(res)
+		out["error"], out["code"] = err.Error(), "merge_conflict"
+		writeJSON(w, nethttp.StatusConflict, out)
+		return
+	}
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	writeJSON(w, nethttp.StatusOK, mergeResponse(res))
+}
+
+func (h *DatasetHandler) merges(w nethttp.ResponseWriter, r *nethttp.Request) {
+	list, err := h.service.Merges(r.Context(), principalOf(r), r.PathValue("id"))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	out := make([]map[string]any, 0, len(list))
+	for _, m := range list {
+		out = append(out, mergeResponse(m))
+	}
+	writeJSON(w, nethttp.StatusOK, map[string]any{"merges": out})
 }

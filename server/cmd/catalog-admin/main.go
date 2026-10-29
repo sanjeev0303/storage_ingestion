@@ -140,6 +140,7 @@ func run(command string, args []string, out io.Writer) error {
 			Policies: postgres.NewRetentionPolicyRepository(db), Holds: postgres.NewLegalHoldRepository(db),
 			Deletions: postgres.NewDeletionRepository(db), Events: postgres.NewLifecycleEventRepository(db),
 			Cursors: postgres.NewCursorRepository(db), Storage: storage, Router: router, Packs: packs,
+			Shared: postgres.NewAssetRepository(db),
 		}, assetservice.Config{
 			Owner: "catalog-admin", QuarantineBucket: bucket, DeliveryBucket: deliveryBucket, DeliveryPrefix: lc.PromotionPrefix,
 			Platform: assetservice.PlatformRetention{

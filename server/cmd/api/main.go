@@ -36,6 +36,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/service/processing"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/quota"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/storageconn"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/webhook"
 	uploadservice "github.com/sanjeev0303/object-storage-platform/internal/service/upload"
 )
 
@@ -264,6 +265,11 @@ func run() error {
 	storageMetrics.Publish("storage")
 
 	routes.Ready = db.Pool.Ping
+	routes.Operations = db.OperationsStatus
+	// Single sign-on: on with the credential keyring and AUTH_SSO_REDIRECT_URIS.
+	routes.Identity.EnableSSO(postgres.NewSSORepository(db), sealer, storageregistry.Policy(storageCfg))
+	// Webhook endpoints are managed here; cmd/webhook-worker delivers.
+	routes.Webhooks = webhook.NewService(postgres.NewWebhookRepository(db), sealer, storageregistry.Policy(storageCfg), auditService)
 	if routes.MetricsAddr != "" {
 		stopMetrics := metrics.Serve(routes.MetricsAddr, db.Pool.Ping, log)
 		defer stopMetrics()
@@ -342,6 +348,7 @@ func lifecycleService(db *postgres.DB, storage *s3storage.ObjectStorage, quarant
 		Policies: postgres.NewRetentionPolicyRepository(db), Holds: postgres.NewLegalHoldRepository(db),
 		Deletions: postgres.NewDeletionRepository(db), Events: postgres.NewLifecycleEventRepository(db),
 		Cursors: postgres.NewCursorRepository(db), Storage: storage, Packs: postgres.NewPackRepository(db),
+		Locks: postgres.NewObjectLockRepository(db),
 	}, assetservice.Config{
 		Owner: "api", QuarantineBucket: quarantineBucket, DeliveryBucket: deliveryBucket, DeliveryPrefix: prefix,
 		Platform: assetservice.PlatformRetention{

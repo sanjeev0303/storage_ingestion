@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { ButtonLink } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";
@@ -15,6 +14,7 @@ import { useObject } from "../hooks";
 import { MetadataEditor } from "./metadata-editor";
 import { DeleteObjectButton, RenameButton, VersioningToggle } from "./object-actions";
 import { VersionDetail } from "./version-detail";
+import { ObjectDatasets } from "./object-datasets";
 import { VersionHistory } from "./version-history";
 
 const crumbs = [{ label: "Catalog", href: "/app/catalog" }];
@@ -121,15 +121,7 @@ export function ObjectDetail({ id }: { id: string }) {
             </div>
           </Panel>
 
-          <Panel title="Dataset membership">
-            <p className="text-base text-muted">
-              The API cannot list which datasets include this object, so none are shown here. Open{" "}
-              <Link href="/app/datasets" className="underline underline-offset-2">
-                Datasets
-              </Link>{" "}
-              and check a dataset&apos;s members to see whether it uses this path.
-            </p>
-          </Panel>
+          <ObjectDatasets objectId={object.id} />
 
           <Panel title="Record">
             <dl className="grid gap-2 text-sm">

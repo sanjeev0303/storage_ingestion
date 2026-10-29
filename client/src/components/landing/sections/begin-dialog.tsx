@@ -35,9 +35,11 @@ export function BeginDialog() {
     () => {
       const mm = gsap.matchMedia();
       mm.add("(prefers-reduced-motion: no-preference)", () => {
+        // opacity, not autoAlpha, so the fields stay in the Tab order before
+        // the form has scrolled into view (see [data-reveal] in globals.css).
         gsap.from(root.current, {
           y: 24,
-          autoAlpha: 0,
+          opacity: 0,
           duration: 0.2,
           ease: "power2.out",
           scrollTrigger: { trigger: root.current, start: "top 90%", once: true },
@@ -74,6 +76,7 @@ export function BeginDialog() {
     <form
       ref={root}
       data-ui
+      data-reveal-focus
       aria-labelledby={`${id}-title`}
       onSubmit={submit}
       data-taste-skill-ignore className="flex w-full max-w-[440px] flex-col gap-5 rounded-md border-2 border-on-accent bg-ground p-6 text-ink"

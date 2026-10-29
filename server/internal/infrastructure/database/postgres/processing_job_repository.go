@@ -32,6 +32,7 @@ const jobColumns = `
 	COALESCE(checksum_algorithm, ''), checksum_verified_at,
 	COALESCE(validation_status, ''), COALESCE(validation_reason, ''), COALESCE(detected_content_type, ''),
 	COALESCE(scanner, ''), COALESCE(scan_result, ''), COALESCE(scan_signature, ''), COALESCE(scan_error, ''), scanned_at,
+	COALESCE(scanner_version, ''), COALESCE(scan_reused_from, ''),
 	COALESCE(promotion_status, ''), COALESCE(promotion_key, ''), promoted_at,
 	started_at, completed_at, created_at, updated_at
 `
@@ -48,6 +49,7 @@ func scanJob(row pgx.Row) (model.ProcessingJob, error) {
 		&job.ChecksumAlgorithm, &job.ChecksumVerifiedAt,
 		&job.ValidationStatus, &job.ValidationReason, &job.DetectedContentType,
 		&job.Scanner, &job.ScanResult, &job.ScanSignature, &job.ScanError, &job.ScannedAt,
+		&job.ScannerVersion, &job.ScanReusedFrom,
 		&job.PromotionStatus, &job.PromotionKey, &job.PromotedAt,
 		&job.StartedAt, &job.CompletedAt, &job.CreatedAt, &job.UpdatedAt,
 	)
@@ -258,6 +260,8 @@ func (r *ProcessingJobRepository) SaveProgress(ctx context.Context, job model.Pr
 		    validation_reason = NULLIF($17, ''),
 		    scan_error = NULLIF($18, ''),
 		    promotion_status = NULLIF($19, ''),
+		    scanner_version = NULLIF($20, ''),
+		    scan_reused_from = NULLIF($21, ''),
 		    updated_at = $3
 		WHERE id = $1
 		  AND state = 'PENDING'
@@ -268,7 +272,7 @@ func (r *ProcessingJobRepository) SaveProgress(ctx context.Context, job model.Pr
 		job.Scanner, job.ScanResult, job.ScanSignature, job.ScannedAt,
 		job.PromotionKey, job.PromotedAt,
 		job.VerificationStatus, job.ChecksumSource, job.ValidationStatus, job.ValidationReason,
-		job.ScanError, job.PromotionStatus)
+		job.ScanError, job.PromotionStatus, job.ScannerVersion, job.ScanReusedFrom)
 	if err != nil {
 		return fmt.Errorf("save processing progress: %w", err)
 	}
@@ -276,6 +280,31 @@ func (r *ProcessingJobRepository) SaveProgress(ctx context.Context, job model.Pr
 		return model.ErrLeaseLost
 	}
 	return nil
+}
+
+func (r *ProcessingJobRepository) FindCleanScan(ctx context.Context, tenantID, assetID, sha256 string, size int64, scanner, version string) (string, bool, error) {
+	var from string
+	err := r.db.Pool.QueryRow(ctx, `
+		SELECT a.id
+		FROM assets a
+		JOIN processing_jobs j ON j.asset_id = a.id AND j.tenant_id = a.tenant_id
+		WHERE a.tenant_id = $1
+		  AND a.checksum_sha256 = $2
+		  AND a.size_bytes = $3
+		  AND a.id <> $4
+		  AND j.scan_result = 'CLEAN'
+		  AND j.verification_status = 'PASSED'
+		  AND j.scanner = $5
+		  AND j.scanner_version = $6
+		LIMIT 1
+	`, tenantID, sha256, size, assetID, scanner, version).Scan(&from)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("find clean scan: %w", err)
+	}
+	return from, true, nil
 }
 
 func (r *ProcessingJobRepository) Renew(ctx context.Context, jobID, owner string, now time.Time, lease time.Duration) error {

@@ -105,6 +105,7 @@ func run() error {
 	}
 	svc, err := packingservice.NewService(packingservice.Dependencies{
 		Packs: postgres.NewPackRepository(db), Assets: postgres.NewAssetRepository(db), Router: router, Metrics: registry, Log: log,
+		Shared: postgres.NewAssetRepository(db),
 	}, packingservice.Config{Packing: pc, Owner: owner})
 	if err != nil {
 		return fmt.Errorf("create packing service: %w", err)

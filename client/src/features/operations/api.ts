@@ -5,8 +5,10 @@ import type {
   DeadLetter,
   DeadLetterAction,
   DeleteAssetResponse,
+  HeldHold,
   LegalHold,
   LegalHoldRequest,
+  PolicyInEffect,
   ProcessingRecord,
   QuotaReconcileResponse,
   ReleaseQuarantineResponse,
@@ -36,6 +38,16 @@ export const releaseQuarantine = (id: string) =>
 
 export const setRetentionPolicy = (body: RetentionPolicyRequest) =>
   api<RetentionPolicyResponse>("/retention/policies", { method: "PUT", body });
+
+export const listPolicies = (signal?: AbortSignal) =>
+  api<{ policies: PolicyInEffect[] }>("/retention/policies", { signal });
+
+// Every version of one scope's policy, newest first.
+export const policyHistory = (scope: string, scopeKey: string, signal?: AbortSignal) =>
+  api<{ policies: PolicyInEffect[] }>("/retention/policies", { query: { scope, scope_key: scopeKey }, signal });
+
+export const listHolds = (includeReleased: boolean, signal?: AbortSignal) =>
+  api<{ holds: HeldHold[] }>("/legal-holds", { query: { include_released: includeReleased || undefined }, signal });
 
 export const placeLegalHold = (body: LegalHoldRequest) =>
   api<LegalHold>("/legal-holds", { method: "POST", body });

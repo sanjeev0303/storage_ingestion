@@ -5,9 +5,11 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	httpapi "github.com/sanjeev0303/object-storage-platform/internal/handler/http"
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
+	"github.com/sanjeev0303/object-storage-platform/internal/model"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/ratelimit"
 	"github.com/sanjeev0303/object-storage-platform/internal/server/middleware"
 	assetservice "github.com/sanjeev0303/object-storage-platform/internal/service/asset"
@@ -22,6 +24,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/service/quota"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/storageconn"
 	uploadservice "github.com/sanjeev0303/object-storage-platform/internal/service/upload"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/webhook"
 )
 
 // Routes configures the API. Every route but sign-in, token redemption,
@@ -54,6 +57,8 @@ type Routes struct {
 	// StorageCapabilities reports the delivery bucket's provider
 	// capabilities (GET /api/v1/catalog/capabilities); optional.
 	StorageCapabilities func(*http.Request) (interfaces.StorageCapabilities, error)
+	// Webhooks manages the organization's webhook endpoints.
+	Webhooks *webhook.Service
 
 	// ProxyEnabled adds GET/HEAD /api/v1/assets/{id}/content and the token
 	// link routes, which stream through the API.
@@ -71,6 +76,9 @@ type Routes struct {
 	// Ready, when set, serves GET /ready: a dependency check (the
 	// database), apart from the liveness of GET /health.
 	Ready func(context.Context) error
+	// Operations, when set, serves GET /api/v1/operations/status: counts of
+	// the caller's organization's background work.
+	Operations func(ctx context.Context, tenantID string, now time.Time) (model.OperationsStatus, error)
 	// MetricsAddr is where the process serves its metrics; the caller
 	// starts that listener (metrics.Serve), not the router.
 	MetricsAddr string
@@ -115,6 +123,7 @@ func NewRouter(rt Routes) http.Handler {
 	if rt.Uploads != nil {
 		uploads := httpapi.NewUploadHandler(rt.Uploads, rt.Log)
 		mux.Handle("POST /api/v1/uploads", byTenant("upload_init", uploads.Create))
+		mux.Handle("GET /api/v1/uploads", byTenant("listing", uploads.List))
 		mux.Handle("GET /api/v1/uploads/{id}", byTenant("listing", uploads.Get))
 	}
 	if rt.Multipart != nil {
@@ -188,6 +197,22 @@ func NewRouter(rt Routes) http.Handler {
 		}
 	}
 
+	if rt.Webhooks != nil {
+		hooks := httpapi.NewWebhookHandler(rt.Webhooks, rt.Log)
+		for pattern, h := range hooks.Routes() {
+			op := "admin"
+			if strings.HasPrefix(pattern, "GET ") {
+				op = "listing"
+			}
+			mux.Handle(pattern, byTenant(op, h))
+		}
+	}
+
+	if rt.Operations != nil {
+		ops := httpapi.NewOperationsHandler(rt.Operations, rt.Log)
+		mux.Handle("GET /api/v1/operations/status", byTenant("listing", ops.Status))
+	}
+
 	if rt.Identity != nil && rt.Quotas != nil && rt.Audit != nil {
 		ids := httpapi.NewIdentityHandler(rt.Identity, rt.Quotas, rt.Audit, rt.Resolver, rt.Log)
 		routes := ids.Routes()
@@ -201,6 +226,12 @@ func NewRouter(rt Routes) http.Handler {
 		}
 		for pattern, h := range routes.Tenant {
 			mux.Handle(pattern, byTenant("membership", h))
+		}
+
+		// SCIM: identity providers authenticate with the organization's
+		// SCIM token, rate-limited per address.
+		for pattern, h := range httpapi.NewSCIMHandler(rt.Identity, rt.Log).Routes() {
+			mux.Handle(pattern, limit("admin", middleware.ByAddress, h))
 		}
 
 		admin := httpapi.NewAdminHandler(rt.Identity, rt.Quotas, rt.Audit, rt.DeadLetters, rt.Log)

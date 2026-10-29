@@ -13,6 +13,9 @@ export type User = {
   platform_role?: PlatformRole;
   last_login_at?: string;
   created_at: string;
+  // False for an account that signs in only through its organization's
+  // identity provider.
+  has_password?: boolean;
 };
 
 export type Membership = {

@@ -132,6 +132,14 @@ type VersionMemberResponse struct {
 	ContentType    string            `json:"content_type"`
 	ChecksumSHA256 string            `json:"checksum_sha256,omitempty"`
 	Metadata       map[string]string `json:"metadata"`
+	VersionMemberAvailability
+}
+
+// The member's line goes on: Availability is AVAILABLE, DELETION_PENDING or
+// ERASED; ErasedAt is when its bytes were deleted for good.
+type VersionMemberAvailability struct {
+	Availability string     `json:"availability"`
+	ErasedAt     *time.Time `json:"erased_at,omitempty"`
 }
 
 type VersionMemberPageResponse struct {
@@ -171,6 +179,11 @@ type ValidationJobResponse struct {
 	CreatedAt       time.Time          `json:"created_at"`
 	StartedAt       *time.Time         `json:"started_at,omitempty"`
 	CompletedAt     *time.Time         `json:"completed_at,omitempty"`
+}
+
+type ManifestImportPageResponse struct {
+	Imports    []ManifestImportResponse `json:"imports"`
+	NextCursor string                   `json:"next_cursor,omitempty"`
 }
 
 type ValidationJobPageResponse struct {

@@ -183,6 +183,15 @@ select {
   }
 }
 
+/* Landing blocks wait unseen until they scroll into view. They fade with
+   opacity, not visibility, so Tab still reaches them; once focus is inside
+   one it shows at once, whatever the scroll position. */
+[data-reveal]:focus-within,
+[data-reveal-focus]:focus-within {
+  opacity: 1 !important;
+  transform: none !important;
+}
+
 /* Overlays and menus. Entering is a short ease-out; leaving is quicker still.
    Modals stay centred; menus grow from the trigger (Radix exposes the origin). */
 @keyframes overlay-in {

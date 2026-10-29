@@ -27,7 +27,15 @@ export function AccountScreen() {
         <Sessions />
       </div>
       <div className="flex min-w-0 flex-col gap-6">
-        <PasswordForm />
+        {user.has_password === false ? (
+          <Panel title="Password" description="This account signs in through your organization's identity provider.">
+            <p className="text-base">
+              It has no password here, so there is nothing to change. Your identity provider manages how you sign in.
+            </p>
+          </Panel>
+        ) : (
+          <PasswordForm />
+        )}
         <Panel title="Sign out" description={`Signed in as ${user.email}.`}>
           <Button onClick={() => void signOut()}>Sign out of this browser</Button>
         </Panel>

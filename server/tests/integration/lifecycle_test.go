@@ -479,7 +479,7 @@ func localLifecycle(t *testing.T, stack *contentStack, storage interfaces.Lifecy
 	cleanup, err := cleanupservice.NewService(cleanupservice.Dependencies{
 		Storage: storage, Inventory: postgres.NewInventoryRepository(db), Cursors: postgres.NewCursorRepository(db),
 		Uploads: stack.env.uploads, Assets: stack.env.assets, Jobs: stack.env.jobs, Holds: postgres.NewLegalHoldRepository(db),
-		Events: postgres.NewLifecycleEventRepository(db),
+		Events: postgres.NewLifecycleEventRepository(db), Shared: postgres.NewAssetRepository(db),
 	}, cleanupservice.Config{
 		Owner: owner, QuarantineBucket: stack.bucket, DeliveryBucket: stack.bucket, DeliveryPrefix: promotionPrefix,
 		TenantID: stack.env.tenant, PageSize: 1, PagesPerRun: 100, Lease: time.Minute, MinAge: time.Millisecond,

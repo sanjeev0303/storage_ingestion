@@ -100,6 +100,35 @@ func TestHTTPDatasetWorkflow(t *testing.T) {
 		t.Fatalf("versions %+v, members %+v", versions, vm)
 	}
 
+	// The dataset's imports are listed newest first, in pages.
+	var imports response.ManifestImportPageResponse
+	s.expect(t, auditorTok, "", http.MethodGet, base+"/manifests?limit=1", "", http.StatusOK, &imports)
+	if len(imports.Imports) != 1 || imports.Imports[0].ID != staged.ID || imports.NextCursor == "" {
+		t.Fatalf("first page of imports: %+v", imports)
+	}
+	var older response.ManifestImportPageResponse
+	s.expect(t, auditorTok, "", http.MethodGet, base+"/manifests?limit=1&cursor="+imports.NextCursor, "", http.StatusOK, &older)
+	if len(older.Imports) != 1 || older.Imports[0].ID != imp.ID || older.NextCursor != "" {
+		t.Fatalf("second page of imports: %+v", older)
+	}
+
+	// Where an object is used: this dataset's draft, and the snapshot.
+	var used struct {
+		Datasets []struct {
+			DatasetID string `json:"dataset_id"`
+			Label     string `json:"label"`
+		} `json:"datasets"`
+		Snapshots []struct {
+			VersionID string `json:"version_id"`
+			Version   int    `json:"version"`
+		} `json:"snapshots"`
+	}
+	s.expect(t, auditorTok, "", http.MethodGet, "/api/v1/catalog/objects/"+objs[0].ObjectID+"/datasets", "", http.StatusOK, &used)
+	if len(used.Datasets) != 1 || used.Datasets[0].DatasetID != ds.ID || used.Datasets[0].Label != "cat" ||
+		len(used.Snapshots) != 1 || used.Snapshots[0].VersionID != v.ID || used.Snapshots[0].Version != 1 {
+		t.Fatalf("object usage: %+v", used)
+	}
+
 	// Validation: accepted, run by the worker, reported, with pages of
 	// findings.
 	var job response.ValidationJobResponse
@@ -175,7 +204,8 @@ func TestHTTPDatasetWorkflow(t *testing.T) {
 	// Profiles: listed for readers, written by administrators.
 	var profiles response.ValidationProfileListResponse
 	s.expect(t, auditorTok, "", http.MethodGet, "/api/v1/validation-profiles", "", http.StatusOK, &profiles)
-	if len(profiles.Profiles) != 6 || len(profiles.RuleTypes) < 20 {
+	// The eight built-in profiles, storage-audit and provenance among them.
+	if len(profiles.Profiles) != 8 || len(profiles.RuleTypes) < 20 {
 		t.Fatalf("profiles: %d, rule types %d", len(profiles.Profiles), len(profiles.RuleTypes))
 	}
 	profile := `{"name":"web-profile","rules":[{"id":"label","version":1,"type":"required_label","severity":"error"}],"thresholds":{"max_errors":0}}`
@@ -285,6 +315,7 @@ func TestHTTPDatasetTenantIsolation(t *testing.T) {
 		{http.MethodGet, "/api/v1/datasets/%s/members", ""},
 		{http.MethodPost, "/api/v1/datasets/%s/members", fmt.Sprintf(`{"members":[{"object_id":%q}]}`, objs[0].ObjectID)},
 		{http.MethodDelete, "/api/v1/datasets/%s/members/" + members.Items[0].ID, ""},
+		{http.MethodGet, "/api/v1/datasets/%s/manifests", ""},
 		{http.MethodGet, "/api/v1/datasets/%s/manifests/" + imp.ID, ""},
 		{http.MethodGet, "/api/v1/datasets/%s/manifests/" + imp.ID + "/errors", ""},
 		{http.MethodPost, "/api/v1/datasets/%s/manifests/" + imp.ID + "/cancel", ""},
@@ -324,6 +355,14 @@ func TestHTTPDatasetTenantIsolation(t *testing.T) {
 	s.expect(t, globexTok, "", http.MethodGet, "/api/v1/datasets", "", http.StatusOK, &page)
 	if len(page.Datasets) != 0 {
 		t.Fatalf("globex lists acme's datasets: %+v", page.Datasets)
+	}
+	var usage struct {
+		Datasets  []json.RawMessage `json:"datasets"`
+		Snapshots []json.RawMessage `json:"snapshots"`
+	}
+	s.expect(t, globexTok, "", http.MethodGet, "/api/v1/catalog/objects/"+objs[0].ObjectID+"/datasets", "", http.StatusOK, &usage)
+	if len(usage.Datasets) != 0 || len(usage.Snapshots) != 0 {
+		t.Fatalf("globex sees where acme's object is used: %+v", usage)
 	}
 	// Nothing of acme's changed.
 	if got, _ := s.datasets.Get(ctx, dev, d.ID); got.Description != "" || got.MemberCount != 2 || got.Lifecycle == "ARCHIVED" {
@@ -410,5 +449,125 @@ func TestDatasetFixtureWorkflow(t *testing.T) {
 	if job.State != "FAILED" || codes["SPLIT_LEAKAGE"] != 1 || codes["DUPLICATE_CONTENT"] != 1 ||
 		codes["MISSING_GOVERNANCE_METADATA"] != 1 || len(codes) != 3 || job.Progress.BytesRead == 0 {
 		t.Fatalf("fixture validation: %s %v %+v", job.State, codes, job.Progress)
+	}
+}
+
+func TestHTTPDatasetVersionDiff(t *testing.T) {
+	s := openSecurityStack(t, nil)
+	acme := s.team(t, "ds-diff")
+	globex := s.team(t, "ds-diff-b")
+	tok := s.signIn(t, acme.devUser.Email, acme.devPW).AccessToken
+	globexTok := s.signIn(t, globex.devUser.Email, globex.devPW).AccessToken
+	objs := s.publishObjects(t, acme.developer, "diff", 5)
+
+	var ds response.DatasetResponse
+	s.expect(t, tok, "", http.MethodPost, "/api/v1/datasets", `{"name":"diff-set"}`, http.StatusCreated, &ds)
+	base := "/api/v1/datasets/" + ds.ID
+	s.expect(t, tok, "", http.MethodPost, base+"/members", fmt.Sprintf(`{"members":[
+		{"object_id":%q,"label":"cat"},{"object_id":%q,"label":"dog"},{"object_id":%q},{"object_id":%q}]}`,
+		objs[0].ObjectID, objs[1].ObjectID, objs[2].ObjectID, objs[3].ObjectID), http.StatusOK, nil)
+	var v1 response.DatasetVersionResponse
+	s.expect(t, tok, "", http.MethodPost, base+"/snapshots", `{"idempotency_key":"diff-1"}`, http.StatusCreated, &v1)
+
+	// v2: objs[1] removed, objs[0] relabeled, objs[4] added; 2 and 3 as they were.
+	var page response.DatasetMemberPageResponse
+	s.expect(t, tok, "", http.MethodGet, base+"/members", "", http.StatusOK, &page)
+	for _, m := range page.Members {
+		if m.ObjectID == objs[1].ObjectID {
+			s.expect(t, tok, "", http.MethodDelete, base+"/members/"+m.ID, "", http.StatusOK, nil)
+		}
+	}
+	s.expect(t, tok, "", http.MethodPost, base+"/members", fmt.Sprintf(`{"on_duplicate":"REPLACE","members":[
+		{"object_id":%q,"label":"lion"},{"object_id":%q}]}`, objs[0].ObjectID, objs[4].ObjectID), http.StatusOK, nil)
+	var v2 response.DatasetVersionResponse
+	s.expect(t, tok, "", http.MethodPost, base+"/snapshots", `{"idempotency_key":"diff-2"}`, http.StatusCreated, &v2)
+
+	type side struct {
+		Label string `json:"label"`
+	}
+	var diff struct {
+		Summary     map[string]int64 `json:"summary"`
+		Differences []struct {
+			ObjectID string `json:"object_id"`
+			Kind     string `json:"kind"`
+			Base     *side  `json:"base"`
+			Target   *side  `json:"target"`
+		} `json:"differences"`
+		NextAfter string `json:"next_after"`
+	}
+	path := base + "/versions/" + v2.ID + "/diff?against=" + v1.ID
+	s.expect(t, tok, "", http.MethodGet, path, "", http.StatusOK, &diff)
+	want := map[string]int64{"added": 1, "removed": 1, "changed": 0, "relabeled": 1, "unchanged": 2}
+	for k, n := range want {
+		if diff.Summary[k] != n {
+			t.Fatalf("summary %s = %d, want %d: %+v", k, diff.Summary[k], n, diff.Summary)
+		}
+	}
+	kinds := map[string]string{}
+	for _, d := range diff.Differences {
+		kinds[d.ObjectID] = d.Kind
+		if d.ObjectID == objs[0].ObjectID && (d.Base == nil || d.Target == nil || d.Base.Label != "cat" || d.Target.Label != "lion") {
+			t.Fatalf("the relabel shows both labels: %+v", d)
+		}
+	}
+	if kinds[objs[4].ObjectID] != "ADDED" || kinds[objs[1].ObjectID] != "REMOVED" || kinds[objs[0].ObjectID] != "RELABELED" || len(kinds) != 3 {
+		t.Fatalf("differences: %+v", kinds)
+	}
+
+	// Pages of one, following next_after, list the same three.
+	seen := 0
+	after := ""
+	for round := 0; ; round++ {
+		if round > 5 {
+			t.Fatalf("paging does not end; last next_after %q", after)
+		}
+		var p struct {
+			Differences []json.RawMessage `json:"differences"`
+			NextAfter   string            `json:"next_after"`
+		}
+		s.expect(t, tok, "", http.MethodGet, path+"&limit=1&after="+after, "", http.StatusOK, &p)
+		seen += len(p.Differences)
+		if p.NextAfter == "" {
+			break
+		}
+		after = p.NextAfter
+	}
+	if seen != 3 {
+		t.Fatalf("paging saw %d differences", seen)
+	}
+
+	// The other organization cannot compare acme's versions, and a version
+	// of another dataset is refused.
+	if r := s.call(t, globexTok, "", http.MethodGet, path, ""); r.status != http.StatusNotFound {
+		t.Fatalf("diff across tenants: %s", r)
+	}
+	if r := s.call(t, tok, "", http.MethodGet, base+"/versions/"+v2.ID+"/diff", ""); r.status != http.StatusBadRequest {
+		t.Fatalf("diff without against: %s", r)
+	}
+
+	// Erasing an object keeps every snapshot's record of it, and says the
+	// bytes are going (soft-deleted), then gone.
+	s.expect(t, tok, "", http.MethodDelete, "/api/v1/catalog/objects/"+objs[2].ObjectID, "", http.StatusAccepted, nil)
+	availability := func(version string) map[string]response.VersionMemberResponse {
+		var page response.VersionMemberPageResponse
+		s.expect(t, tok, "", http.MethodGet, base+"/versions/"+version+"/members", "", http.StatusOK, &page)
+		out := map[string]response.VersionMemberResponse{}
+		for _, m := range page.Members {
+			out[m.ObjectID] = m
+		}
+		return out
+	}
+	for _, version := range []string{v1.ID, v2.ID} {
+		got := availability(version)
+		if got[objs[2].ObjectID].Availability != "DELETION_PENDING" || got[objs[3].ObjectID].Availability != "AVAILABLE" {
+			t.Fatalf("after the delete request, version %s: %+v", version, got)
+		}
+	}
+	if _, err := s.db.Pool.Exec(context.Background(), `UPDATE assets SET status = 'DELETED', updated_at = now() WHERE id = $1`, objs[2].ID); err != nil {
+		t.Fatal(err)
+	}
+	erased := availability(v1.ID)[objs[2].ObjectID]
+	if erased.Availability != "ERASED" || erased.ErasedAt == nil || erased.ChecksumSHA256 == "" || erased.Path == "" {
+		t.Fatalf("an erased member keeps its record and says when: %+v", erased)
 	}
 }

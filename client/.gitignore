@@ -47,3 +47,6 @@ next-env.d.ts
 /test-results
 /playwright-report
 /.taste-skill
+
+# DuckDB engine, copied from node_modules by scripts/copy-duckdb.mjs
+/public/duckdb/

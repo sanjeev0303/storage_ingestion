@@ -40,6 +40,15 @@ export type Dataset = {
   updated_by?: string;
   archived_at?: string;
   storage_connection_id?: string;
+  branch?: BranchInfo;
+};
+
+export type BranchInfo = {
+  parent_id: string;
+  name: string;
+  fork_version_id: string;
+  // The last version merged between the branch and its parent, in either direction.
+  merge_base_version_id: string;
 };
 
 export type DatasetPage = { datasets: Dataset[]; next_cursor?: string };
@@ -155,6 +164,22 @@ export type VersionMember = {
   content_type: string;
   checksum_sha256?: string;
   metadata: Record<string, string>;
+  // Whether the pinned bytes still exist. A member's record outlives an
+  // erasure; its bytes do not.
+  availability: "AVAILABLE" | "DELETION_PENDING" | "ERASED";
+  erased_at?: string;
+};
+
+export type DiffKind = "ADDED" | "REMOVED" | "CHANGED" | "RELABELED";
+
+export type DiffSide = { path: string; checksum_sha256?: string; label?: string; split?: string };
+
+export type VersionDifference = { object_id: string; kind: DiffKind; base?: DiffSide; target?: DiffSide };
+
+export type VersionDiff = {
+  summary: { added: number; removed: number; changed: number; relabeled: number; unchanged: number };
+  differences: VersionDifference[];
+  next_after?: string;
 };
 
 export type VersionMemberPage = { members: VersionMember[]; next_after?: number };
@@ -202,3 +227,49 @@ export type CatalogObjectPage = { objects: CatalogObjectRef[]; next_cursor?: str
 export type ValidationProfileRef = { id: string; version: number; name: string; description: string; built_in: boolean };
 
 export const TERMINAL_IMPORT_STATES: ImportState[] = ["COMPLETED", "FAILED", "CANCELLED"];
+
+export type MergeStrategy = "FAIL" | "SOURCE" | "TARGET";
+
+// One side of a conflicting object: its membership in the base, the source or the target.
+export type MergeSide = {
+  present: boolean;
+  version_id?: string;
+  label?: string;
+  split?: string;
+  metadata?: Record<string, string>;
+};
+
+export type MergeConflict = {
+  object_id: string;
+  namespace: string;
+  path: string;
+  base: MergeSide;
+  source: MergeSide;
+  target: MergeSide;
+};
+
+export type MergeResult = {
+  id?: string;
+  target_dataset_id: string;
+  source_dataset_id: string;
+  source_version_id: string;
+  base_version_id: string;
+  strategy: MergeStrategy;
+  applied: boolean;
+  added: number;
+  updated: number;
+  removed: number;
+  already_same: number;
+  conflicts: number;
+  conflict_list: MergeConflict[];
+  created_by?: string;
+  created_at?: string;
+};
+
+export type MergeRequest = {
+  source_dataset_id: string;
+  source_version_id?: string;
+  strategy: MergeStrategy;
+  dry_run: boolean;
+  idempotency_key?: string;
+};

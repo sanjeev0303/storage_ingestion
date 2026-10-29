@@ -9,6 +9,8 @@ const tabs = [
   { href: "/app/settings/invitations", label: "Invitations" },
   { href: "/app/settings/roles", label: "Roles" },
   { href: "/app/settings/quota", label: "Quota" },
+  { href: "/app/settings/sso", label: "Single sign-on" },
+  { href: "/app/settings/webhooks", label: "Webhooks" },
   { href: "/app/settings/account", label: "Account" },
 ];
 

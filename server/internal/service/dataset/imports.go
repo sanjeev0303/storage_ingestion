@@ -284,6 +284,34 @@ func (s *Service) Import(ctx context.Context, p model.Principal, datasetID, impo
 	return s.importOf(ctx, p, datasetID, importID)
 }
 
+// Imports pages a dataset's manifest imports, newest first.
+func (s *Service) Imports(ctx context.Context, p model.Principal, datasetID, cursor string, limit int) (Page[model.ManifestImport], error) {
+	if err := s.authorize(ctx, p, model.PermDatasetsRead, "dataset.read", "dataset", datasetID); err != nil {
+		return Page[model.ManifestImport]{}, err
+	}
+	size, err := s.pageSize(limit)
+	if err != nil {
+		return Page[model.ManifestImport]{}, err
+	}
+	if _, err := s.deps.Repo.GetDataset(ctx, p.TenantID, datasetID); err != nil {
+		return Page[model.ManifestImport]{}, err
+	}
+	imports, next, err := s.deps.Repo.ListImports(ctx, p.TenantID, datasetID, cursor, size)
+	return Page[model.ManifestImport]{Items: imports, NextCursor: next}, err
+}
+
+// objectDatasetsLimit bounds each list of ObjectDatasets.
+const objectDatasetsLimit = 200
+
+// ObjectDatasets says which datasets hold a catalog object and which
+// snapshots pinned one of its versions.
+func (s *Service) ObjectDatasets(ctx context.Context, p model.Principal, objectID string) (model.ObjectDatasets, error) {
+	if err := s.authorize(ctx, p, model.PermDatasetsRead, "dataset.read", "catalog_object", objectID); err != nil {
+		return model.ObjectDatasets{}, err
+	}
+	return s.deps.Repo.ObjectDatasets(ctx, p.TenantID, objectID, objectDatasetsLimit)
+}
+
 // ImportErrors pages an import's rejected lines; after is a line number.
 func (s *Service) ImportErrors(ctx context.Context, p model.Principal, datasetID, importID string, after int64, limit int) ([]model.ImportError, error) {
 	if _, err := s.Import(ctx, p, datasetID, importID); err != nil {
