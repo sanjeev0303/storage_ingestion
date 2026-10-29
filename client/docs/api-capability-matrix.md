@@ -88,13 +88,14 @@ Permissions are the backend's strings. The console hides actions the user's role
 | Branches | `/datasets/{id}/branches` | GET, POST | `datasets.read`, `datasets.write` | none | Verified (created and listed live through the SDK; screen read live) |
 | Merges | `/datasets/{id}/merges` | GET, POST | `datasets.read`, `datasets.write` | none (latest 100) | Verified (dry run, conflict 409, SOURCE merge and history live) |
 | Imports of a dataset | `/datasets/{id}/manifests` | GET | `datasets.read` | `next_cursor` | Verified |
-| Lineage | `/datasets/{id}/lineage`, `/dataset-versions/{vid}/lineage` | GET | `datasets.read` | `next_cursor`, depth 1 to 10 | Verified (both directions, by dataset and by version) |
+| Lineage | `/datasets/{id}/lineage`, `/dataset-versions/{vid}/lineage` | GET | `datasets.read` | `next_cursor`, depth 1 to 10 | Verified (both directions, by dataset and by version; branches, training runs and models included) |
+| Training runs of a version | `/training-runs?dataset_version_id=` (recorded by the SDK with `POST` and `PATCH /training-runs`) | GET | `datasets.read` | `next_cursor` | Verified (a run recorded live by the SDK while streaming from AWS S3, shown with its model and metrics) |
 
 ## Lifecycle, operations, audit
 
 | Screen | Endpoint | Method | Permission | Pagination | Status |
 | --- | --- | --- | --- | --- | --- |
-| Asset state and lifecycle | `/assets/{id}`, `/assets/{id}/lifecycle` | GET | `assets.read` | n/a | Verified. `locked_until` (S3 Object Lock date) is shown when the platform set one; whether a legal hold is also set is never sent to owners |
+| Asset state and lifecycle | `/assets/{id}`, `/assets/{id}/lifecycle` | GET | `assets.read` | n/a | Verified. `locked_until` (S3 Object Lock date) is shown when the platform set one; whether a legal hold is also set is never sent to owners. On AWS S3 (2026-10-29): a retention policy and a legal hold set in the console were applied to the stored version (GOVERNANCE until upload + 24 h, legal hold ON), and S3 refused an administrator's early delete of that version |
 | Soft delete, restore | `/assets/{id}`, `/assets/{id}/restore` | DELETE, POST | `assets.delete` | n/a | Verified |
 | Quarantine record, release | `/assets/{id}/quarantine` (with `scan`: verdict, engine version, `reused_from`; and `events`: the stage history), `/quarantine/release` | GET, POST | `quarantine.read`, `quarantine.release` | n/a | Verified (empty record), release on a real QUARANTINED asset: not run |
 | Retention policy, legal holds | `/retention/policies` (and `?scope=&scope_key=` for a scope's earlier versions), `/legal-holds`, `/legal-holds/{id}` | GET, PUT, POST, DELETE | `retention.manage` | none | Verified |

@@ -71,6 +71,11 @@ func (h *DatasetHandler) Routes() map[string]nethttp.HandlerFunc {
 		"GET /api/v1/datasets/{id}/readiness-reports":            h.readinessReports,
 		"GET /api/v1/datasets/{id}/lineage":                      h.datasetLineage,
 		"GET /api/v1/dataset-versions/{versionID}/lineage":       h.versionLineage,
+		"POST /api/v1/training-runs":                             h.recordTrainingRun,
+		"GET /api/v1/training-runs":                              h.trainingRuns,
+		"GET /api/v1/training-runs/{runID}":                      h.trainingRun,
+		"PATCH /api/v1/training-runs/{runID}":                    h.updateTrainingRun,
+		"GET /api/v1/training-runs/{runID}/lineage":              h.trainingRunLineage,
 		"GET /api/v1/validation-profiles":                        h.profiles,
 		"GET /api/v1/validation-profiles/{profileID}":            h.profile,
 		"POST /api/v1/validation-profiles":                       h.createProfile,
@@ -902,8 +907,10 @@ func (h *DatasetHandler) fail(w nethttp.ResponseWriter, err error) {
 		status, code = nethttp.StatusPreconditionRequired, "revision_required"
 	case errors.Is(err, model.ErrDatasetNotFound), errors.Is(err, model.ErrMemberNotFound), errors.Is(err, model.ErrDatasetVersionNotFound),
 		errors.Is(err, model.ErrImportNotFound), errors.Is(err, model.ErrProfileNotFound), errors.Is(err, model.ErrValidationNotFound),
-		errors.Is(err, model.ErrReportNotFound):
+		errors.Is(err, model.ErrReportNotFound), errors.Is(err, model.ErrTrainingRunNotFound):
 		status, code = nethttp.StatusNotFound, "not_found"
+	case errors.Is(err, model.ErrModelExists):
+		status, code = nethttp.StatusConflict, "model_exists"
 	case errors.Is(err, model.ErrDatasetArchived):
 		status, code = nethttp.StatusConflict, "dataset_archived"
 	case errors.Is(err, model.ErrDatasetTransition):

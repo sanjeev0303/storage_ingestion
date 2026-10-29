@@ -218,7 +218,7 @@ There is no overall score. The report carries a disclaimer: the assessment is ag
 
 ## Lineage
 
-Lineage lives in two tables (`lineage_nodes`, `lineage_edges`). A node stands for a record that lives elsewhere: `DATASET`, `DATASET_VERSION`, `MANIFEST_IMPORT`, `VALIDATION_REPORT`, `TRANSFORMATION`, and `OBJECT_VERSION` (reserved: a version's object versions are its member rows, below). Its ID is a hash of the tenant, kind and record ID, so the same record in two tenants is two nodes and traversal never crosses tenants. Edges read "from RELATION to":
+Lineage lives in two tables (`lineage_nodes`, `lineage_edges`). A node stands for a record that lives elsewhere: `DATASET`, `DATASET_VERSION`, `MANIFEST_IMPORT`, `VALIDATION_REPORT`, `TRANSFORMATION`, `TRAINING_RUN`, `MODEL` (see Training runs), and `OBJECT_VERSION` (reserved: a version's object versions are its member rows, below). Its ID is a hash of the tenant, kind and record ID, so the same record in two tenants is two nodes and traversal never crosses tenants. Edges read "from RELATION to":
 
 | Relation | From → to | Written when |
 |---|---|---|
@@ -423,6 +423,22 @@ Run older binaries only after the rollback. Phase 7 code reads `datasets` throug
 - **Lineage.** Object-version lineage is the version's member rows, not graph edges, so a walk does not descend into individual objects. Edges are written by the platform; there is no public API to add arbitrary ones.
 - **Large exports.** Reports are stored in PostgreSQL and findings are paged; there is no asynchronous export of very large reports to object storage.
 - **Readiness.** Readiness is per profile and has no score. It says nothing about semantic quality, label correctness, licensing in law, bias, or training outcomes.
+
+## Training runs
+
+A training run records which dataset versions a model was trained on (migration `000027_training_runs.sql`). It joins lineage, so a version's downstream walk reaches the runs that read it and the models they produced, and a model's upstream walk reaches its training data.
+
+- **Record:** `POST /api/v1/training-runs` (`datasets.write`):
+  ```json
+  {"name": "resnet50", "source": "MLFLOW", "external_id": "<mlflow run id>", "url": "https://mlflow.example.com/#/...",
+   "params": {"lr": "0.01"}, "dataset_version_ids": ["<version>"], "model": {"name": "resnet50", "version": "3", "uri": "s3://..."}}
+  ```
+  `source` is `SDK` (default), `MLFLOW`, `WANDB` or `OTHER`. A run sent again with the same source and `external_id` answers the recorded one (200 instead of 201), so a retried script never records it twice. `status` starts `RUNNING` unless given.
+- **Finish:** `PATCH /api/v1/training-runs/{id}` with `status` (`FINISHED` or `FAILED`), `metrics` (merged in) and a `model`. A finished run keeps its status.
+- **Read:** `GET /api/v1/training-runs?dataset_version_id=` (newest first, `next_cursor`), `GET /api/v1/training-runs/{id}`, and `GET /api/v1/training-runs/{id}/lineage`.
+- **Lineage:** a run is `TRAINED_ON` each version it read; a model is `PRODUCED_BY` its run. Both relations are acyclic.
+- **Limits:** a name of 1 to 200 characters; 1 to 100 versions, each the organization's (404 otherwise); at most 64 params (keys up to 64 bytes, values up to 512) and 64 metrics (finite numbers); an `http` or `https` URL only. A model's name and version are unique in the organization (409 `model_exists`).
+- **Audit:** `training_run.create` and `training_run.update`.
 
 ## Branches
 

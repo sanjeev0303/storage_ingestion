@@ -101,6 +101,12 @@ type DatasetRepository interface {
 
 	AddLineage(ctx context.Context, tenantID string, e model.LineageEdge, now time.Time) error
 	Lineage(ctx context.Context, tenantID string, start model.LineageRef, q LineageQuery) (model.LineagePage, error)
+
+	// Training runs (migration 000027).
+	CreateTrainingRun(ctx context.Context, tenantID string, run model.TrainingRun, versionIDs []string, produced *model.Model) (model.TrainingRun, bool, error)
+	UpdateTrainingRun(ctx context.Context, tenantID, runID string, status model.TrainingStatus, metrics map[string]float64, produced *model.Model, at time.Time) (model.TrainingRun, error)
+	GetTrainingRun(ctx context.Context, tenantID, runID string) (model.TrainingRun, error)
+	ListTrainingRuns(ctx context.Context, tenantID, versionID, cursor string, limit int) (model.TrainingRunPage, error)
 }
 
 // DatasetFilter selects a page of datasets, by name.

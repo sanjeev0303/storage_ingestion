@@ -228,3 +228,15 @@ export function useMerge(targetId: string) {
     },
   });
 }
+
+export function useTrainingRuns(versionId: string) {
+  const organizationId = useOrganizationId();
+  return usePagedQuery({
+    queryKey: orgKey(organizationId, "datasets", "training-runs", versionId),
+    enabled: Boolean(organizationId),
+    fetchPage: async (cursor, signal) => {
+      const page = await api.listTrainingRuns(versionId, cursor, signal);
+      return { items: page.runs, next: page.next_cursor || undefined };
+    },
+  });
+}

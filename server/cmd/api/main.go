@@ -189,10 +189,6 @@ func run() error {
 	if dc, err := config.LoadDelivery(); err == nil && dc.Bucket != "" {
 		deliveryBucket = dc.Bucket
 	}
-	routes.StorageCapabilities = func(r *http.Request) (interfaces.StorageCapabilities, error) {
-		return objectStorage.Capabilities(r.Context(), deliveryBucket)
-	}
-
 	// Storage connections (Phase 11). Uploads, delivery and lifecycle
 	// reach a record's bytes through the connection it is bound to; the
 	// platform's buckets work as before. Tenants' connections resolve only
@@ -203,6 +199,30 @@ func run() error {
 	}
 	storageMetrics := metrics.New()
 	connections := postgres.NewStorageConnectionRepository(db)
+	// The catalog reports the caller's default connection as its last
+	// passing test found it; the platform's bucket when that is the default.
+	routes.StorageCapabilities = func(r *http.Request) (interfaces.StorageCapabilities, error) {
+		p, ok := middleware.PrincipalFrom(r.Context())
+		if ok && p.TenantID != "" {
+			id, err := connections.DefaultConnection(r.Context(), p.TenantID)
+			if err != nil {
+				return interfaces.StorageCapabilities{}, err
+			}
+			if !model.IsPlatformConnection(id) {
+				c, err := connections.GetConnection(r.Context(), p.TenantID, id)
+				if err != nil {
+					return interfaces.StorageCapabilities{}, err
+				}
+				if c.Capabilities == nil {
+					return interfaces.StorageCapabilities{VersioningStatus: "not tested"}, nil
+				}
+				return interfaces.StorageCapabilities{
+					ProviderVersioning: c.Capabilities.ProviderVersioning, VersioningStatus: c.Capabilities.VersioningStatus,
+				}, nil
+			}
+		}
+		return objectStorage.Capabilities(r.Context(), deliveryBucket)
+	}
 	storageRegistry, err := storageregistry.ForProcess(storageCfg, objectStorage, bucket, deliveryBucket, config.PromotionPrefix(), connections, storageMetrics)
 	if err != nil {
 		return fmt.Errorf("configure storage connections: %w", err)

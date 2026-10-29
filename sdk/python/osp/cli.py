@@ -14,7 +14,10 @@ import json
 import os
 import sys
 
-from . import branches, ingest, snapshots
+# Names, not the module: osp.branches is also the name of a function.
+from . import ingest, snapshots
+from .branches import MergeConflict, branches as list_branches, create_branch, merge
+from .runs import runs as list_runs
 from .client import APIError, Client
 
 
@@ -192,15 +195,30 @@ def cmd_branch(args):
     from_version = None
     if args.version:
         from_version = snapshots.find_version(client, parent["id"], args.version)["id"]
-    b = branches.create_branch(client, parent["id"], args.name, from_version)
+    b = create_branch(client, parent["id"], args.name, from_version)
     print(f"branch {b['name']} ({b['id']}): {b['member_count']} members from version {b['branch']['fork_version_id']}")
 
 
 def cmd_branches(args):
     client = client_from_config()
     parent = snapshots.find_dataset(client, args.dataset)
-    for b in branches.branches(client, parent["id"]):
+    for b in list_branches(client, parent["id"]):
         print(f"{b['branch']['name']:<24} {b['id']}  members={b['member_count']}  merge base {b['branch']['merge_base_version_id']}")
+
+
+def cmd_runs(args):
+    client = client_from_config()
+    ds = snapshots.find_dataset(client, args.dataset)
+    chosen = [snapshots.find_version(client, ds["id"], args.version)] if args.version else snapshots.versions(client, ds["id"])
+    found = False
+    for v in chosen:
+        for r in list_runs(client, v["id"]):
+            found = True
+            models = ", ".join(f"{m['name']}:{m['version']}" for m in r["models"]) or "no model"
+            metrics = " ".join(f"{k}={value:g}" for k, value in sorted(r["metrics"].items()))
+            print(f"v{v['version']:<4} {r['name']:<28} {r['status']:<9} {r['source']:<7} {models}  {metrics}".rstrip())
+    if not found:
+        print(f"no training runs recorded for {ds['name']}")
 
 
 def side(member):
@@ -218,8 +236,8 @@ def cmd_merge(args):
     if args.version:
         version = snapshots.find_version(client, source["id"], args.version)["id"]
     try:
-        r = branches.merge(client, target["id"], source["id"], version, args.strategy, args.dry_run)
-    except branches.MergeConflict as conflict:
+        r = merge(client, target["id"], source["id"], version, args.strategy, args.dry_run)
+    except MergeConflict as conflict:
         r = conflict.result
     verb = "would change" if not r["applied"] else "changed"
     print(f"{source['name']} -> {target['name']}: {verb} {r['added']} added, {r['updated']} updated, "
@@ -271,6 +289,11 @@ def main(argv=None):
     p.add_argument("name")
     p.add_argument("--version", help="the version to branch from; the latest by default")
     p.set_defaults(run=cmd_branch)
+
+    p = sub.add_parser("runs", help="training runs recorded as having used a dataset's versions")
+    p.add_argument("dataset")
+    p.add_argument("--version", help="one version; every version by default")
+    p.set_defaults(run=cmd_runs)
 
     p = sub.add_parser("branches", help="list a dataset's branches")
     p.add_argument("dataset")

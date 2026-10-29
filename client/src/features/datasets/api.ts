@@ -14,6 +14,7 @@ import type {
   MemberPage,
   MergeRequest,
   MergeResult,
+  TrainingRun,
   MemberRequest,
   UpdateDatasetRequest,
   ValidationProfileRef,
@@ -154,4 +155,11 @@ export async function merge(targetId: string, body: MergeRequest): Promise<Merge
 
 export function listMerges(id: string, signal?: AbortSignal) {
   return api<{ merges: MergeResult[] }>(`/datasets/${id}/merges`, { signal });
+}
+
+export function listTrainingRuns(versionId: string, cursor: string | undefined, signal?: AbortSignal) {
+  return api<{ runs: TrainingRun[]; next_cursor?: string }>("/training-runs", {
+    query: { dataset_version_id: versionId, cursor },
+    signal,
+  });
 }
