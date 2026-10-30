@@ -34,14 +34,15 @@ class SnapshotDataset(_base() if _tud is not None else object):
     label, split and metadata.
 
     split keeps only members of that split. With shuffle_seed, the order is
-    shuffled the same way on every worker, then shared out."""
+    shuffled the same way on every worker, then shared out. options go to
+    SnapshotStream (read, shard_bytes, prefetch, verify, on_corrupt)."""
 
     def __init__(self, client, dataset_id, version_id, transform=None, cache_dir=None, split=None,
-                 shuffle_seed=None, kind="files"):
+                 shuffle_seed=None, kind="files", **options):
         _base()
         super().__init__()
         self.stream = SnapshotStream(client, dataset_id, version_id, split=split, cache_dir=cache_dir,
-                                     shuffle_seed=shuffle_seed)
+                                     shuffle_seed=shuffle_seed, **options)
         self.transform = transform
         self.kind = kind
         # How many members' bytes were erased and are left out, for the

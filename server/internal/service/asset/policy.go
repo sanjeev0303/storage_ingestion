@@ -26,6 +26,11 @@ type PlatformRetention struct {
 	MinRetentionFloor        time.Duration
 	DeletionGraceFloor       time.Duration
 	QuarantineRetentionFloor time.Duration
+
+	// ComplianceMaxRetention caps COMPLIANCE locks (zero: no cap). A
+	// COMPLIANCE lock cannot be lifted, so a mistyped "100 years" would
+	// keep the bytes and their cost for a century.
+	ComplianceMaxRetention time.Duration
 }
 
 // EffectivePolicy is what applies to one asset at one moment, and where
@@ -41,6 +46,12 @@ type EffectivePolicy struct {
 	MaxAgeFrom              string
 	DeletionGraceFrom       string
 	QuarantineRetentionFrom string
+
+	// LockMode is COMPLIANCE when any policy in the chain asks for it,
+	// else GOVERNANCE: the strictest wins. RetainFromKey is the most
+	// specific metadata date retention counts from ("" for creation).
+	LockMode      string
+	RetainFromKey string
 }
 
 // ResolvePolicy applies the precedence rules. For each setting:
@@ -82,7 +93,33 @@ func ResolvePolicy(platform PlatformRetention, tenant, dataset, asset *model.Ret
 
 	p.QuarantineRetention, p.QuarantineRetentionFrom = pick(func(r *model.RetentionPolicy) *time.Duration { return r.QuarantineRetention }, platform.DefaultQuarantineRetention)
 	p.QuarantineRetention, p.QuarantineRetentionFrom = floor(p.QuarantineRetention, p.QuarantineRetentionFrom, platform.QuarantineRetentionFloor)
+
+	p.LockMode = model.LockGovernance
+	for _, level := range levels {
+		if level == nil {
+			continue
+		}
+		if level.LockMode == model.LockCompliance {
+			p.LockMode = model.LockCompliance
+		}
+		if p.RetainFromKey == "" {
+			p.RetainFromKey = level.RetainFromKey
+		}
+	}
 	return p
+}
+
+// RetainUntilFor is RetainUntil counted from the asset's own date when the
+// policy names one: the later of its creation and the date in its
+// metadata, so a metadata date never shortens retention.
+func (p EffectivePolicy) RetainUntilFor(asset model.Asset) time.Time {
+	start := asset.CreatedAt.UTC()
+	if p.RetainFromKey != "" {
+		if at, ok := model.MetadataDate(asset.Metadata, p.RetainFromKey); ok && at.After(start) {
+			start = at
+		}
+	}
+	return start.Add(p.MinRetention)
 }
 
 // RetainUntil is the earliest moment the asset may be permanently
@@ -130,6 +167,22 @@ func validatePolicy(platform PlatformRetention, policy model.RetentionPolicy) er
 	}
 	if policy.TenantID == "" || policy.CreatedBy == "" || policy.Reason == "" {
 		return fmt.Errorf("%w: tenant, actor and reason are required", model.ErrInvalidPolicy)
+	}
+	switch policy.LockMode {
+	case "", model.LockGovernance:
+	case model.LockCompliance:
+		if policy.MinRetention == nil || *policy.MinRetention <= 0 {
+			return fmt.Errorf("%w: a COMPLIANCE policy needs a minimum retention", model.ErrInvalidPolicy)
+		}
+		if platform.ComplianceMaxRetention > 0 && *policy.MinRetention > platform.ComplianceMaxRetention {
+			return fmt.Errorf("%w: COMPLIANCE retention is limited to %s on this platform: nobody could delete the data earlier",
+				model.ErrInvalidPolicy, platform.ComplianceMaxRetention)
+		}
+	default:
+		return fmt.Errorf("%w: lock mode must be GOVERNANCE or COMPLIANCE", model.ErrInvalidPolicy)
+	}
+	if policy.RetainFromKey != "" && !model.ValidMetadataKey(policy.RetainFromKey) {
+		return fmt.Errorf("%w: retain_from_key must be a metadata key", model.ErrInvalidPolicy)
 	}
 
 	settings := []struct {

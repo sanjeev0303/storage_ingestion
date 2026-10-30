@@ -2,6 +2,7 @@ package dataset
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -58,9 +59,15 @@ type check struct {
 	// Exactly one of member, content and dataset is set. content checks
 	// read object bytes (or trusted evidence of them) and run only in FULL
 	// and SAMPLED modes.
-	member  func(m model.MemberEvidence) []issue
+	member func(m model.MemberEvidence) []issue
+	// applies, when set, says whether member says anything about m; a
+	// member it does not apply to counts as not assessed, not as passed.
+	applies func(m model.MemberEvidence) bool
 	content *contentRule
 	dataset func(a model.VersionAggregates) ([]issue, string)
+	// load, when set, reads what a dataset check needs beyond the
+	// aggregates and returns the check to run (rules_quality.go).
+	load func(ctx context.Context, s *Service, tenantID, versionID string) func(model.VersionAggregates) ([]issue, string)
 }
 
 // contentRule configures the content integrity check.
@@ -96,6 +103,9 @@ var ruleTypes = map[string]ruleType{
 	"checksum_present":  {model.RuleScopeObjectMetadata, DimIntegrity, compileChecksumPresent},
 	"checksum_verified": {model.RuleScopeObjectMetadata, DimIntegrity, compileChecksumVerified},
 	"malware_scan":      {model.RuleScopeObjectMetadata, DimSecurity, compileMalwareScan},
+	"content_checks":    {model.RuleScopeObjectMetadata, DimSecurity, compileContentChecks},
+	"storage_integrity": {model.RuleScopeObjectMetadata, DimIntegrity, compileStorageIntegrity},
+	"residency":         {model.RuleScopeObjectMetadata, DimGovernance, compileResidency},
 	// Content, per member: bytes or trusted evidence of them.
 	"content_checksum": {model.RuleScopeObjectContent, DimIntegrity, compileContentChecksum},
 	// Dataset level, from aggregates.
@@ -108,6 +118,11 @@ var ruleTypes = map[string]ruleType{
 	"required_labels":        {model.RuleScopeDataset, DimCompleteness, compileRequiredLabels},
 	"label_distribution":     {model.RuleScopeDataset, DimDistribution, compileLabelDistribution},
 	"file_type_distribution": {model.RuleScopeDataset, DimDistribution, compileFileTypeDistribution},
+	"small_files":            {model.RuleScopeDataset, DimAccessibility, compileSmallFiles},
+	// Dataset level, from the column profile and member metadata.
+	"column_drift":     {model.RuleScopeDataset, DimDistribution, compileColumnDrift},
+	"uniform_metadata": {model.RuleScopeDataset, DimConsistency, compileUniformMetadata},
+	"subject_leakage":  {model.RuleScopeSplit, DimConsistency, compileSubjectLeakage},
 }
 
 // RuleTypes lists the rule types profiles may use.
@@ -637,6 +652,117 @@ func compileMalwareScan(c *check, config json.RawMessage) error {
 	return nil
 }
 
+// compileContentChecks fails members whose upload content checks found
+// something (active content, unsafe model files, secrets, broken formats,
+// malware found on a re-scan), and, unless allow_unchecked is set, members
+// the checks never ran on.
+func compileContentChecks(c *check, config json.RawMessage) error {
+	var cfg struct {
+		// Ignore lists finding families or codes that do not fail a member.
+		Ignore         []string `json:"ignore"`
+		AllowUnchecked bool     `json:"allow_unchecked"`
+	}
+	if err := decodeConfig(config, &cfg); err != nil {
+		return err
+	}
+	ignored := func(code string) bool {
+		family, _, _ := strings.Cut(code, ".")
+		return slices.Contains(cfg.Ignore, code) || slices.Contains(cfg.Ignore, family)
+	}
+	c.member = func(m model.MemberEvidence) []issue {
+		var out []issue
+		for _, f := range m.ContentFindings {
+			action, code, _ := strings.Cut(f, ":")
+			if ignored(code) {
+				continue
+			}
+			is := memberIssue(m, "CONTENT_FLAGGED", "a content check flagged the file: "+code)
+			if action == model.FindingReject {
+				is = memberIssue(m, "CONTENT_REJECTED", "a content check rejected the file: "+code)
+				is.Remediation = "remove the member; the file is no longer served"
+			}
+			is.Observed = code
+			out = append(out, is)
+		}
+		if len(out) == 0 && m.ContentChecks == "" && !cfg.AllowUnchecked {
+			out = append(out, memberIssue(m, "CONTENT_NOT_CHECKED", "the content checks did not run on this file's upload"))
+		}
+		return out
+	}
+	return nil
+}
+
+// compileStorageIntegrity fails members whose stored object changed
+// outside the platform (found by the drift scan), and, unless
+// allow_posture_fail is set, members on a connection failing its posture
+// checks.
+func compileStorageIntegrity(c *check, config json.RawMessage) error {
+	var cfg struct {
+		AllowPostureFail bool `json:"allow_posture_fail"`
+	}
+	if err := decodeConfig(config, &cfg); err != nil {
+		return err
+	}
+	c.member = func(m model.MemberEvidence) []issue {
+		var out []issue
+		for _, kind := range m.StorageDrift {
+			is := memberIssue(m, "STORAGE_CHANGED_OUTSIDE", "the stored object changed outside the platform: "+kind)
+			is.Observed = kind
+			is.Remediation = "check the object against the member's SHA-256, restore the pinned version, then resolve the finding"
+			out = append(out, is)
+		}
+		if m.ConnectionPosture == model.PostureFail && !cfg.AllowPostureFail {
+			is := memberIssue(m, "STORAGE_POSTURE_FAILING", "the member's storage connection fails its posture checks")
+			is.Remediation = "fix what the connection's posture report lists"
+			out = append(out, is)
+		}
+		return out
+	}
+	return nil
+}
+
+// compileResidency fails members stored outside the locations the
+// dataset allows (or the rule's own "locations", when set), and members
+// whose connection's location the provider never confirmed.
+func compileResidency(c *check, config json.RawMessage) error {
+	var cfg struct {
+		Locations []string `json:"locations"`
+	}
+	if err := decodeConfig(config, &cfg); err != nil {
+		return err
+	}
+	own, ok := model.NormalizeLocations(cfg.Locations)
+	if !ok {
+		return fmt.Errorf("%w: residency locations are provider location codes such as ap-south-1 or eu-*", model.ErrInvalidProfile)
+	}
+	// A dataset that allows anywhere gives the rule nothing to check.
+	c.applies = func(m model.MemberEvidence) bool { return len(own) > 0 || len(m.DatasetResidency) > 0 }
+	c.member = func(m model.MemberEvidence) []issue {
+		allowed := own
+		if len(allowed) == 0 {
+			allowed = m.DatasetResidency
+		}
+		where := m.ConnectionLocation
+		if where == "" {
+			where = "an unknown location"
+		}
+		switch {
+		case !m.LocationVerified:
+			is := memberIssue(m, "RESIDENCY_UNVERIFIED", "the member is stored in "+where+", which the provider has not confirmed")
+			is.Observed, is.Expected = m.ConnectionLocation, strings.Join(allowed, ", ")
+			is.Remediation = "test its storage connection with credentials that may read the bucket's location"
+			return []issue{is}
+		case !model.LocationAllowed(m.ConnectionLocation, allowed):
+			is := memberIssue(m, "RESIDENCY_OUTSIDE", "the member is stored in "+where+", outside the allowed locations")
+			is.Observed, is.Expected = m.ConnectionLocation, strings.Join(allowed, ", ")
+			is.Remediation = "copy it to a connection in an allowed location and remove this copy"
+			return []issue{is}
+		}
+		return nil
+	}
+	return nil
+}
+
 func compileContentChecksum(c *check, config json.RawMessage) error {
 	var cfg contentRule
 	if err := decodeConfig(config, &cfg); err != nil {
@@ -700,6 +826,34 @@ func compileTotalBytes(c *check, config json.RawMessage) error {
 		}
 		return []issue{{Code: "TOTAL_BYTES_OUT_OF_RANGE", Message: "the version's total size is outside the profile's range",
 			Expected: fmt.Sprintf("%d..%d bytes", cfg.Min, cfg.Max), Observed: strconv.FormatInt(a.TotalBytes, 10), Key: "bytes"}}, ""
+	}
+	return nil
+}
+
+// compileSmallFiles warns about a version of mostly small files that are
+// not packed: read one by one, each costs a request's time to first byte,
+// and data loaders starve the GPUs. Packed files stream a pack at a time.
+func compileSmallFiles(c *check, config json.RawMessage) error {
+	cfg := struct {
+		MedianBelow int64   `json:"median_below"`
+		PackedShare float64 `json:"packed_share"`
+	}{MedianBelow: 1 << 20, PackedShare: 0.5}
+	if err := decodeConfig(config, &cfg); err != nil {
+		return err
+	}
+	if cfg.MedianBelow <= 0 || cfg.PackedShare < 0 || cfg.PackedShare > 1 {
+		return fmt.Errorf("median_below is a positive size and packed_share a share from 0 to 1")
+	}
+	c.dataset = func(a model.VersionAggregates) ([]issue, string) {
+		if a.Members == 0 || a.MedianSize >= cfg.MedianBelow || float64(a.PackedMembers) >= cfg.PackedShare*float64(a.Members) {
+			return nil, ""
+		}
+		return []issue{{Code: "SMALL_FILES_UNPACKED", Key: "median_bytes",
+			Message:  "most files are small and few are packed, so reading them one by one is slow",
+			Expected: fmt.Sprintf("a median of at least %d bytes, or %.0f%% of files packed", cfg.MedianBelow, cfg.PackedShare*100),
+			Observed: fmt.Sprintf("a median of %d bytes, %d of %d files packed", a.MedianSize, a.PackedMembers, a.Members),
+			Remediation: "read it with shard streams (one request per pack); packing takes small files after they settle, " +
+				"and a repack gathers the dataset's packs in path order"}}, ""
 	}
 	return nil
 }

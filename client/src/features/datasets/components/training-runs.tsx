@@ -7,6 +7,9 @@ import { ErrorState, SkeletonRows } from "@/components/ui/states";
 import { StateBadge } from "@/components/ui/status";
 import { Table, Td, Th } from "@/components/ui/table";
 import { Time } from "@/components/ui/time";
+import { RunChecks } from "@/features/streaming/components/run-checks";
+import { ModelSummaryButton, RunProvenance } from "@/features/evidence/components/run-provenance";
+import { RunLeakage } from "@/features/quality/components/run-leakage";
 import { useTrainingRuns } from "../hooks";
 import type { TrainingRun } from "../types";
 
@@ -71,6 +74,7 @@ export function TrainingRuns({ datasetId, versionId }: { datasetId: string; vers
                 <Th>Status</Th>
                 <Th>Model</Th>
                 <Th>Metrics</Th>
+                <Th>Reads checked</Th>
                 <Th>Started</Th>
               </tr>
             </thead>
@@ -99,13 +103,21 @@ export function TrainingRuns({ datasetId, versionId }: { datasetId: string; vers
                       <span className="text-muted">None recorded</span>
                     ) : (
                       run.models.map((m) => (
-                        <span key={m.id} className="block mono-data text-sm" title={m.uri}>
-                          {m.name} {m.version}
+                        <span key={m.id} className="flex flex-wrap items-center gap-1">
+                          <span className="mono-data text-sm" title={m.uri}>
+                            {m.name} {m.version}
+                          </span>
+                          <ModelSummaryButton modelId={m.id} name={m.name} />
                         </span>
                       ))
                     )}
                   </Td>
                   <Td className="text-sm tabular-nums">{metricText(run.metrics) || <span className="text-muted">None</span>}</Td>
+                  <Td>
+                    <RunChecks runId={run.id} />
+                    <RunProvenance runId={run.id} />
+                    <RunLeakage runId={run.id} roles={run.roles} />
+                  </Td>
                   <Td>
                     <Time value={run.created_at} />
                   </Td>

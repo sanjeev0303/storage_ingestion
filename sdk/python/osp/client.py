@@ -118,6 +118,10 @@ class Client:
         self.refresh()
         return self._send(method, path, body, headers=headers, raw=raw, content_type=content_type)
 
+    def get_text(self, path, **params):
+        """GETs a route that answers text (an export) and returns it."""
+        return self.request("GET", path, params=params, headers={"Accept": "*/*"})
+
     def _send(self, method, path, body=None, auth=True, headers=None, raw=None, content_type=None):
         data = raw
         all_headers = {"Accept": "application/json"}
@@ -151,6 +155,8 @@ class Client:
                 raise APIError(resp.status, method, path, payload.decode("utf-8", "replace"))
             if resp.status == 204 or not payload:
                 return None
+            if all_headers.get("Accept") != "application/json":
+                return payload.decode("utf-8")
             return json.loads(payload)
         raise RuntimeError("unreachable")
 
@@ -210,6 +216,48 @@ class Client:
             self._drop(key)
             raise
 
+    @contextmanager
+    def stream(self, method, path, body=None, timeout=600, headers=None):
+        """Sends an API request and yields the response to read as it
+        arrives (a shard stream). Like request, it refreshes the session
+        on a 401 and waits out 429 and gateway answers before the body
+        starts."""
+        url = self.base_url + path
+        parts = urllib.parse.urlsplit(url)
+        key = (parts.scheme, parts.netloc)
+        data = json.dumps(body).encode() if body is not None else None
+        extra = headers or {}
+        delay, refreshed = 1.0, False
+        for attempt in range(1, self.max_attempts + 1):
+            headers = {"Accept": "*/*", "Content-Type": "application/json"}
+            if self.access_token:
+                headers["Authorization"] = "Bearer " + self.access_token
+            if self.organization_id:
+                headers["X-Organization-ID"] = self.organization_id
+            headers.update(extra)
+            resp = self._roundtrip(method, url, data, headers, timeout)
+            if resp.status == 401 and self.refresh_token and not refreshed:
+                resp.read()
+                self.refresh()
+                refreshed = True
+                continue
+            if resp.status in RETRY_STATUSES and attempt < self.max_attempts:
+                resp.read()
+                time.sleep(_retry_after(resp.headers) or delay)
+                delay = min(delay * 2, 30)
+                continue
+            if resp.status >= 300:
+                raise APIError(resp.status, method, path, resp.read().decode("utf-8", "replace"))
+            try:
+                yield resp
+                if not resp.isclosed():
+                    self._drop(key)
+            except BaseException:
+                self._drop(key)
+                raise
+            return
+        raise RuntimeError("unreachable")
+
     def get(self, path, **params):
         return self.request("GET", path, params=params)
 
@@ -236,10 +284,12 @@ def _retry_after(headers):
         return None
 
 
-def put_bytes(url, body, size, content_type=None, timeout=600, attempts=3):
+def put_bytes(url, body, size, content_type=None, timeout=600, attempts=3, headers=None):
     """PUTs to a presigned storage URL and returns the ETag. body is bytes
-    or a callable returning a fresh file-like object for each attempt."""
-    headers = {"Content-Length": str(size)}
+    or a callable returning a fresh file-like object for each attempt.
+    headers are the upload_headers the API asked for (Azure's blob type,
+    or a connection's customer-managed key)."""
+    headers = {**(headers or {}), "Content-Length": str(size)}
     if content_type:
         headers["Content-Type"] = content_type
     delay = 1.0

@@ -72,7 +72,8 @@ func RunCycle(ctx context.Context, lifecycle *assetservice.Service, cleanup *cle
 		// Scopes whose policy or holds changed are locked first, then the
 		// regular sweep's next batch.
 		{phases.Retention, func() error {
-			return errors.Join(lifecycle.SyncRequestedLocks(ctx, &report.Lifecycle), lifecycle.EvaluateRetention(ctx, &report.Lifecycle))
+			return errors.Join(lifecycle.SyncRequestedLocks(ctx, &report.Lifecycle), lifecycle.EvaluateRetention(ctx, &report.Lifecycle),
+				lifecycle.VerifyLocks(ctx, &report.Lifecycle))
 		}},
 		{phases.Deletions, func() error { return lifecycle.ProcessDeletions(ctx, &report.Lifecycle) }},
 		{phases.Scan, func() error { return cleanup.Scan(ctx, &report.Cleanup) }},

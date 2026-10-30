@@ -1,6 +1,10 @@
 package response
 
-import "time"
+import (
+	"time"
+
+	"github.com/sanjeev0303/object-storage-platform/internal/model"
+)
 
 // StorageCapabilities are what a provider (or a tested bucket) can do.
 type StorageCapabilities struct {
@@ -83,6 +87,14 @@ type StorageConnectionResponse struct {
 	LastTestOKAt          *time.Time           `json:"last_test_ok_at,omitempty"`
 	LastErrorCategory     string               `json:"last_error_category,omitempty"`
 
+	ChecksumMode  string `json:"checksum_mode"`
+	ExpectedOwner string `json:"expected_owner,omitempty"`
+	EncryptionKey string `json:"encryption_key,omitempty"`
+	// StagedCredential is set while a second credential waits to be
+	// promoted; PreviousCredentialUntil while a rollback is possible.
+	StagedCredential        *StagedCredential `json:"staged_credential,omitempty"`
+	PreviousCredentialUntil *time.Time        `json:"previous_credential_until,omitempty"`
+
 	Revision   int64      `json:"revision"`
 	CreatedBy  string     `json:"created_by,omitempty"`
 	UpdatedBy  string     `json:"updated_by,omitempty"`
@@ -90,6 +102,12 @@ type StorageConnectionResponse struct {
 	UpdatedAt  time.Time  `json:"updated_at"`
 	DisabledAt *time.Time `json:"disabled_at,omitempty"`
 	DeletedAt  *time.Time `json:"deleted_at,omitempty"`
+}
+
+type StagedCredential struct {
+	Rotation int        `json:"rotation"`
+	StagedAt *time.Time `json:"staged_at,omitempty"`
+	StagedBy string     `json:"staged_by,omitempty"`
 }
 
 type StorageConnectionsResponse struct {
@@ -113,6 +131,8 @@ type StorageTestResponse struct {
 	Capabilities *StorageCapabilities       `json:"capabilities,omitempty"`
 	TestedAt     time.Time                  `json:"tested_at"`
 	Connection   *StorageConnectionResponse `json:"connection,omitempty"`
+	// Posture is the bucket's posture, checked after a passing test.
+	Posture *model.PostureReport `json:"posture,omitempty"`
 }
 
 // StorageDependentsResponse explains why a connection cannot be deleted.

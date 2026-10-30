@@ -347,6 +347,10 @@ func (h *GovernanceHandler) Routes() map[string]nethttp.HandlerFunc {
 	if h.quarantine != nil {
 		routes["GET /api/v1/assets/{id}/quarantine"] = h.inspect
 		routes["POST /api/v1/assets/{id}/quarantine/release"] = h.release
+		routes["GET /api/v1/assets/{id}/findings"] = h.findings
+		routes["GET /api/v1/assets/{id}/blast-radius"] = h.blastRadius
+		routes["GET /api/v1/content-policy"] = h.contentPolicy
+		routes["PUT /api/v1/content-policy"] = h.setContentPolicy
 	}
 	if h.lifecycle != nil {
 		routes["PUT /api/v1/retention/policies"] = h.setPolicy
@@ -354,6 +358,7 @@ func (h *GovernanceHandler) Routes() map[string]nethttp.HandlerFunc {
 		routes["POST /api/v1/legal-holds"] = h.placeHold
 		routes["GET /api/v1/legal-holds"] = h.listHolds
 		routes["DELETE /api/v1/legal-holds/{id}"] = h.releaseHold
+		h.governanceRoutes(routes)
 	}
 	return routes
 }
@@ -385,7 +390,72 @@ func (h *GovernanceHandler) inspect(w nethttp.ResponseWriter, r *nethttp.Request
 	for _, e := range inspection.Events {
 		out.Events = append(out.Events, map[string]any{"event": e.Event, "detail": e.Detail, "actor": e.Actor, "at": e.CreatedAt})
 	}
+	out.Findings = append([]model.ContentFinding{}, inspection.Findings...)
 	writeJSON(w, nethttp.StatusOK, out)
+}
+
+func (h *GovernanceHandler) findings(w nethttp.ResponseWriter, r *nethttp.Request) {
+	findings, err := h.quarantine.FindingsFor(r.Context(), principalOf(r), r.PathValue("id"))
+	if err != nil {
+		writeSecurityError(w, h.log, err)
+		return
+	}
+	writeJSON(w, nethttp.StatusOK, map[string]any{"findings": append([]model.ContentFinding{}, findings...)})
+}
+
+func (h *GovernanceHandler) blastRadius(w nethttp.ResponseWriter, r *nethttp.Request) {
+	out, err := h.quarantine.BlastRadiusFor(r.Context(), principalOf(r), r.PathValue("id"))
+	if err != nil {
+		writeSecurityError(w, h.log, err)
+		return
+	}
+	out.Assets = append([]model.BlastAsset{}, out.Assets...)
+	out.Snapshots = append([]model.BlastSnapshot{}, out.Snapshots...)
+	out.Downloads = append([]model.BlastDownload{}, out.Downloads...)
+	writeJSON(w, nethttp.StatusOK, out)
+}
+
+// contentPolicyBody is a tenant's content policy on the wire.
+type contentPolicyBody struct {
+	AllowedTypes      []string          `json:"allowed_types"`
+	DeniedTypes       []string          `json:"denied_types"`
+	MaxSizeBytes      int64             `json:"max_size_bytes"`
+	UnknownTypeAction string            `json:"unknown_type_action"`
+	FindingActions    map[string]string `json:"finding_actions"`
+}
+
+func policyBody(p model.ContentPolicy) contentPolicyBody {
+	body := contentPolicyBody{AllowedTypes: append([]string{}, p.AllowedTypes...), DeniedTypes: append([]string{}, p.DeniedTypes...),
+		MaxSizeBytes: p.MaxSizeBytes, UnknownTypeAction: p.UnknownTypeAction, FindingActions: p.FindingActions}
+	if body.FindingActions == nil {
+		body.FindingActions = map[string]string{}
+	}
+	return body
+}
+
+func (h *GovernanceHandler) contentPolicy(w nethttp.ResponseWriter, r *nethttp.Request) {
+	policy, err := h.quarantine.ContentPolicyFor(r.Context(), principalOf(r))
+	if err != nil {
+		writeSecurityError(w, h.log, err)
+		return
+	}
+	writeJSON(w, nethttp.StatusOK, map[string]any{"policy": policyBody(policy), "finding_families": model.FindingFamilies})
+}
+
+func (h *GovernanceHandler) setContentPolicy(w nethttp.ResponseWriter, r *nethttp.Request) {
+	var body contentPolicyBody
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	policy, err := h.quarantine.SetContentPolicyFor(r.Context(), principalOf(r), model.ContentPolicy{
+		AllowedTypes: body.AllowedTypes, DeniedTypes: body.DeniedTypes, MaxSizeBytes: body.MaxSizeBytes,
+		UnknownTypeAction: body.UnknownTypeAction, FindingActions: body.FindingActions,
+	})
+	if err != nil {
+		writeSecurityError(w, h.log, err)
+		return
+	}
+	writeJSON(w, nethttp.StatusOK, map[string]any{"policy": policyBody(policy)})
 }
 
 func (h *GovernanceHandler) release(w nethttp.ResponseWriter, r *nethttp.Request) {
@@ -402,7 +472,8 @@ func (h *GovernanceHandler) setPolicy(w nethttp.ResponseWriter, r *nethttp.Reque
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	policy := model.RetentionPolicy{Scope: strings.ToUpper(body.Scope), ScopeKey: body.ScopeKey, Reason: body.Reason}
+	policy := model.RetentionPolicy{Scope: strings.ToUpper(body.Scope), ScopeKey: body.ScopeKey, Reason: body.Reason,
+		LockMode: strings.ToUpper(body.LockMode), RetainFromKey: body.RetainFromKey, Template: body.Template}
 	for _, d := range []struct {
 		value  string
 		target **time.Duration
@@ -420,13 +491,22 @@ func (h *GovernanceHandler) setPolicy(w nethttp.ResponseWriter, r *nethttp.Reque
 		}
 		*d.target = &parsed
 	}
-	stored, err := h.lifecycle.SetPolicyFor(r.Context(), principalOf(r), policy)
+	stored, impact, err := h.lifecycle.SetPolicyGoverned(r.Context(), principalOf(r), asset.PolicyInput{
+		Policy: policy, ConfirmCompliance: body.ConfirmCompliance, DryRun: body.DryRun})
+	if body.DryRun && (err == nil || errors.Is(err, model.ErrComplianceLocked)) {
+		writeJSON(w, nethttp.StatusOK, map[string]any{"dry_run": true, "impact": impact})
+		return
+	}
+	if writeApproval(w, err) {
+		return
+	}
 	if err != nil {
 		h.governanceError(w, err)
 		return
 	}
 	writeJSON(w, nethttp.StatusOK, map[string]any{"id": stored.ID, "scope": stored.Scope, "scope_key": stored.ScopeKey,
-		"version": stored.Version, "effective_from": stored.EffectiveFrom})
+		"version": stored.Version, "effective_from": stored.EffectiveFrom, "lock_mode": stored.LockMode,
+		"retain_from_key": stored.RetainFromKey, "template": stored.Template, "impact": impact})
 }
 
 // listPolicies answers the newest version of every policy, or with
@@ -451,6 +531,7 @@ func (h *GovernanceHandler) listPolicies(w nethttp.ResponseWriter, r *nethttp.Re
 			"min_retention": durationText(p.MinRetention), "max_age": durationText(p.MaxAge),
 			"deletion_grace": durationText(p.DeletionGrace), "quarantine_retention": durationText(p.QuarantineRetention),
 			"effective_from": p.EffectiveFrom, "created_by": p.CreatedBy, "reason": p.Reason, "created_at": p.CreatedAt,
+			"lock_mode": p.LockMode, "retain_from_key": p.RetainFromKey, "template": p.Template,
 		})
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
@@ -467,10 +548,7 @@ func (h *GovernanceHandler) listHolds(w nethttp.ResponseWriter, r *nethttp.Reque
 	}
 	out := make([]map[string]any, 0, len(holds))
 	for _, hold := range holds {
-		out = append(out, map[string]any{
-			"id": hold.ID, "scope": hold.Scope, "scope_key": hold.ScopeKey, "reason": hold.Reason,
-			"placed_by": hold.PlacedBy, "placed_at": hold.PlacedAt, "released_by": hold.ReleasedBy, "released_at": hold.ReleasedAt,
-		})
+		out = append(out, holdBody(hold))
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
 	writeJSON(w, nethttp.StatusOK, map[string]any{"holds": out})
@@ -492,16 +570,23 @@ func (h *GovernanceHandler) placeHold(w nethttp.ResponseWriter, r *nethttp.Reque
 	}
 	hold, err := h.lifecycle.PlaceHoldFor(r.Context(), principalOf(r), model.LegalHold{
 		Scope: strings.ToUpper(body.Scope), ScopeKey: body.ScopeKey, Reason: body.Reason,
+		Query: body.Query, Matter: body.Matter, Custodians: body.Custodians,
 	})
 	if err != nil {
 		h.governanceError(w, err)
 		return
 	}
-	writeJSON(w, nethttp.StatusCreated, map[string]any{"id": hold.ID, "scope": hold.Scope, "scope_key": hold.ScopeKey, "placed_at": hold.PlacedAt})
+	writeJSON(w, nethttp.StatusCreated, holdBody(hold))
 }
 
+// releaseHold releases a hold, or answers 202 with the approval it waits
+// for under the two-person rule. ?reason= says why.
 func (h *GovernanceHandler) releaseHold(w nethttp.ResponseWriter, r *nethttp.Request) {
-	if err := h.lifecycle.ReleaseHoldFor(r.Context(), principalOf(r), r.PathValue("id")); err != nil {
+	err := h.lifecycle.ReleaseHoldGoverned(r.Context(), principalOf(r), r.PathValue("id"), r.URL.Query().Get("reason"))
+	if writeApproval(w, err) {
+		return
+	}
+	if err != nil {
 		h.governanceError(w, err)
 		return
 	}
@@ -516,8 +601,14 @@ func (h *GovernanceHandler) governanceError(w nethttp.ResponseWriter, err error)
 		return
 	}
 	switch {
-	case isNotFound(err):
+	case isNotFound(err), errors.Is(err, model.ErrApprovalNotFound):
 		writeJSON(w, nethttp.StatusNotFound, problem{Error: "not found", Code: "not_found"})
+	case errors.Is(err, model.ErrComplianceLocked):
+		writeJSON(w, nethttp.StatusConflict, problem{Error: err.Error(), Code: "compliance_locked"})
+	case errors.Is(err, model.ErrApprovalDecided):
+		writeJSON(w, nethttp.StatusConflict, problem{Error: err.Error(), Code: "approval_decided"})
+	case errors.Is(err, model.ErrSelfApproval):
+		writeJSON(w, nethttp.StatusForbidden, problem{Error: err.Error(), Code: "self_approval"})
 	default:
 		// Policy and hold validation: the service's message is safe.
 		writeJSON(w, nethttp.StatusBadRequest, problem{Error: err.Error(), Code: "invalid_request"})

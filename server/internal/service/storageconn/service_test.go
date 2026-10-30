@@ -10,6 +10,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -108,7 +110,23 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.svc.partHTTP = &http.Client{Transport: memoryParts{f.clients.storage}}
 	return f
+}
+
+// memoryParts takes the multipart probe's part upload the way a browser's
+// PUT to the presigned URL would reach a real provider.
+type memoryParts struct{ storage *memory.ObjectStorage }
+
+func (m memoryParts) RoundTrip(r *http.Request) (*http.Response, error) {
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, err
+	}
+	part, _ := strconv.Atoi(r.URL.Query().Get("partNumber"))
+	etag := m.storage.PutPart(r.URL.Query().Get("uploadId"), int32(part), data)
+	header := http.Header{"Etag": {etag}}
+	return &http.Response{StatusCode: http.StatusOK, Header: header, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
 }
 
 var (

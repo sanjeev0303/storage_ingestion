@@ -54,6 +54,8 @@ type Config struct {
 	Endpoint string
 	// PartBytes is the chunk of a streaming write.
 	PartBytes int
+	// KMSKey, when set, is the Cloud KMS key every write and copy uses.
+	KMSKey string
 }
 
 // Storage is a GCS bucket client.
@@ -65,6 +67,7 @@ type Storage struct {
 	signHost  string
 	insecure  bool
 	partBytes int
+	kmsKey    string
 }
 
 // New builds a GCS client from a service account key.
@@ -72,7 +75,7 @@ func New(ctx context.Context, cfg Config) (*Storage, error) {
 	if cfg.HTTPClient == nil {
 		return nil, errors.New("a GCS client needs the guarded HTTP client")
 	}
-	s := &Storage{partBytes: cfg.PartBytes}
+	s := &Storage{partBytes: cfg.PartBytes, kmsKey: cfg.KMSKey}
 	if s.partBytes <= 0 {
 		s.partBytes = 16 << 20
 	}
@@ -122,14 +125,16 @@ func (s *Storage) object(bucket, key string) *storage.ObjectHandle {
 	return s.client.Bucket(bucket).Object(key)
 }
 
-// sign makes a V4 signed URL for one object.
-func (s *Storage) sign(bucket, key, method string, expires time.Time, contentType string, query url.Values) (string, error) {
+// sign makes a V4 signed URL for one object. headers ("name:value") must
+// then be sent with the request.
+func (s *Storage) sign(bucket, key, method string, expires time.Time, contentType string, query url.Values, headers ...string) (string, error) {
 	if s.privateKey == nil {
 		return "", fmt.Errorf("%w: signed URLs need a service account key", model.ErrUnsupportedProvider)
 	}
 	opts := &storage.SignedURLOptions{
 		Scheme: storage.SigningSchemeV4, Method: method, Expires: expires, ContentType: contentType,
 		GoogleAccessID: s.accessID, PrivateKey: s.privateKey, QueryParameters: query, Style: storage.PathStyle(),
+		Headers: headers,
 	}
 	if s.signHost != "" {
 		opts.Hostname, opts.Insecure = s.signHost, s.insecure
@@ -148,11 +153,17 @@ func (s *Storage) CreateUploadPlan(_ context.Context, target interfaces.UploadTa
 	if time.Until(expires) > 7*24*time.Hour {
 		expires = time.Now().Add(7 * 24 * time.Hour)
 	}
-	u, err := s.sign(target.Bucket, target.ObjectKey, http.MethodPut, expires, target.ContentType, nil)
+	var headers map[string]string
+	var signed []string
+	if s.kmsKey != "" {
+		headers = map[string]string{"x-goog-encryption-kms-key-name": s.kmsKey}
+		signed = []string{"x-goog-encryption-kms-key-name:" + s.kmsKey}
+	}
+	u, err := s.sign(target.Bucket, target.ObjectKey, http.MethodPut, expires, target.ContentType, nil, signed...)
 	if err != nil {
 		return interfaces.UploadPlan{}, fmt.Errorf("sign upload: %w", err)
 	}
-	return interfaces.UploadPlan{UploadURL: u, ExpiresAt: expires.UTC()}, nil
+	return interfaces.UploadPlan{UploadURL: u, ExpiresAt: expires.UTC(), Headers: headers}, nil
 }
 
 func metadataOf(a *storage.ObjectAttrs) interfaces.ObjectMetadata {
@@ -301,7 +312,9 @@ func (s *Storage) PresignGet(_ context.Context, bucket, key string, ttl time.Dur
 
 // CopyObject copies inside GCS (a rewrite, for any size).
 func (s *Storage) CopyObject(ctx context.Context, sourceBucket, sourceKey, destinationBucket, destinationKey string) error {
-	_, err := s.object(destinationBucket, destinationKey).CopierFrom(s.object(sourceBucket, sourceKey)).Run(ctx)
+	copier := s.object(destinationBucket, destinationKey).CopierFrom(s.object(sourceBucket, sourceKey))
+	copier.DestinationKMSKeyName = s.kmsKey
+	_, err := copier.Run(ctx)
 	if err != nil {
 		return classify("copy object", err)
 	}
@@ -317,6 +330,7 @@ func (s *Storage) WriteObject(ctx context.Context, bucket, key string, body io.R
 	w := s.object(bucket, key).NewWriter(ctx)
 	w.ContentType = contentType
 	w.ChunkSize = s.partBytes
+	w.KMSKeyName = s.kmsKey
 	n, err := io.Copy(w, io.LimitReader(body, size))
 	if err == nil && n != size {
 		err = fmt.Errorf("%d of %d bytes: %w", n, size, io.ErrUnexpectedEOF)
@@ -522,6 +536,7 @@ func (s *Storage) compose(ctx context.Context, bucket, destination string, sourc
 	if contentType != "" {
 		c.ContentType = contentType
 	}
+	c.KMSKeyName = s.kmsKey
 	if _, err := c.Run(ctx); err != nil {
 		return classify("compose object", err)
 	}

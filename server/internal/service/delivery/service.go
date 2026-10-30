@@ -21,6 +21,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/metrics"
+	"github.com/sanjeev0303/object-storage-platform/internal/platform/correlation"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/retry"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/audit"
 )
@@ -109,11 +110,56 @@ type Service struct {
 	router interfaces.StorageRouter
 	// packs finds assets whose bytes were packed; nil when nothing is.
 	packs interfaces.PackLocator
+	// governance applies link, egress and classification rules; optional.
+	governance Governance
+	// replicas serve reads the primary cannot; optional.
+	replicas Replicas
+	// tiers says which assets must be restored first and checks the cost
+	// budget; optional.
+	tiers Tiers
+}
+
+// Tiers is what tiering adds to delivery (tiering.Service): an archived
+// asset is restored before it is read, and reads count against the
+// organization's cost budget (docs/tiering.md).
+type Tiers interface {
+	Archived(ctx context.Context, a model.Asset) error
+	Spend(ctx context.Context, p model.Principal, bytes int64) error
+}
+
+func (s *Service) Tiered(t Tiers) *Service {
+	s.tiers = t
+	return s
+}
+
+// budget checks a read of bytes against the cost budget.
+func (s *Service) budget(ctx context.Context, principal model.Principal, assetID, operation, requestID string, bytes int64) error {
+	if s.tiers == nil {
+		return nil
+	}
+	err := s.tiers.Spend(ctx, principal, bytes)
+	if errors.Is(err, model.ErrCostBudget) {
+		s.deny(ctx, principal, assetID, operation, requestID, "cost_budget")
+	}
+	return err
 }
 
 // Route lets delivery serve assets published on tenants' storage
 // connections. An asset is always read through its own connection, never
 // the organization's current default.
+// Governance is what access governance adds to delivery (access.Service).
+type Governance interface {
+	LinkTTL(ctx context.Context, p model.Principal, asset model.Asset, shareable bool) (time.Duration, error)
+	Egress(ctx context.Context, p model.Principal, bytes int64) error
+	LinkUsed(ctx context.Context, tokenHash string)
+}
+
+// Govern applies the organization's link, egress and classification rules.
+func (s *Service) Govern(g Governance) *Service {
+	s.governance = g
+	return s
+}
+
 func (s *Service) Route(router interfaces.StorageRouter) *Service {
 	s.router = router
 	return s
@@ -136,6 +182,49 @@ type readyStorage struct {
 	presign bool
 	// packed, when set, is the pack entry the bytes are read from.
 	packed *model.PackedLocation
+	// replica, when set, is the verified copy read because the primary
+	// did not answer (docs/copy-engine.md).
+	replica *model.AssetReplica
+}
+
+// key and version are what is read: the asset's own object, or its
+// replica.
+func (r readyStorage) key(asset model.Asset) (string, string) {
+	if r.replica != nil {
+		return r.replica.ObjectKey, r.replica.VersionID
+	}
+	return asset.ObjectKey, asset.StorageVersionID
+}
+
+// Replicas finds an asset's verified copy at another connection.
+type Replicas interface {
+	VerifiedReplica(ctx context.Context, tenantID, assetID string) (model.AssetReplica, bool, error)
+}
+
+// FailOver lets reads go to an asset's verified replica when its own
+// connection does not answer, or its object cannot be read as published.
+func (s *Service) FailOver(r Replicas) *Service {
+	s.replicas = r
+	return s
+}
+
+// replicaReady is where to read the asset's replica, if it has one.
+func (s *Service) replicaReady(ctx context.Context, asset model.Asset) (readyStorage, bool) {
+	if s.replicas == nil || s.router == nil {
+		return readyStorage{}, false
+	}
+	rep, ok, err := s.replicas.VerifiedReplica(ctx, asset.TenantID, asset.ID)
+	if err != nil || !ok {
+		return readyStorage{}, false
+	}
+	loc, err := s.router.Locate(ctx, asset.TenantID, rep.ConnectionID)
+	if err != nil {
+		return readyStorage{}, false
+	}
+	s.cfg.Metrics.Add("failover_reads", 1)
+	s.log.Warn("reading an asset from its replica", "asset_id", asset.ID, "tenant_id", asset.TenantID, "replica_connection_id", rep.ConnectionID)
+	return readyStorage{storage: loc.Storage, bucket: loc.ReadyBucket, prefix: loc.ReadyPrefix,
+		presign: loc.Capabilities.PresignedDownload, replica: &rep}, true
 }
 
 func (s *Service) ready(ctx context.Context, asset model.Asset) (readyStorage, error) {
@@ -219,6 +308,10 @@ type AssetInfo struct {
 	Dataset         string
 	Status          model.AssetStatus
 	RejectionReason string
+	// BlockedReason: a check after publication found the bytes unsafe.
+	BlockedReason string
+	// Classification: PUBLIC, INTERNAL, CONFIDENTIAL, RESTRICTED or "".
+	Classification string
 	// Deliverable reports whether a download would be served now.
 	Deliverable bool
 	// ETag is the download validator (set when Deliverable).
@@ -272,6 +365,9 @@ type Download struct {
 	First, Last        int64
 	Partial            bool
 	NotModified        bool
+	// ChecksumSHA256 is the whole object's SHA-256 (hex), so a client can
+	// pin the content it was promised.
+	ChecksumSHA256 string
 
 	principal model.Principal
 	assetID   string
@@ -297,11 +393,11 @@ func (s *Service) Metadata(ctx context.Context, principal model.Principal, asset
 	info := AssetInfo{
 		ID: asset.ID, FileName: asset.FileName, ContentType: SafeContentType(asset.ContentType),
 		SizeBytes: asset.SizeBytes, ChecksumSHA256: asset.ChecksumSHA256, Dataset: asset.Dataset, Status: asset.Status,
-		RejectionReason: asset.RejectionReason, PublishedAt: asset.PublishedAt,
+		RejectionReason: asset.RejectionReason, BlockedReason: asset.BlockedReason, Classification: asset.Classification, PublishedAt: asset.PublishedAt,
 		CreatedAt: asset.CreatedAt, UpdatedAt: asset.UpdatedAt,
 	}
 	r, err := s.ready(ctx, asset)
-	if err == nil && asset.Status == model.AssetStatusAvailable && asset.ObjectKey == promotedKey(r.prefix, asset) {
+	if err == nil && asset.Status == model.AssetStatusAvailable && asset.BlockedReason == "" && asset.ObjectKey == promotedKey(r.prefix, asset) {
 		info.Deliverable = true
 		info.ETag = entityTag(asset)
 	}
@@ -344,6 +440,25 @@ func (s *Service) CreateDownloadURL(ctx context.Context, principal model.Princip
 	if ttl > s.cfg.MaxTTL {
 		ttl = s.cfg.MaxTTL
 	}
+	if s.governance != nil {
+		// The organization's link policy and the asset's classification
+		// may forbid share links and shorten every link.
+		limit, err := s.governance.LinkTTL(ctx, principal, asset, mode == ModeToken)
+		if err != nil {
+			s.deny(ctx, principal, asset.ID, model.DeliveryOpDownloadURL, req.RequestID, "link_policy")
+			return DownloadURL{}, err
+		}
+		if limit > 0 && ttl > limit {
+			ttl = limit
+		}
+		if err := s.governance.Egress(ctx, principal, asset.SizeBytes); err != nil {
+			s.deny(ctx, principal, asset.ID, model.DeliveryOpDownloadURL, req.RequestID, "egress_budget")
+			return DownloadURL{}, err
+		}
+	}
+	if err := s.budget(ctx, principal, asset.ID, model.DeliveryOpDownloadURL, req.RequestID, asset.SizeBytes); err != nil {
+		return DownloadURL{}, err
+	}
 	expiresAt := s.now().Add(ttl)
 	fail := func(reason string, err error) (DownloadURL, error) {
 		s.fail(ctx, principal, asset.ID, model.DeliveryOpDownloadURL, req.RequestID, reason, err)
@@ -358,17 +473,18 @@ func (s *Service) CreateDownloadURL(ctx context.Context, principal model.Princip
 			return fail("token_issue_failed", err)
 		}
 		result = DownloadURL{URL: TokenPathPrefix + raw, ExpiresAt: expiresAt, Via: ModeToken, Revocable: true}
-	case s.cfg.CDN != nil && r.platform:
+	case s.cfg.CDN != nil && r.platform && r.replica == nil:
 		signed, err := s.cfg.CDN.Signer.SignURL(s.cdnURL(asset.ObjectKey), expiresAt)
 		if err != nil {
 			return fail("cdn_signing_failed", err)
 		}
 		result = DownloadURL{URL: signed, ExpiresAt: expiresAt, Via: "cdn"}
 	default:
-		presigned, err := r.storage.PresignGet(ctx, r.bucket, asset.ObjectKey, ttl, interfaces.DownloadOptions{
+		key, version := r.key(asset)
+		presigned, err := r.storage.PresignGet(ctx, r.bucket, key, ttl, interfaces.DownloadOptions{
 			ContentDisposition: attachment(req.Filename, asset.FileName),
 			ContentType:        SafeContentType(asset.ContentType),
-			VersionID:          asset.StorageVersionID,
+			VersionID:          version,
 		})
 		if err != nil {
 			return fail("presign_failed", err)
@@ -398,7 +514,26 @@ func (s *Service) Open(ctx context.Context, principal model.Principal, assetID s
 	if err != nil {
 		return Download{}, err
 	}
+	if err := s.countEgress(ctx, principal, asset, req); err != nil {
+		return Download{}, err
+	}
 	return s.open(ctx, principal, asset, r, model.DeliveryOpProxy, req)
+}
+
+// countEgress checks and counts a proxied download's bytes: a range's
+// length, or the whole object.
+func (s *Service) countEgress(ctx context.Context, principal model.Principal, asset model.Asset, req DownloadRequest) error {
+	bytes := asset.SizeBytes
+	if first, last, partial, err := parseRange(req.Range, asset.SizeBytes); err == nil && partial {
+		bytes = last - first + 1
+	}
+	if s.governance != nil {
+		if err := s.governance.Egress(ctx, principal, bytes); err != nil {
+			s.deny(ctx, principal, asset.ID, model.DeliveryOpProxy, req.RequestID, "egress_budget")
+			return err
+		}
+	}
+	return s.budget(ctx, principal, asset.ID, model.DeliveryOpProxy, req.RequestID, bytes)
 }
 
 // OpenToken serves a token link. The token's issuer must still be allowed
@@ -444,6 +579,12 @@ func (s *Service) OpenToken(ctx context.Context, rawToken string, req DownloadRe
 	asset, r, err := s.deliverable(ctx, principal, token.AssetID, model.DeliveryOpToken, req.RequestID)
 	if err != nil {
 		return Download{}, err
+	}
+	if err := s.countEgress(ctx, principal, asset, req); err != nil {
+		return Download{}, err
+	}
+	if s.governance != nil {
+		s.governance.LinkUsed(ctx, token.TokenHash)
 	}
 	if req.Filename == "" {
 		req.Filename = token.Filename
@@ -503,6 +644,7 @@ func (s *Service) open(ctx context.Context, principal model.Principal, asset mod
 		ETag:               entityTag(asset),
 		LastModified:       lastModified(asset),
 		TotalSize:          asset.SizeBytes,
+		ChecksumSHA256:     asset.ChecksumSHA256,
 		principal:          principal,
 		assetID:            asset.ID,
 		operation:          operation,
@@ -566,11 +708,13 @@ func (s *Service) open(ctx context.Context, principal model.Principal, asset mod
 	if r.packed != nil {
 		body, err = s.openPacked(ctx, asset, r, first, last, partial, cond)
 	} else {
-		requestLast := last
-		if !partial {
-			requestLast = -1
+		body, err = s.openReady(ctx, asset, r, first, last, partial, cond)
+	}
+	// The primary failed: a verified replica, if there is one, serves.
+	if err != nil && r.replica == nil && ctx.Err() == nil {
+		if rr, ok := s.replicaReady(ctx, asset); ok {
+			body, err = s.openReady(ctx, asset, rr, first, last, partial, interfaces.ReadCondition{VersionID: rr.replica.VersionID})
 		}
-		body, err = r.storage.OpenRange(ctx, r.bucket, asset.ObjectKey, first, requestLast, cond)
 	}
 	if err != nil {
 		return Download{}, s.storageError(ctx, principal, asset, operation, req.RequestID, err)
@@ -583,6 +727,22 @@ func (s *Service) open(ctx context.Context, principal model.Principal, asset mod
 		s.cfg.Metrics.Add("downloads_full", 1)
 	}
 	return d, nil
+}
+
+// openReady reads bytes first to last of an asset's own object, or of its
+// replica. A whole read of a replica is checked against the asset's
+// SHA-256 as it streams.
+func (s *Service) openReady(ctx context.Context, asset model.Asset, r readyStorage, first, last int64, partial bool, cond interfaces.ReadCondition) (io.ReadCloser, error) {
+	requestLast := last
+	if !partial {
+		requestLast = -1
+	}
+	key, _ := r.key(asset)
+	body, err := r.storage.OpenRange(ctx, r.bucket, key, first, requestLast, cond)
+	if err != nil || r.replica == nil || partial {
+		return body, err
+	}
+	return compaction.VerifiedEntry(body, asset.SizeBytes, asset.ChecksumSHA256), nil
 }
 
 // openPacked reads bytes first to last of a packed asset: exactly that
@@ -629,6 +789,9 @@ func (s *Service) readCondition(ctx context.Context, principal model.Principal, 
 			return cond, s.storageError(ctx, principal, asset, operation, req.RequestID, interfaces.ErrPreconditionFailed)
 		}
 		return cond, nil
+	}
+	if r.replica != nil {
+		return interfaces.ReadCondition{IfMatch: r.replica.ETag, VersionID: r.replica.VersionID}, nil
 	}
 	cond := interfaces.ReadCondition{IfMatch: asset.StorageETag, VersionID: asset.StorageVersionID}
 	if cond.IfMatch != "" && !req.HeadOnly {
@@ -710,6 +873,11 @@ func (s *Service) owned(ctx context.Context, principal model.Principal, assetID 
 	if asset.Status == model.AssetStatusDeleted {
 		return model.Asset{}, ErrNotFound
 	}
+	// A token confined to datasets (a vendor workspace) sees nothing else,
+	// and cannot tell it exists.
+	if !principal.Scope.Allows(asset.Dataset) {
+		return model.Asset{}, ErrNotFound
+	}
 	return *asset, nil
 }
 
@@ -733,8 +901,15 @@ func (s *Service) deliverable(ctx context.Context, principal model.Principal, as
 		s.deny(ctx, principal, assetID, operation, requestID, strings.ToLower(string(asset.Status)))
 		return model.Asset{}, readyStorage{}, ErrNotAvailable
 	}
+	if asset.BlockedReason != "" {
+		s.deny(ctx, principal, assetID, operation, requestID, "blocked")
+		return model.Asset{}, readyStorage{}, ErrNotAvailable
+	}
 	r, err := s.ready(ctx, asset)
 	if err != nil {
+		if rr, ok := s.replicaReady(ctx, asset); ok {
+			return asset, rr, nil
+		}
 		s.fail(ctx, principal, assetID, operation, requestID, "storage_connection", err)
 		return model.Asset{}, readyStorage{}, ErrStorageUnavailable
 	}
@@ -759,6 +934,16 @@ func (s *Service) deliverable(ctx context.Context, principal model.Principal, as
 			// A signed URL or the CDN could read the pack's other entries:
 			// a packed asset is only ever streamed, its own bytes only.
 			r.packed, r.presign, r.platform = &loc, false, false
+		}
+	}
+	if s.tiers != nil {
+		if err := s.tiers.Archived(ctx, asset); err != nil {
+			if errors.Is(err, model.ErrRestoreRequired) {
+				s.deny(ctx, principal, assetID, operation, requestID, "restore_required")
+				return model.Asset{}, readyStorage{}, err
+			}
+			s.fail(ctx, principal, assetID, operation, requestID, "tier_lookup", err)
+			return model.Asset{}, readyStorage{}, ErrStorageUnavailable
 		}
 	}
 	return asset, r, nil
@@ -793,6 +978,9 @@ func (s *Service) issueToken(ctx context.Context, principal model.Principal, ass
 // from its tenant and ID, or, for bytes stored once for identical uploads,
 // from the asset that first stored them.
 func promotedKey(prefix string, asset model.Asset) string {
+	if asset.Adoption != "" {
+		return asset.ObjectKey // adopted where it already was
+	}
 	owner := asset.ID
 	if asset.SharedFrom != "" {
 		owner = asset.SharedFrom
@@ -812,11 +1000,14 @@ func (s *Service) cdnURL(objectKey string) string {
 func (s *Service) event(principal model.Principal, assetID, operation, outcome, requestID string) model.DeliveryAuditEvent {
 	return model.DeliveryAuditEvent{
 		ID: s.newID(), TenantID: principal.TenantID, PrincipalID: principal.UserID, AssetID: assetID,
-		Operation: operation, Outcome: outcome, RequestID: requestID, CreatedAt: s.now(),
+		Operation: operation, Outcome: outcome, RequestID: requestID, CreatedAt: s.now(), CredentialID: principal.Scope.TokenID,
 	}
 }
 
 func (s *Service) record(ctx context.Context, event model.DeliveryAuditEvent) error {
+	if event.SourceIP == "" {
+		event.SourceIP = correlation.Source(ctx)
+	}
 	err := s.audit.Record(ctx, event)
 	if err != nil {
 		s.log.Error("record delivery audit event", "operation", event.Operation, "outcome", event.Outcome, "error", retry.Sanitize(err))

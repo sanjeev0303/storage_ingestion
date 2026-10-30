@@ -271,3 +271,4 @@ Phosphor only. Regular weight by default, fill weight for the current nav item. 
 - **Don't** use Lucide, or Inter, Geist or Space Grotesk. Phosphor and Hanken Grotesk are the set.
 - **Don't** tell status by hue alone, or use amber as text on the ground.
 - **Don't** add a privacy policy page, fake testimonials, invented customer numbers or any unbacked claim.
+

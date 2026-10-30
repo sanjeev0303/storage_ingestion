@@ -11,6 +11,9 @@ import (
 var (
 	// ErrObjectNotFound: the provider answered that the object is absent.
 	ErrObjectNotFound = errors.New("storage object not found")
+	// ErrStorageBadRequest: the provider refused the request as malformed,
+	// as S3 does a HEAD of an object encrypted with a customer key.
+	ErrStorageBadRequest = errors.New("storage request refused as malformed")
 	// ErrStorageUploadNotFound: the provider answered that the multipart
 	// upload is absent (completed, aborted, or never created).
 	ErrStorageUploadNotFound = errors.New("storage multipart upload not found")

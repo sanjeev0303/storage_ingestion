@@ -1,6 +1,9 @@
 package http
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"context"
 	"errors"
 	"fmt"
@@ -172,6 +175,11 @@ func (h *DownloadHandler) serve(w nethttp.ResponseWriter, r *nethttp.Request, op
 
 	header := w.Header()
 	header.Set("ETag", download.ETag)
+	// RFC 9530: the digest of the whole object, also on a range, so a client
+	// can check what it reassembles.
+	if sum, err := hex.DecodeString(download.ChecksumSHA256); err == nil && len(sum) == sha256.Size {
+		header.Set("Repr-Digest", "sha-256=:"+base64.StdEncoding.EncodeToString(sum)+":")
+	}
 	header.Set("Last-Modified", download.LastModified.Format(nethttp.TimeFormat))
 	// Private: no shared cache may keep one tenant's bytes for another, and
 	// every use must pass authorization again.

@@ -1,11 +1,13 @@
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { API, server } from "@/test/server";
 import { renderWithProviders } from "@/test/render";
 import { validateAction } from "../validate";
 import { AuditScreen } from "./audit-screen";
+
+vi.mock("next/navigation", () => ({ usePathname: () => "/app/audit" }));
 
 function event(seq: number, extra: object = {}) {
   return {

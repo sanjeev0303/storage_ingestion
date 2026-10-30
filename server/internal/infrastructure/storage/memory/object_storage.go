@@ -83,6 +83,9 @@ type ObjectStorage struct {
 	// Versioning is what Capabilities reports: a test of a versioned
 	// bucket sets it.
 	Versioning bool
+	// tiers holds each key's tier and restore (tiering.go).
+	tiers     map[string]tierState
+	TierCalls int
 	// Caps, when set, is what ProviderCapabilities reports, for a test of
 	// a provider that cannot do something.
 	Caps *model.ProviderCapabilities

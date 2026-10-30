@@ -89,7 +89,8 @@ export type IngestionEntry = {
   updated_at: string;
 };
 
-export type Grant = { entry: IngestionEntry; upload_url?: string; url_expires_at?: string };
+// upload_headers go with the PUT: Azure's blob type, or a connection's customer-managed key.
+export type Grant = { entry: IngestionEntry; upload_url?: string; url_expires_at?: string; upload_headers?: Record<string, string> };
 
 export type ClaimResponse = {
   grants: Grant[] | null;

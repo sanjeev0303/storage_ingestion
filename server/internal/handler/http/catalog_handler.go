@@ -77,6 +77,7 @@ func versionResponse(a model.Asset, currentAssetID string) response.ObjectVersio
 		Version: a.Version, AssetID: a.ID, Status: string(a.Status), Current: a.ID == currentAssetID, FileName: a.FileName,
 		SizeBytes: a.SizeBytes, ContentType: a.ContentType, ChecksumSHA256: a.ChecksumSHA256, ProviderETag: a.StorageETag,
 		ProviderVersionID: a.StorageVersionID, Metadata: a.Metadata, PublishedAt: a.PublishedAt, CreatedAt: a.CreatedAt,
+		StorageTier: string(a.StorageTier), ReadableUntil: a.ReadableUntil,
 	}
 	if a.ChecksumSHA256 != "" {
 		out.ChecksumAlgorithm = "sha256"

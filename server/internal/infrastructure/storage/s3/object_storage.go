@@ -22,6 +22,13 @@ import (
 type ObjectStorage struct {
 	client    *s3.Client
 	presigner *s3.PresignClient
+	// plain is client without the bucket-owner header (posture.go); nil
+	// when the connection pins no owner.
+	plain *s3.Client
+	// aws is set for AWS's own S3, where STS answers posture questions.
+	aws bool
+	// kmsKey, when set, encrypts every write with that SSE-KMS key.
+	kmsKey string
 	// partBytes is the buffer of a streaming write (connection.go).
 	partBytes int64
 	// singleCopyBytes and copyPartBytes override the copy limits in
@@ -67,6 +74,12 @@ func (s *ObjectStorage) CreateUploadPlan(
 		Key:         aws.String(target.ObjectKey),
 		ContentType: aws.String(target.ContentType),
 	}
+	// The key is part of the signature: the client must send these headers.
+	var headers map[string]string
+	if s.kmsKey != "" {
+		input.ServerSideEncryption, input.SSEKMSKeyId = types.ServerSideEncryptionAwsKms, aws.String(s.kmsKey)
+		headers = map[string]string{"x-amz-server-side-encryption": "aws:kms", "x-amz-server-side-encryption-aws-kms-key-id": s.kmsKey}
+	}
 
 	presigned, err := s.presigner.PresignPutObject(
 		ctx,
@@ -82,6 +95,7 @@ func (s *ObjectStorage) CreateUploadPlan(
 	return interfaces.UploadPlan{
 		UploadURL: presigned.URL,
 		ExpiresAt: time.Now().UTC().Add(ttl),
+		Headers:   headers,
 	}, nil
 }
 
@@ -157,6 +171,9 @@ func (s *ObjectStorage) BeginMultipart(
 		Bucket:      aws.String(bucket),
 		Key:         aws.String(objectKey),
 		ContentType: aws.String(contentType),
+	}
+	if s.kmsKey != "" {
+		input.ServerSideEncryption, input.SSEKMSKeyId = types.ServerSideEncryptionAwsKms, aws.String(s.kmsKey)
 	}
 
 	output, err := s.client.CreateMultipartUpload(ctx, input)
@@ -458,12 +475,16 @@ func (s *ObjectStorage) CopyObject(
 		return s.copyInParts(ctx, sourceBucket, sourceKey, source.ETag, source.SizeBytes, destinationBucket, destinationKey)
 	}
 
-	_, err = s.client.CopyObject(ctx, &s3.CopyObjectInput{
+	input := &s3.CopyObjectInput{
 		Bucket:            aws.String(destinationBucket),
 		Key:               aws.String(destinationKey),
 		CopySource:        aws.String(copySource(sourceBucket, sourceKey)),
 		CopySourceIfMatch: aws.String(source.ETag),
-	})
+	}
+	if s.kmsKey != "" {
+		input.ServerSideEncryption, input.SSEKMSKeyId = types.ServerSideEncryptionAwsKms, aws.String(s.kmsKey)
+	}
+	_, err = s.client.CopyObject(ctx, input)
 	if err != nil {
 		return classify("copy object", err)
 	}
@@ -536,6 +557,8 @@ func classifyStatus(operation string, err error, text string) error {
 	var withStatus interface{ HTTPStatusCode() int }
 	if errors.As(err, &withStatus) {
 		switch withStatus.HTTPStatusCode() {
+		case 400:
+			return fmt.Errorf("%s: %w: %s", operation, interfaces.ErrStorageBadRequest, text)
 		case 404:
 			return fmt.Errorf("%s: %w", operation, interfaces.ErrObjectNotFound)
 		case 412:

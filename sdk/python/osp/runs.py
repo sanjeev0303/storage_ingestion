@@ -48,8 +48,10 @@ def active_tracker():
 
 
 def record_run(client, name, versions, params=None, metrics=None, source=None, external_id=None, url=None,
-               status="RUNNING", model=None):
-    """Records a run that trained on versions. model is {"name", "version", "uri"}."""
+               status="RUNNING", model=None, roles=None):
+    """Records a run that trained on versions. model is {"name", "version", "uri"}.
+    roles maps a version to TRAIN, VALIDATION or TEST; a run with both a
+    training and an evaluation version is checked for leakage."""
     detected = active_tracker() if source is None else (source, "", "")
     body = {
         "name": name,
@@ -63,6 +65,8 @@ def record_run(client, name, versions, params=None, metrics=None, source=None, e
     }
     if model:
         body["model"] = model
+    if roles:
+        body["roles"] = {version_id(v): r.upper() for v, r in roles.items()}
     return client.post("/api/v1/training-runs", body)
 
 

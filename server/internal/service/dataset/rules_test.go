@@ -228,11 +228,56 @@ func TestBuiltinProfilesCompile(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", p.ID, err)
 		}
-		if len(checks) != len(p.Definition.Rules) || p.Version != 1 || !strings.HasPrefix(p.ID, builtinPrefix) {
+		if len(checks) != len(p.Definition.Rules) || p.Version != 5 || !strings.HasPrefix(p.ID, builtinPrefix) {
 			t.Fatalf("%s: %d checks of %d rules", p.ID, len(checks), len(p.Definition.Rules))
 		}
 	}
-	if _, ok := builtinProfile("builtin:image", 2); ok {
+	// Version 2 added the content checks and version 3 the storage
+	// integrity rule; the versions older reports were judged by still
+	// resolve unchanged.
+	v1, ok := builtinProfile("builtin:image", 1)
+	v2, _ := builtinProfile("builtin:image", 2)
+	v3, _ := builtinProfile("builtin:image", 3)
+	v4, _ := builtinProfile("builtin:image", 4)
+	v5, _ := builtinProfile("builtin:image", 0)
+	if !ok || v2.Version != 2 || len(v2.Definition.Rules) != len(v1.Definition.Rules)+1 ||
+		v2.Definition.Rules[len(v2.Definition.Rules)-1].Type != "content_checks" {
+		t.Fatalf("versions: v1 %d rules, v2 %d rules", len(v1.Definition.Rules), len(v2.Definition.Rules))
+	}
+	if v3.Version != 3 || len(v3.Definition.Rules) != len(v2.Definition.Rules)+1 ||
+		v3.Definition.Rules[len(v3.Definition.Rules)-1].Type != "storage_integrity" {
+		t.Fatalf("version 3: %d rules", len(v3.Definition.Rules))
+	}
+	if v4.Version != 4 || v4.Definition.Rules[len(v4.Definition.Rules)-1].Type != "residency" {
+		t.Fatalf("version 4: %+v", v4.Definition.Rules)
+	}
+	if v5.Version != 5 || len(v5.Definition.Rules) != len(v4.Definition.Rules)+1 ||
+		v5.Definition.Rules[len(v5.Definition.Rules)-1].Type != "small_files" {
+		t.Fatalf("version 5: %d rules", len(v5.Definition.Rules))
+	}
+	if _, ok := builtinProfile("builtin:image", 6); ok {
 		t.Fatal("a built-in profile version that does not exist was found")
+	}
+}
+
+func TestSmallFilesWarnsWhenMostFilesAreSmallAndUnpacked(t *testing.T) {
+	var c check
+	if err := compileSmallFiles(&c, nil); err != nil {
+		t.Fatal(err)
+	}
+	small := model.VersionAggregates{Members: 100, MedianSize: 40 << 10, PackedMembers: 10}
+	if issues, _ := c.dataset(small); len(issues) != 1 || issues[0].Code != "SMALL_FILES_UNPACKED" {
+		t.Fatalf("small and unpacked: %+v", issues)
+	}
+	small.PackedMembers = 60
+	if issues, _ := c.dataset(small); len(issues) != 0 {
+		t.Fatalf("mostly packed: %+v", issues)
+	}
+	large := model.VersionAggregates{Members: 100, MedianSize: 8 << 20}
+	if issues, _ := c.dataset(large); len(issues) != 0 {
+		t.Fatalf("large files: %+v", issues)
+	}
+	if err := compileSmallFiles(&c, json.RawMessage(`{"packed_share":2}`)); err == nil {
+		t.Fatal("a share above 1 is refused")
 	}
 }

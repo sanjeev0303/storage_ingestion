@@ -51,8 +51,9 @@ type Dependencies struct {
 
 // Registry is the storage router and chooser of one process.
 type Registry struct {
-	deps Dependencies
-	now  func() time.Time
+	deps  Dependencies
+	now   func() time.Time
+	guard interfaces.PlacementGuard
 
 	mu      sync.Mutex
 	clients map[string]*cachedClient // by connection ID
@@ -158,6 +159,11 @@ func (r *Registry) ChooseForUpload(ctx context.Context, p model.Principal, reque
 	if !c.AcceptsNewWork() {
 		return interfaces.StorageChoice{}, fmt.Errorf("%w: it is %s", model.ErrConnectionNotActive, c.Status)
 	}
+	if r.guard != nil && dataset != "" {
+		if err := r.guard.CheckDatasetPlacement(ctx, p, dataset, c.ID); err != nil {
+			return interfaces.StorageChoice{}, err
+		}
+	}
 	final, err := r.location(ctx, c)
 	if err != nil {
 		return interfaces.StorageChoice{}, err
@@ -168,6 +174,10 @@ func (r *Registry) ChooseForUpload(ctx context.Context, p model.Principal, reque
 	}
 	return interfaces.StorageChoice{Final: final, Staging: staging}, nil
 }
+
+// GuardPlacement checks every upload's connection against its dataset's
+// placement rules.
+func (r *Registry) GuardPlacement(g interfaces.PlacementGuard) { r.guard = g }
 
 // Invalidate drops what the registry holds for a connection: called when
 // it is rotated, changed, disabled or deleted in this process. Other

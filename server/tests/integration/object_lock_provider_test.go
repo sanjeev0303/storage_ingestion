@@ -11,6 +11,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
+	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
+
 	s3storage "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/s3"
 )
 
@@ -50,16 +52,48 @@ func TestProviderObjectLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	version := aws.ToString(out.VersionId)
-	until := time.Now().Add(4 * time.Second)
-	if err := storage.LockObjectVersion(ctx, bucket, key, version, until, true); err != nil {
+	until := time.Now().Add(4 * time.Second).Truncate(time.Second)
+	if err := storage.LockObjectVersion(ctx, bucket, key, version, interfaces.VersionLock{Mode: "GOVERNANCE", Until: until, LegalHold: true}); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.DeleteObjectVersion(ctx, bucket, key, version); err == nil {
 		t.Fatal("a held, retained version was deleted")
 	}
-	if err := storage.LockObjectVersion(ctx, bucket, key, version, time.Time{}, false); err != nil {
+	// The provider's own record, read back, is what was set.
+	got, err := storage.ObjectLockStatus(ctx, bucket, key, version)
+	if err != nil || got.Mode != "GOVERNANCE" || !got.LegalHold || !got.Until.Equal(until.UTC()) {
+		t.Fatalf("read back: %+v %v", got, err)
+	}
+	// A lock in force cannot change its mode without the governance
+	// bypass, which the platform never sends.
+	if err := storage.LockObjectVersion(ctx, bucket, key, version, interfaces.VersionLock{Mode: "COMPLIANCE", Until: until}); err == nil {
+		t.Fatal("the provider changed a lock's mode without the bypass")
+	}
+	// The legal hold comes off; the retention stays.
+	if err := storage.LockObjectVersion(ctx, bucket, key, version, interfaces.VersionLock{}); err != nil {
 		t.Fatal(err)
 	}
+
+	// COMPLIANCE on a new version: read back as set; the provider refuses a
+	// downgrade and a delete until its date.
+	out2, err := client.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(bucket), Key: aws.String(key + "-c"), Body: bytes.NewReader([]byte("worm"))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cv := aws.ToString(out2.VersionId)
+	if err := storage.LockObjectVersion(ctx, bucket, key+"-c", cv, interfaces.VersionLock{Mode: "COMPLIANCE", Until: until}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := storage.ObjectLockStatus(ctx, bucket, key+"-c", cv); err != nil || got.Mode != "COMPLIANCE" {
+		t.Fatalf("COMPLIANCE read back: %+v %v", got, err)
+	}
+	if err := storage.LockObjectVersion(ctx, bucket, key+"-c", cv, interfaces.VersionLock{Mode: "GOVERNANCE", Until: until}); err == nil {
+		t.Fatal("the provider let COMPLIANCE be downgraded")
+	}
+	if err := storage.DeleteObjectVersion(ctx, bucket, key+"-c", cv); err == nil {
+		t.Fatal("a COMPLIANCE version was deleted before its date")
+	}
+	defer func() { _ = storage.DeleteObjectVersion(context.Background(), bucket, key+"-c", cv) }()
 	if err := storage.DeleteObjectVersion(ctx, bucket, key, version); err == nil {
 		t.Fatal("a retained version was deleted before its date")
 	}

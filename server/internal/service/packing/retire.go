@@ -123,7 +123,7 @@ func (s *Service) planRewrites(ctx context.Context, stats *CycleStats) error {
 			e := live[i]
 			return model.PackEntry{AssetID: e.AssetID, ObjectID: e.ObjectID, Version: e.Version, SizeBytes: e.SizeBytes,
 				ChecksumSHA256: e.ChecksumSHA256, SourceKey: old.ObjectKey, SourceETag: old.StorageETag,
-				SourceVersionID: old.StorageVersionID}
+				SourceVersionID: old.StorageVersionID, SourcePackID: old.ID, SourceOffset: e.Offset}
 		})
 		if err != nil {
 			errs = append(errs, err)

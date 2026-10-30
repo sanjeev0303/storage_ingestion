@@ -45,8 +45,8 @@ func (s *Service) lockable(ctx context.Context, asset model.Asset) (interfaces.O
 		return nil, "", "", false, nil
 	}
 	key := fmt.Sprintf("%s/%s/%s", place.ReadyPrefix, asset.TenantID, asset.ID)
-	if asset.SharedFrom != "" {
-		key = asset.ObjectKey // the object it shares; a lock only ever extends
+	if asset.SharedFrom != "" || asset.Adoption != "" {
+		key = asset.ObjectKey // the object it shares, or adopted where it was; a lock only ever extends
 	}
 	if asset.ObjectKey != key {
 		return nil, "", "", false, nil
@@ -89,17 +89,32 @@ func (s *Service) syncLock(ctx context.Context, asset model.Asset, policy Effect
 	if err != nil {
 		return fmt.Errorf("check legal holds: %w", err)
 	}
-	want := model.ObjectLock{AssetID: asset.ID, TenantID: asset.TenantID, RetainUntil: current.RetainUntil, LegalHold: len(holds) > 0}
+	want := model.ObjectLock{AssetID: asset.ID, TenantID: asset.TenantID, RetainUntil: current.RetainUntil,
+		LegalHold: len(holds) > 0, Mode: current.Mode}
 	var extendTo time.Time
-	if until := policy.RetainUntil(asset.CreatedAt); until.After(s.now()) &&
+	if until := policy.RetainUntilFor(asset); until.After(s.now()) &&
 		(current.RetainUntil == nil || until.After(*current.RetainUntil)) {
 		extendTo = until
 		want.RetainUntil = &until
 	}
+	if !extendTo.IsZero() {
+		want.Mode = policy.LockMode
+		// A provider refuses to change the mode of a lock still in force
+		// without the governance bypass, which the platform never sends:
+		// such a lock is extended in its own mode, and a COMPLIANCE policy
+		// applies its mode when that lock has run out.
+		if current.RetainUntil != nil && current.RetainUntil.After(s.now()) {
+			want.Mode = current.Mode
+			if want.Mode == "" {
+				want.Mode = model.LockGovernance
+			}
+		}
+	}
 	if extendTo.IsZero() && want.LegalHold == current.LegalHold {
 		return nil
 	}
-	if err := locker.LockObjectVersion(ctx, bucket, key, asset.StorageVersionID, extendTo, want.LegalHold); err != nil {
+	lock := interfaces.VersionLock{Mode: want.Mode, Until: extendTo, LegalHold: want.LegalHold}
+	if err := locker.LockObjectVersion(ctx, bucket, key, asset.StorageVersionID, lock); err != nil {
 		return fmt.Errorf("apply object lock: %w", err)
 	}
 	want.AppliedAt = s.now()
@@ -135,7 +150,7 @@ func (s *Service) releaseLockHold(ctx context.Context, asset model.Asset) error 
 	if err != nil || !enabled {
 		return err
 	}
-	if err := locker.LockObjectVersion(ctx, bucket, key, asset.StorageVersionID, time.Time{}, false); err != nil {
+	if err := locker.LockObjectVersion(ctx, bucket, key, asset.StorageVersionID, interfaces.VersionLock{}); err != nil {
 		return fmt.Errorf("release object legal hold: %w", err)
 	}
 	lock.LegalHold, lock.AppliedAt = false, s.now()

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"time"
 
@@ -64,6 +65,8 @@ type TestResult struct {
 	Checks       []Check
 	Capabilities *model.ProviderCapabilities
 	TestedAt     time.Time
+	// Posture is the bucket's posture, checked after a passing test.
+	Posture *model.PostureReport
 }
 
 // Test checks a connection with its stored credentials: the endpoint
@@ -100,7 +103,32 @@ func (s *Service) test(ctx context.Context, p model.Principal, c model.StorageCo
 	if err != nil {
 		return model.StorageConnection{}, TestResult{}, err
 	}
-	return s.recordTest(ctx, p, c, result, probe)
+	stored, result, err := s.recordTest(ctx, p, c, result, probe)
+	if err == nil && result.OK && s.deps.Health != nil {
+		result.Posture = s.postureAfterTest(ctx, stored, probe)
+	}
+	return stored, result, err
+}
+
+// postureAfterTest checks the bucket's posture once a test has passed: at
+// connect time and on every test after. Its failure never fails the test.
+func (s *Service) postureAfterTest(ctx context.Context, c model.StorageConnection, probe bool) *model.PostureReport {
+	client, closeClient, err := s.deps.Clients.BuildStored(ctx, c)
+	if err != nil {
+		return nil
+	}
+	defer closeClient()
+	var selfTest *model.PostureCheck
+	if probe {
+		selfTest = &model.PostureCheck{Name: model.CheckSelfTest, Status: model.PosturePass,
+			Detail: "a PUT, a multipart upload through a presigned part URL, a GET and a DELETE passed"}
+	}
+	report, err := s.posture(ctx, c, client, probe, selfTest)
+	if err != nil {
+		s.deps.Log.Warn("posture check after a test failed", "connection_id", c.ID, "error", err)
+		return nil
+	}
+	return &report
 }
 
 // recordTest stores a test's outcome and audits it.
@@ -233,6 +261,68 @@ func (s *Service) probe(ctx context.Context, c model.StorageConnection, client i
 	}
 	if meta.VersionID != "" {
 		caps.ProviderVersioning, caps.VersioningStatus = true, "Enabled"
+	}
+	if caps.Multipart && caps.PresignedUpload {
+		return s.probeMultipart(ctx, c, client)
+	}
+	return nil
+}
+
+// probeMultipart uploads one part through a presigned part URL, as a
+// browser or the SDK does, completes the upload, reads it back and
+// deletes it. Providers that break on newer checksum headers fail here,
+// not on a customer's first large upload.
+func (s *Service) probeMultipart(ctx context.Context, c model.StorageConnection, client interfaces.StorageProvider) error {
+	body := []byte("object storage platform multipart test\n")
+	key := c.ReadyPrefix + "/" + c.TenantID + "/.connection-test/" + s.newID() + "-mp"
+	uploadID, err := client.BeginMultipart(ctx, c.Bucket, key, "text/plain")
+	if err != nil {
+		return err
+	}
+	done := false
+	defer func() {
+		if !done {
+			_ = client.AbortMultipart(context.WithoutCancel(ctx), c.Bucket, key, uploadID)
+		}
+	}()
+	partURL, err := client.PresignPart(ctx, c.Bucket, key, uploadID, 1, 5*time.Minute)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, partURL, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.ContentLength = int64(len(body))
+	httpClient := s.partHTTP
+	if httpClient == nil {
+		httpClient = s.policy.Client()
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("%w: the presigned part upload answered %d", interfaces.ErrStorageAccessDenied, resp.StatusCode)
+	}
+	if err := client.CompleteMultipart(ctx, c.Bucket, key, uploadID, []interfaces.CompletedPart{{PartNumber: 1, ETag: resp.Header.Get("ETag")}}); err != nil {
+		return err
+	}
+	done = true
+	defer func() { _ = client.DeleteObject(context.WithoutCancel(ctx), c.Bucket, key) }()
+	reader, err := client.OpenObject(ctx, c.Bucket, key)
+	if err != nil {
+		return err
+	}
+	read, err := io.ReadAll(io.LimitReader(reader, int64(len(body))+1))
+	reader.Close()
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(read, body) {
+		return errors.New("the multipart probe object read back differently")
 	}
 	return nil
 }

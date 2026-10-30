@@ -106,12 +106,23 @@ func (r *DatasetRepository) CreateDataset(ctx context.Context, d model.Dataset) 
 
 // fillDerived copies the source versions' members into a new derived
 // dataset, pinned to their exact versions, and records where they came
-// from. The first source to hold an object wins.
+// from. The first source to hold an object wins. An empty derivation
+// records only where it came from.
 func (r *DatasetRepository) fillDerived(ctx context.Context, tx pgx.Tx, d model.Dataset) (model.Dataset, error) {
 	splits := nonNilStrings(d.Derivation.Splits)
 	labels := nonNilStrings(d.Derivation.Labels)
 	var copied int64
 	for _, source := range d.Derivation.SourceVersionIDs {
+		if d.Derivation.Empty {
+			err := link(ctx, tx, d.TenantID, model.LineageEdge{
+				From: model.LineageRef{Kind: model.NodeDataset, RefID: d.ID}, To: model.LineageRef{Kind: model.NodeDatasetVersion, RefID: source},
+				Relation: model.RelCreatedFromSnapshot, Actor: d.CreatedBy, Details: map[string]any{"members_copied": false},
+			}, d.CreatedAt, true)
+			if err != nil {
+				return d, err
+			}
+			continue
+		}
 		tag, err := tx.Exec(ctx, `
 			INSERT INTO dataset_members (id, tenant_id, dataset_id, object_id, asset_id, label, split, metadata,
 			                             source, added_by, created_at, updated_at)
@@ -227,6 +238,10 @@ func (r *DatasetRepository) UpdateDataset(ctx context.Context, tenantID, dataset
 	if patch.Tags != nil {
 		tags = nonNilStrings(*patch.Tags)
 	}
+	var residency []string
+	if patch.Residency != nil {
+		residency = nonNilStrings(*patch.Residency)
+	}
 	d, err := scanDataset(r.db.Pool.QueryRow(ctx, `
 		UPDATE datasets SET
 		    description = COALESCE($4, description),
@@ -235,11 +250,20 @@ func (r *DatasetRepository) UpdateDataset(ctx context.Context, tenantID, dataset
 		    profile_id = CASE WHEN $8::text IS NULL THEN profile_id ELSE NULLIF($8, '') END,
 		    profile_version = COALESCE($9, profile_version),
 		    storage_connection_id = CASE WHEN $12::text IS NULL THEN storage_connection_id ELSE NULLIF($12, '') END,
+		    data_class = CASE WHEN $13::text IS NULL THEN data_class ELSE NULLIF($13, '') END,
+		    residency = CASE WHEN $14::boolean THEN $15::text[] ELSE residency END,
+		    require_customer_key = COALESCE($16, require_customer_key),
+		    replica_connection_id = CASE WHEN $17::text IS NULL THEN replica_connection_id ELSE NULLIF($17, '') END,
+		    escrow = COALESCE($18, escrow),
+		    vault_retention_days = COALESCE($19, vault_retention_days),
+		    scrub_days = COALESCE($20, scrub_days),
 		    revision = revision + 1, updated_by = $10, updated_at = $11
 		WHERE tenant_id = $1 AND id = $2 AND revision = $3 AND lifecycle_status <> 'ARCHIVED'
 		RETURNING `+datasetColumns,
 		tenantID, datasetID, revision, patch.Description, patch.Tags != nil, tags, metadata,
-		patch.ProfileID, patch.ProfileVersion, actor, now, patch.StorageConnectionID))
+		patch.ProfileID, patch.ProfileVersion, actor, now, patch.StorageConnectionID, patch.DataClass,
+		patch.Residency != nil, residency, patch.RequireCustomerKey,
+		patch.ReplicaConnectionID, patch.Escrow, patch.VaultRetentionDays, patch.ScrubDays))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return r.whyNot(ctx, tenantID, datasetID, model.ErrRevisionConflict)
 	}
@@ -633,14 +657,15 @@ func (r *DatasetRepository) ListMembers(ctx context.Context, tenantID, datasetID
 const versionColumns = `id, tenant_id, dataset_id, version, status, validation_status, member_count, total_bytes,
 	manifest_sha256, manifest_format, members_revision, COALESCE(profile_id, ''), profile_version, config,
 	COALESCE(parent_version_id, ''), derivation, COALESCE(latest_report_id, ''), COALESCE(idempotency_key, ''),
-	created_by, created_at`
+	created_by, created_at, expired_at, COALESCE(superseded_by, ''), COALESCE(superseded_reason, '')`
 
 func scanVersion(row pgx.Row) (model.DatasetVersion, error) {
 	var v model.DatasetVersion
 	var config, derivation []byte
 	err := row.Scan(&v.ID, &v.TenantID, &v.DatasetID, &v.Version, &v.Status, &v.ValidationStatus, &v.MemberCount,
 		&v.TotalBytes, &v.ManifestSHA256, &v.ManifestFormat, &v.MembersRevision, &v.ProfileID, &v.ProfileVersion,
-		&config, &v.ParentVersionID, &derivation, &v.LatestReportID, &v.IdempotencyKey, &v.CreatedBy, &v.CreatedAt)
+		&config, &v.ParentVersionID, &derivation, &v.LatestReportID, &v.IdempotencyKey, &v.CreatedBy, &v.CreatedAt, &v.ExpiredAt,
+		&v.SupersededBy, &v.SupersededReason)
 	if err != nil {
 		return v, err
 	}

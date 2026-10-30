@@ -54,6 +54,8 @@ type Service struct {
 	// sign-in takes as long whether or not the account exists.
 	dummyHash string
 	now       func() time.Time
+	// tokens finds API tokens; nil turns them off.
+	tokens TokenStore
 	// sso is nil while single sign-on is off (EnableSSO).
 	sso *sso
 }
@@ -128,11 +130,16 @@ type Tokens struct {
 type Identity struct {
 	User    model.User
 	Session model.Session
+	// Token is set when the caller used an API token, not a session.
+	Token *model.APIToken
 }
 
 // Authenticate checks an access token: it must be a live session's
 // current access token, and its account active.
 func (s *Service) Authenticate(ctx context.Context, accessToken string) (Identity, error) {
+	if isAPIToken(accessToken) {
+		return s.authenticateToken(ctx, accessToken)
+	}
 	hash, ok := tokenHash(accessToken, accessPrefix)
 	if !ok {
 		return Identity{}, model.ErrSessionInvalid
@@ -154,6 +161,14 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (Identit
 // account and platform routes accept.
 func (s *Service) Principal(ctx context.Context, id Identity, orgID string) (model.Principal, error) {
 	p := model.Principal{UserID: id.User.ID, SessionID: id.Session.ID, PlatformRole: id.User.PlatformRole}
+	if id.Token != nil {
+		// A token works in its own organization only, and never with the
+		// member's platform role.
+		if orgID != "" && orgID != id.Token.TenantID {
+			return p, model.ErrForbidden
+		}
+		orgID, p.PlatformRole = id.Token.TenantID, ""
+	}
 	if orgID == "" {
 		members, orgs, err := s.deps.Tenancy.UserMemberships(ctx, id.User.ID)
 		if err != nil {
@@ -186,6 +201,9 @@ func (s *Service) Principal(ctx context.Context, id Identity, orgID string) (mod
 		return p, model.ErrOrgInactive
 	}
 	p.TenantID, p.RoleID, p.Permissions = org.ID, role.ID, role.Permissions
+	if id.Token != nil {
+		p = tokenPrincipal(p, id.Token)
+	}
 	return p, nil
 }
 

@@ -174,8 +174,12 @@ func (e *ingestEnv) processing(t *testing.T) *processing.Service {
 		Jobs: e.processingEnv.jobs, Assets: e.assets, Uploads: e.uploads,
 		Quarantine: postgres.NewQuarantineRepository(e.db), Events: postgres.NewProcessingEventRepository(e.db),
 		Policies: postgres.NewContentPolicyRepository(e.db), Verifier: e.multi, Storage: e.storage,
-		Validators: []interfaces.FileValidator{processing.BasicValidator{}, processing.TypeValidator{}},
-		Scanner:    markerScanner{down: e.scannerDown}, Promoter: promoter,
+		// Content checks are on by default in production, so they run here.
+		Validators: []interfaces.FileValidator{processing.BasicValidator{}, processing.TypeValidator{}, processing.ContentInspector{
+			Limits:   processing.ArchiveLimits{MaxArchiveBytes: 1 << 30, MaxEntries: 10000, MaxUncompressedBytes: 1 << 30, MaxRatio: 100},
+			MaxBytes: 1 << 30, SecretScanBytes: 1 << 20,
+		}},
+		Scanner: markerScanner{down: e.scannerDown}, Promoter: promoter, Checks: postgres.NewContentCheckRepository(e.db),
 	}, processing.Config{
 		Owner: "it-ingest-processing", Bucket: e.bucket, BatchSize: 10, Concurrency: 1, Lease: time.Minute,
 		Retry:               retry.Policy{BaseDelay: time.Millisecond, MaxDelay: 5 * time.Millisecond, MaxAttempts: 2},

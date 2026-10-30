@@ -63,7 +63,9 @@ var signedTypes = map[string]bool{
 }
 
 // RunValidators runs the chain in order and stops at the first rejection.
-// The result carries the detected type from the type check.
+// The result carries the detected type from the type check, and every
+// finding the policy does not allow, with its action decided. A finding
+// that rejects is a rejection.
 func RunValidators(ctx context.Context, validators []interfaces.FileValidator, sample interfaces.ContentSample, policy model.ContentPolicy) (interfaces.ValidationResult, error) {
 	var combined interfaces.ValidationResult
 	for _, validator := range validators {
@@ -73,6 +75,22 @@ func RunValidators(ctx context.Context, validators []interfaces.FileValidator, s
 		}
 		if result.DetectedType != "" {
 			combined.DetectedType = result.DetectedType
+			sample.DetectedType = result.DetectedType
+		}
+		combined.Notes = append(combined.Notes, result.Notes...)
+		for _, f := range result.Findings {
+			if f.Source == "" {
+				f.Source = validator.Name()
+			}
+			f.Action = model.FindingAction(f.Code, f.Action, policy.FindingActions)
+			if f.Action == model.FindingAllow {
+				continue
+			}
+			combined.Findings = append(combined.Findings, f)
+			if f.Action == model.FindingReject && result.RejectReason == "" {
+				result.RejectReason = model.RejectContentCheck
+				result.Detail = f.Code + ": " + f.Detail
+			}
 		}
 		if result.RejectReason != "" {
 			combined.RejectReason = result.RejectReason

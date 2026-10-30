@@ -655,7 +655,7 @@ func TestReadinessAssessment(t *testing.T) {
 		datasetservice.DimDuplication:     datasetservice.DimensionPass,
 		datasetservice.DimReproducibility: datasetservice.DimensionPass,
 		datasetservice.DimGovernance:      datasetservice.DimensionNotAssessed,
-		datasetservice.DimAccessibility:   datasetservice.DimensionPass,
+		datasetservice.DimAccessibility:   datasetservice.DimensionWarn, // eight small files, none packed
 		datasetservice.DimConsistency:     datasetservice.DimensionPass,
 	}
 	for dim, s := range want {

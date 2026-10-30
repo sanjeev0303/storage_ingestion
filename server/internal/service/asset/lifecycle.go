@@ -38,6 +38,10 @@ type CycleStats struct {
 	// LocksSynced counts assets locked ahead of the sweep because their
 	// policy or holds changed.
 	LocksSynced int
+	// LocksVerified counts locks read back from the provider, and
+	// LocksTampered those that differed from what was applied.
+	LocksVerified int
+	LocksTampered int
 	// WaitingForPack counts deletions waiting for a pack to let go of the
 	// asset's bytes.
 	WaitingForPack int
@@ -50,7 +54,7 @@ type CycleStats struct {
 // deletions. A failing step is reported but does not stop the other.
 func (s *Service) RunOnce(ctx context.Context) (CycleStats, error) {
 	stats := CycleStats{DryRun: s.cfg.DryRun}
-	err := errors.Join(s.SyncRequestedLocks(ctx, &stats), s.EvaluateRetention(ctx, &stats))
+	err := errors.Join(s.SyncRequestedLocks(ctx, &stats), s.EvaluateRetention(ctx, &stats), s.VerifyLocks(ctx, &stats))
 	if ctx.Err() != nil {
 		return stats, err
 	}
@@ -392,6 +396,9 @@ func (s *Service) advance(ctx context.Context, op model.DeletionOperation) (stri
 }
 
 func (s *Service) complete(ctx context.Context, op model.DeletionOperation) (string, int, error) {
+	if err := s.certify(ctx, op); err != nil {
+		return "", op.AttemptCount, fmt.Errorf("certify deletion: %w", err)
+	}
 	event := s.newEvent(op.TenantID, op.AssetID, op.ID, "deletion_completed", "COMPLETED", "asset tombstoned", s.actor())
 	if err := s.deps.Deletions.Complete(ctx, op.ID, s.cfg.Owner, s.now(), event); err != nil {
 		return "", op.AttemptCount, err
@@ -446,7 +453,7 @@ func (s *Service) blockers(ctx context.Context, asset model.Asset) ([]string, ti
 	if err != nil {
 		return nil, until, err
 	}
-	if retainUntil := policy.RetainUntil(asset.CreatedAt); now.Before(retainUntil) {
+	if retainUntil := policy.RetainUntilFor(asset); now.Before(retainUntil) {
 		reasons = append(reasons, fmt.Sprintf("retention until %s (%s)", retainUntil.Format(time.RFC3339), policy.MinRetentionFrom))
 		until = earlier(until, retainUntil)
 	}
@@ -542,6 +549,14 @@ func (s *Service) targets(ctx context.Context, asset model.Asset, job model.Proc
 	ready, readyPlace, err := s.place(ctx, asset.TenantID, asset.StorageConnectionID)
 	if err != nil {
 		return nil, err
+	}
+	// An adopted object was the organization's before it was the
+	// platform's: DETACH leaves it, MANAGE deletes exactly its version.
+	switch asset.Adoption {
+	case model.AdoptionDetach:
+		return nil, nil
+	case model.AdoptionManage:
+		return []target{{storage: ready, bucket: readyPlace.ReadyBucket, key: asset.ObjectKey, versionID: asset.StorageVersionID}}, nil
 	}
 	staging, stagingPlace, err := s.place(ctx, asset.TenantID, asset.StagingConnectionID)
 	if err != nil {

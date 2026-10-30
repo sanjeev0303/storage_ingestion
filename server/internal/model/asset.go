@@ -80,6 +80,42 @@ type Asset struct {
 	// SharedFrom is the asset whose stored object this one uses: its bytes
 	// equal an object the organization already stored, so no copy was made.
 	SharedFrom string
+	// BlockedReason is set when a check after publication (a re-scan with
+	// new signatures) found the bytes unsafe: nothing is served from it.
+	BlockedReason string
+	// Adoption is DETACH or MANAGE for an asset published where its object
+	// already was (docs/adoption.md); "" for an upload.
+	Adoption string
+	// Classification is PUBLIC, INTERNAL, CONFIDENTIAL or RESTRICTED;
+	// "" is unclassified (docs/access.md).
+	Classification string
+	// StorageTier is where the bytes sit among the provider's storage
+	// classes; an archived asset is readable until ReadableUntil once
+	// restored (docs/tiering.md).
+	StorageTier   StorageTier
+	TieredAt      *time.Time
+	ReadableUntil *time.Time
+}
+
+// NeedsRestore reports whether an archived asset must be restored before
+// it is read, at now. Only some providers' archive tiers need one.
+func (a Asset) NeedsRestore(provider StorageProviderType, now time.Time) bool {
+	if !ArchiveNeedsRestore(provider, a.StorageTier) {
+		return false
+	}
+	return a.ReadableUntil == nil || !a.ReadableUntil.After(now)
+}
+
+// ArchiveNeedsRestore reports whether objects in tier on provider can only
+// be read after a restore: S3's Glacier classes and Azure's Archive tier.
+func ArchiveNeedsRestore(provider StorageProviderType, tier StorageTier) bool {
+	switch provider {
+	case ProviderAWSS3:
+		return tier == TierArchive || tier == TierDeepArchive
+	case ProviderAzureBlob:
+		return tier == TierDeepArchive
+	}
+	return false
 }
 
 // CanTransitionAsset reports whether the asset lifecycle allows from -> to:

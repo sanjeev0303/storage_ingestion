@@ -462,7 +462,7 @@ func entryResponse(e model.IngestionEntry) response.IngestionEntryResponse {
 }
 
 func grantResponse(g ingestion.Grant) response.GrantResponse {
-	out := response.GrantResponse{Entry: entryResponse(g.Entry), UploadURL: g.UploadURL}
+	out := response.GrantResponse{Entry: entryResponse(g.Entry), UploadURL: g.UploadURL, UploadHeaders: g.UploadHeaders}
 	if !g.URLExpiresAt.IsZero() {
 		expires := g.URLExpiresAt
 		out.URLExpiresAt = &expires

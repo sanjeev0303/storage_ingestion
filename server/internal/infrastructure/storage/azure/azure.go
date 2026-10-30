@@ -60,6 +60,9 @@ type Config struct {
 	HTTPClient *http.Client
 	// PartBytes is the block size of a streaming write.
 	PartBytes int64
+	// EncryptionScope, when set, encrypts every write with that scope (a
+	// customer-managed key in the account).
+	EncryptionScope string
 }
 
 // Storage is an Azure storage account client.
@@ -68,6 +71,7 @@ type Storage struct {
 	sharedKey *service.SharedKeyCredential
 	insecure  bool
 	partBytes int64
+	scope     string
 }
 
 // New builds an Azure client. The SAS token, when that is the credential,
@@ -81,7 +85,7 @@ func New(cfg Config) (*Storage, error) {
 	if serviceURL == "" {
 		serviceURL = "https://" + cfg.AccountName + ".blob.core.windows.net/"
 	}
-	s := &Storage{partBytes: cfg.PartBytes, insecure: strings.HasPrefix(serviceURL, "http://")}
+	s := &Storage{partBytes: cfg.PartBytes, insecure: strings.HasPrefix(serviceURL, "http://"), scope: cfg.EncryptionScope}
 	if s.partBytes <= 0 {
 		s.partBytes = 16 << 20
 	}
@@ -106,6 +110,14 @@ func New(cfg Config) (*Storage, error) {
 		return nil, fmt.Errorf("%w: the Azure endpoint is not valid", model.ErrInvalidConnection)
 	}
 	return s, nil
+}
+
+// cpkScope is the encryption scope of a write, nil for the default.
+func (s *Storage) cpkScope() *blob.CPKScopeInfo {
+	if s.scope == "" {
+		return nil
+	}
+	return &blob.CPKScopeInfo{EncryptionScope: &s.scope}
 }
 
 func (s *Storage) container(bucket string) *container.Client {
@@ -145,7 +157,7 @@ func (s *Storage) CreateUploadPlan(_ context.Context, target interfaces.UploadTa
 		return interfaces.UploadPlan{}, errors.New("upload URL expiry must be in the future")
 	}
 	u, err := s.signedURL(target.Bucket, target.ObjectKey, sas.BlobSignatureValues{
-		ExpiryTime: target.ExpiresAt.UTC(), Permissions: writePermission(),
+		ExpiryTime: target.ExpiresAt.UTC(), Permissions: writePermission(), EncryptionScope: s.scope,
 	})
 	if err != nil {
 		return interfaces.UploadPlan{}, err
@@ -386,7 +398,7 @@ func (s *Storage) WriteObject(ctx context.Context, bucket, key string, body io.R
 	blockSize := max(s.partBytes, (size+49999)/50000)
 	_, err := s.blob(bucket, key).UploadStream(ctx, &exactReader{r: body, left: size}, &blockblob.UploadStreamOptions{
 		BlockSize: blockSize, Concurrency: 1,
-		HTTPHeaders: &blob.HTTPHeaders{BlobContentType: &contentType},
+		HTTPHeaders: &blob.HTTPHeaders{BlobContentType: &contentType}, CPKScopeInfo: s.cpkScope(),
 	})
 	if err != nil {
 		return interfaces.ObjectMetadata{}, classify("write object", err)
@@ -559,7 +571,7 @@ func (s *Storage) PresignPart(ctx context.Context, bucket, key, uploadID string,
 		return "", err
 	}
 	u, err := s.signedURL(bucket, key, sas.BlobSignatureValues{
-		ExpiryTime: time.Now().Add(ttl).UTC(), Permissions: writePermission(),
+		ExpiryTime: time.Now().Add(ttl).UTC(), Permissions: writePermission(), EncryptionScope: s.scope,
 	})
 	if err != nil {
 		return "", err
@@ -615,7 +627,7 @@ func (s *Storage) CompleteMultipart(ctx context.Context, bucket, key, uploadID s
 		ids[i] = blockID(uploadID, p.PartNumber)
 	}
 	_, err = s.blob(bucket, key).CommitBlockList(ctx, ids, &blockblob.CommitBlockListOptions{
-		HTTPHeaders: &blob.HTTPHeaders{BlobContentType: &contentType},
+		HTTPHeaders: &blob.HTTPHeaders{BlobContentType: &contentType}, CPKScopeInfo: s.cpkScope(),
 	})
 	if err != nil {
 		return classify("commit block list", err)

@@ -66,6 +66,12 @@ type RetentionPolicy struct {
 	CreatedBy           string
 	Reason              string
 	CreatedAt           time.Time
+	// LockMode is GOVERNANCE (the default) or COMPLIANCE for the Object
+	// Lock this policy sets; RetainFromKey a metadata date retention counts
+	// from; Template the retention template it came from.
+	LockMode      string
+	RetainFromKey string
+	Template      string
 }
 
 // LegalHold blocks permanent deletion of everything in its scope until it
@@ -80,6 +86,10 @@ type LegalHold struct {
 	PlacedAt   time.Time
 	ReleasedBy string
 	ReleasedAt *time.Time
+	// Query selects the assets of a QUERY hold.
+	Query      *HoldQuery
+	Matter     string
+	Custodians []string
 }
 
 // DeletionState is where a deletion operation is.
@@ -299,4 +309,10 @@ type ObjectLock struct {
 	RetainUntil *time.Time
 	LegalHold   bool
 	AppliedAt   time.Time
+	// Mode is the retention mode applied with RetainUntil.
+	Mode string
+	// VerifiedAt is the last read-back from the provider, and VerifyResult
+	// MATCH or what differed.
+	VerifiedAt   *time.Time
+	VerifyResult string
 }

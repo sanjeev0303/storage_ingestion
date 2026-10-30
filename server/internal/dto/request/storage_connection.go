@@ -38,6 +38,15 @@ type UpdateStorageConnectionRequest struct {
 	Endpoint       *string `json:"endpoint,omitempty"`
 	ForcePathStyle *bool   `json:"force_path_style,omitempty"`
 	StagingMode    *string `json:"staging_mode,omitempty"`
+	// ChecksumMode is AUTO, WHEN_SUPPORTED or WHEN_REQUIRED.
+	ChecksumMode *string `json:"checksum_mode,omitempty"`
+	// ExpectedOwner pins the bucket's AWS account or Google project
+	// number; "" unpins it.
+	ExpectedOwner *string `json:"expected_owner,omitempty"`
+	// EncryptionKey is the customer-managed key every write is encrypted
+	// with: a KMS key ID, ARN or alias, a Cloud KMS key name, or an Azure
+	// encryption scope; "" removes it.
+	EncryptionKey *string `json:"encryption_key,omitempty"`
 }
 
 // TestStorageConnectionRequest asks for a connection test. WriteProbe also

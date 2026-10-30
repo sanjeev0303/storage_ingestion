@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"fmt"
 	"strconv"
 	"strings"
@@ -32,6 +34,13 @@ type Lifecycle struct {
 	DeletionGraceFloor   time.Duration
 	// QuarantineRetention is both the default and the floor.
 	QuarantineRetention time.Duration
+	// ComplianceMaxRetention caps COMPLIANCE locks (0: no cap).
+	ComplianceMaxRetention time.Duration
+	// CertificateKey signs disposition certificates (Ed25519, from the
+	// base64 32-byte seed in CERTIFICATE_SIGNING_KEY); nil leaves them
+	// unsigned. CertificateKeyID names it in each certificate.
+	CertificateKey   ed25519.PrivateKey
+	CertificateKeyID string
 
 	// DeleteOrphans: LIFECYCLE_ORPHAN_ACTION=delete (default report).
 	DeleteOrphans bool
@@ -100,11 +109,21 @@ func LoadLifecycle() (Lifecycle, error) {
 		{"RETENTION_DEFAULT_DELETION_GRACE", "168h", &cfg.DefaultDeletionGrace},
 		{"RETENTION_MIN_RETENTION_FLOOR", "0s", &cfg.MinRetentionFloor},
 		{"RETENTION_DELETION_GRACE_FLOOR", "1h", &cfg.DeletionGraceFloor},
+		{"RETENTION_COMPLIANCE_MAX", "87600h", &cfg.ComplianceMaxRetention},
 	}
 	for _, d := range nonNegative {
 		if *d.target, err = time.ParseDuration(getEnv(d.key, d.fallback)); err != nil || *d.target < 0 {
 			return Lifecycle{}, fmt.Errorf("%s must be a duration of zero or more, such as 168h", d.key)
 		}
+	}
+
+	if seed := getEnv("CERTIFICATE_SIGNING_KEY", ""); seed != "" {
+		raw, err := base64.StdEncoding.DecodeString(seed)
+		if err != nil || len(raw) != ed25519.SeedSize {
+			return Lifecycle{}, fmt.Errorf("CERTIFICATE_SIGNING_KEY must be a base64 32-byte Ed25519 seed")
+		}
+		cfg.CertificateKey = ed25519.NewKeyFromSeed(raw)
+		cfg.CertificateKeyID = getEnv("CERTIFICATE_KEY_ID", "disposition-1")
 	}
 
 	ints := []struct {

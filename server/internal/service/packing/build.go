@@ -146,7 +146,8 @@ func (s *Service) build(ctx context.Context, p model.Pack) string {
 
 // stillRecorded reports whether the source the pack's entry was planned
 // from is still the one on record: the asset's own object while the asset
-// is AVAILABLE, or in a rewrite the old pack while it is still published.
+// is AVAILABLE, or the pack it is copied from while that is still
+// published.
 // A lookup that fails answers no, so the plan is treated as stale, as before.
 func (s *Service) stillRecorded(ctx context.Context, p model.Pack, assetID string) bool {
 	entries, err := s.deps.Packs.Entries(ctx, p.ID)
@@ -162,10 +163,10 @@ func (s *Service) stillRecorded(ctx context.Context, p model.Pack, assetID strin
 	if entry == nil {
 		return false
 	}
-	// In a rewrite the source is the old pack, which must still be the
-	// published pack the entry was planned from.
-	if p.RewriteOf != "" {
-		old, err := s.deps.Packs.GetPack(ctx, p.TenantID, p.RewriteOf)
+	// Copied from a pack (a rewrite or a repack): that pack must still be
+	// the published pack the entry was planned from.
+	if entry.SourcePackID != "" {
+		old, err := s.deps.Packs.GetPack(ctx, p.TenantID, entry.SourcePackID)
 		return err == nil && old.State == model.PackPublished && entry.SourceKey == old.ObjectKey &&
 			entry.SourceETag == old.StorageETag && entry.SourceVersionID == old.StorageVersionID
 	}
@@ -271,37 +272,29 @@ func (s *Service) write(ctx context.Context, p model.Pack, loc interfaces.Storag
 }
 
 // sources reads each entry from where its bytes are now: the asset's own
-// object at its recorded version, or, in a rewrite, its entry in the old
-// pack. Reads are pinned, so a replaced source fails instead of being
-// packed.
+// object at its recorded version, or its entry in the pack it is copied
+// from (a rewrite or a repack). Reads are pinned, so a replaced source
+// fails instead of being packed.
 func (s *Service) sources(ctx context.Context, p model.Pack, loc interfaces.StorageLocation, entries []model.PackEntry) ([]compaction.Source, error) {
-	var old map[string]model.PackEntry
-	var oldPack model.Pack
-	if p.RewriteOf != "" {
-		var err error
-		if oldPack, err = s.deps.Packs.GetPack(ctx, p.TenantID, p.RewriteOf); err != nil {
-			return nil, err
-		}
-		oldEntries, err := s.deps.Packs.Entries(ctx, p.RewriteOf)
-		if err != nil {
-			return nil, err
-		}
-		old = make(map[string]model.PackEntry, len(oldEntries))
-		for _, e := range oldEntries {
-			old[e.AssetID] = e
-		}
-	}
+	from := map[string]model.Pack{}
 	out := make([]compaction.Source, len(entries))
 	for i, e := range entries {
 		bucket, key, first := p.Bucket, e.SourceKey, int64(0)
 		cond := interfaces.ReadCondition{IfMatch: e.SourceETag, VersionID: e.SourceVersionID}
-		if p.RewriteOf != "" {
-			o, ok := old[e.AssetID]
+		if e.SourcePackID != "" {
+			src, ok := from[e.SourcePackID]
 			if !ok {
-				return nil, retry.Permanent(fmt.Errorf("asset %s is not in pack %s", e.AssetID, p.RewriteOf))
+				var err error
+				if src, err = s.deps.Packs.GetPack(ctx, p.TenantID, e.SourcePackID); err != nil {
+					return nil, err
+				}
+				if src.ConnectionID != p.ConnectionID {
+					return nil, retry.Permanent(fmt.Errorf("pack %s is on another connection", src.ID))
+				}
+				from[e.SourcePackID] = src
 			}
-			bucket, key, first = oldPack.Bucket, oldPack.ObjectKey, o.Offset
-			cond = interfaces.ReadCondition{IfMatch: oldPack.StorageETag, VersionID: oldPack.StorageVersionID}
+			bucket, key, first = src.Bucket, src.ObjectKey, e.SourceOffset
+			cond = interfaces.ReadCondition{IfMatch: src.StorageETag, VersionID: src.StorageVersionID}
 		}
 		size := e.SizeBytes
 		out[i] = compaction.Source{AssetID: e.AssetID, Size: size, SHA256: e.ChecksumSHA256,

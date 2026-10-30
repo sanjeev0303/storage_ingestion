@@ -33,7 +33,9 @@ const datasetColumns = `id, tenant_id, name, completion_policy, status, max_byte
 	description, tags, metadata, lifecycle_status, revision, members_revision, member_count, next_version,
 	COALESCE(current_version_id, ''), COALESCE(profile_id, ''), profile_version, COALESCE(latest_report_id, ''),
 	derivation, COALESCE(updated_by, ''), archived_at, COALESCE(storage_connection_id, ''),
-	COALESCE(parent_dataset_id, ''), COALESCE(branch_name, ''), COALESCE(fork_version_id, ''), COALESCE(merge_base_version_id, '')`
+	COALESCE(parent_dataset_id, ''), COALESCE(branch_name, ''), COALESCE(fork_version_id, ''), COALESCE(merge_base_version_id, ''),
+	COALESCE(data_class, ''), residency, require_customer_key, COALESCE(replica_connection_id, ''), escrow,
+	vault_retention_days, scrub_days, COALESCE(clean_version_id, '')`
 
 func scanDataset(row pgx.Row) (model.Dataset, error) {
 	var d model.Dataset
@@ -44,7 +46,8 @@ func scanDataset(row pgx.Row) (model.Dataset, error) {
 		&d.Description, &d.Tags, &metadata, &lifecycle, &d.Revision, &d.MembersRevision, &d.MemberCount, &d.NextVersion,
 		&d.CurrentVersionID, &d.ProfileID, &d.ProfileVersion, &d.LatestReportID,
 		&derivation, &d.UpdatedBy, &d.ArchivedAt, &d.StorageConnectionID,
-		&d.ParentID, &d.BranchName, &d.ForkVersionID, &d.MergeBaseVersionID)
+		&d.ParentID, &d.BranchName, &d.ForkVersionID, &d.MergeBaseVersionID, &d.DataClass, &d.Residency, &d.RequireCustomerKey,
+		&d.ReplicaConnectionID, &d.Escrow, &d.VaultRetentionDays, &d.ScrubDays, &d.CleanVersionID)
 	if err != nil {
 		return d, err
 	}

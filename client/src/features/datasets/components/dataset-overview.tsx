@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog, Modal } from "@/components/ui/dialog";
-import { Field, Input, Select, Textarea } from "@/components/ui/field";
+import { Checkbox, Field, Input, Select, Textarea } from "@/components/ui/field";
 import { DefList } from "@/components/ui/page";
 import { Panel } from "@/components/ui/panel";
 import { CopyButton } from "@/components/ui/copy-button";
@@ -16,7 +16,13 @@ import { useSession } from "@/lib/auth/session";
 import { formatBytes, formatNumber } from "@/lib/utils/format";
 import { conflictMessage, editMessage, formatKeyValues, isCode, parseKeyValues, parseTags } from "../helpers";
 import { useArchiveDataset, useDataset, useUpdateDataset, useValidationProfiles } from "../hooks";
-import type { Dataset, UpdateDatasetRequest } from "../types";
+import type { DataClass, Dataset, UpdateDatasetRequest } from "../types";
+
+const DATA_CLASS_TEXT: Record<DataClass, string> = {
+  PHI: "Protected health information (PHI)",
+  PCI: "Payment card data (PCI)",
+  PII: "Personal data (PII)",
+};
 import { DraftVsSnapshot } from "./draft-notice";
 import { SnapshotControl } from "./snapshot-control";
 
@@ -111,6 +117,35 @@ function OverviewBody({ dataset }: { dataset: Dataset }) {
                 ) : (
                   <span className="text-muted">None</span>
                 ),
+              },
+              {
+                label: "Regulated data",
+                value: dataset.data_class ? (
+                  <span>
+                    {DATA_CLASS_TEXT[dataset.data_class]}
+                    {dataset.data_class === "PHI" && (
+                      <span className="block text-sm text-muted">Stored only on connections whose posture is safe for PHI.</span>
+                    )}
+                  </span>
+                ) : (
+                  <span className="text-muted">None declared</span>
+                ),
+              },
+              {
+                label: "Where it may be stored",
+                value:
+                  (dataset.residency?.length ?? 0) > 0 || dataset.require_customer_key ? (
+                    <span>
+                      {(dataset.residency?.length ?? 0) > 0 ? (
+                        <span className="mono-data">{dataset.residency?.join(", ")}</span>
+                      ) : (
+                        "Anywhere"
+                      )}
+                      {dataset.require_customer_key && <span className="block text-sm text-muted">Only with a customer-managed key.</span>}
+                    </span>
+                  ) : (
+                    <span className="text-muted">Anywhere</span>
+                  ),
               },
               {
                 label: "Storage connection",
@@ -257,6 +292,16 @@ function EditForm({
   const [metaText, setMetaText] = useState(formatKeyValues(dataset.metadata));
   const [profile, setProfile] = useState(dataset.profile_id ? `${dataset.profile_id}@${dataset.profile_version ?? 1}` : "");
   const [connection, setConnection] = useState(dataset.storage_connection_id ?? "");
+  const [dataClass, setDataClass] = useState<DataClass | "">(dataset.data_class ?? "");
+  const [residencyText, setResidencyText] = useState((dataset.residency ?? []).join(", "));
+  const [requireKey, setRequireKey] = useState(Boolean(dataset.require_customer_key));
+  const residency = residencyText
+    .split(/[\s,]+/)
+    .map((l) => l.trim().toLowerCase())
+    .filter(Boolean);
+  const residencyError = residency.some((l) => !/^[a-z0-9][a-z0-9-]{0,62}\*?$/.test(l))
+    ? "Use provider location codes such as ap-south-1, asia-south1 or eu-*."
+    : undefined;
   const tags = parseTags(tagText);
   const meta = parseKeyValues(metaText);
   const problems = {
@@ -264,7 +309,7 @@ function EditForm({
     metadata: meta.error ?? undefined,
     description: description.length > 2000 ? "Keep the description to 2000 characters." : undefined,
   };
-  const valid = !problems.tags && !problems.metadata && !problems.description;
+  const valid = !problems.tags && !problems.metadata && !problems.description && !residencyError;
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -284,10 +329,14 @@ function EditForm({
       body.profile_version = Number(version);
     }
     if (connection.trim() !== (dataset.storage_connection_id ?? "")) body.storage_connection_id = connection.trim();
+    if (dataClass !== (dataset.data_class ?? "")) body.data_class = dataClass;
+    if (residency.join(",") !== (dataset.residency ?? []).join(",")) body.residency = residency;
+    if (requireKey !== Boolean(dataset.require_customer_key)) body.require_customer_key = requireKey;
     onSave(body);
   }
 
   const canUseStorage = can("storage.use");
+  const canClassify = can("datasets.manage");
 
   return (
     <form onSubmit={submit} noValidate className="grid gap-4" aria-label="Edit dataset">
@@ -335,6 +384,41 @@ function EditForm({
           />
         )}
       </Field>
+      <Field
+        label="Regulated data"
+        hint={canClassify ? "PHI is then refused on storage connections whose posture is not safe for it." : "Changing it needs the datasets.manage permission."}
+      >
+        {(props) => (
+          <Select {...props} value={dataClass} disabled={!canClassify} onChange={(e) => setDataClass(e.target.value as DataClass | "")}>
+            <option value="">None declared</option>
+            {(Object.keys(DATA_CLASS_TEXT) as DataClass[]).map((c) => (
+              <option key={c} value={c}>
+                {DATA_CLASS_TEXT[c]}
+              </option>
+            ))}
+          </Select>
+        )}
+      </Field>
+      <Field
+        label="Allowed locations"
+        error={residencyError}
+        hint={
+          canClassify
+            ? "Provider location codes, separated by commas; eu-* allows every location starting eu-. Empty allows anywhere."
+            : "Changing it needs the datasets.manage permission."
+        }
+      >
+        {(props) => (
+          <Input {...props} value={residencyText} disabled={!canClassify} spellCheck={false} autoComplete="off" className="mono-data"
+            onChange={(e) => setResidencyText(e.target.value)} />
+        )}
+      </Field>
+      <Checkbox
+        checked={requireKey}
+        disabled={!canClassify}
+        onChange={(e) => setRequireKey(e.target.checked)}
+        label="Only on storage connections that encrypt every write with a customer-managed key"
+      />
       {Boolean(error) && (
         <p role="alert" className="text-base font-medium">
           {editMessage(error)}

@@ -43,7 +43,10 @@ type TrainingRunInput struct {
 	Params     map[string]string
 	Metrics    map[string]float64
 	VersionIDs []string
-	Model      *ModelInput
+	// Roles maps a version to TRAIN, VALIDATION or TEST; runs with both
+	// are checked for leakage.
+	Roles map[string]string
+	Model *ModelInput
 }
 
 // RecordTrainingRun records a run and the versions it trained on. A run
@@ -56,6 +59,19 @@ func (s *Service) RecordTrainingRun(ctx context.Context, p model.Principal, in T
 	run, versions, err := checkRun(in)
 	if err != nil {
 		return model.TrainingRun{}, false, err
+	}
+	// A snapshot an erasure superseded is not trained on any more.
+	for _, id := range versions {
+		v, err := s.deps.Repo.GetVersion(ctx, p.TenantID, id)
+		if err == nil && v.SupersededBy != "" {
+			return model.TrainingRun{}, false, fmt.Errorf("%w: version %s (%s); its successor is %s", model.ErrVersionSuperseded, id,
+				v.SupersededReason, v.SupersededBy)
+		}
+	}
+	if s.gate != nil {
+		if err := s.gate.BeforeRun(ctx, p.TenantID, versions); err != nil {
+			return model.TrainingRun{}, false, err
+		}
 	}
 	now := s.now()
 	run.ID, run.CreatedBy, run.CreatedAt, run.UpdatedAt = event.NewID(), p.UserID, now, now
@@ -203,9 +219,20 @@ func checkRun(in TrainingRunInput) (model.TrainingRun, []string, error) {
 			versions = append(versions, id)
 		}
 	}
+	roles := map[string]string{}
+	for id, role := range in.Roles {
+		role = strings.ToUpper(strings.TrimSpace(role))
+		if !seen[strings.TrimSpace(id)] {
+			return invalid("a role names version %q, which the run does not list", id)
+		}
+		if role != model.RoleTrain && role != model.RoleValidation && role != model.RoleTest {
+			return invalid("a role is TRAIN, VALIDATION or TEST")
+		}
+		roles[strings.TrimSpace(id)] = role
+	}
 	return model.TrainingRun{
 		Name: name, Source: source, ExternalID: in.ExternalID, URL: in.URL, Status: status,
-		Params: orEmpty(in.Params), Metrics: orEmptyMetrics(in.Metrics),
+		Params: orEmpty(in.Params), Metrics: orEmptyMetrics(in.Metrics), Roles: roles,
 	}, versions, nil
 }
 

@@ -28,6 +28,9 @@ type DerivationRequest struct {
 	Splits         []string               `json:"splits,omitempty"`
 	Labels         []string               `json:"labels,omitempty"`
 	Transformation *TransformationRequest `json:"transformation,omitempty"`
+	// CopyMembers false starts the dataset empty, with the sources as its
+	// lineage only; true (the default) copies their members.
+	CopyMembers *bool `json:"copy_members,omitempty"`
 }
 
 type TransformationRequest struct {

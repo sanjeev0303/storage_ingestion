@@ -36,6 +36,16 @@ type DatasetResponse struct {
 	// StorageConnectionID is where the dataset's new uploads go; empty for
 	// the organization's default.
 	StorageConnectionID string `json:"storage_connection_id,omitempty"`
+	// DataClass is PHI, PCI or PII when the dataset holds regulated data.
+	DataClass          string   `json:"data_class,omitempty"`
+	Residency          []string `json:"residency"`
+	RequireCustomerKey bool     `json:"require_customer_key"`
+	// Protection (docs/copy-engine.md).
+	ReplicaConnectionID string `json:"replica_connection_id,omitempty"`
+	Escrow              bool   `json:"escrow"`
+	VaultRetentionDays  int    `json:"vault_retention_days"`
+	ScrubDays           int    `json:"scrub_days"`
+	CleanVersionID      string `json:"clean_version_id,omitempty"`
 	// Branch is set on a branch: its parent, its name there, the version it
 	// was branched from and the common ancestor of its next merge.
 	Branch *BranchInfo `json:"branch,omitempty"`
@@ -54,6 +64,8 @@ type DerivationInfo struct {
 	Splits         []string            `json:"splits,omitempty"`
 	Labels         []string            `json:"labels,omitempty"`
 	Transformation *TransformationInfo `json:"transformation,omitempty"`
+	// Empty: the dataset started with none of the sources' members.
+	Empty bool `json:"empty,omitempty"`
 }
 
 type TransformationInfo struct {
@@ -138,6 +150,8 @@ type GrantResponse struct {
 	Entry        IngestionEntryResponse `json:"entry"`
 	UploadURL    string                 `json:"upload_url,omitempty"`
 	URLExpiresAt *time.Time             `json:"url_expires_at,omitempty"`
+	// UploadHeaders must be sent with the PUT to UploadURL.
+	UploadHeaders map[string]string `json:"upload_headers,omitempty"`
 }
 
 type ClaimResponse struct {

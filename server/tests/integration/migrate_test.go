@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -105,7 +106,7 @@ func TestMigrationsFromScratchAndRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	all, _ := m.Status(ctx)
-	if len(applied) != len(all) || len(applied) < 28 {
+	if len(applied) != len(all) || len(applied) < 38 {
 		t.Fatalf("from scratch: %d of %d applied", len(applied), len(all))
 	}
 	if again, err := m.ApplyUp(ctx); err != nil || len(again) != 0 {
@@ -124,13 +125,16 @@ func TestMigrationsFromScratchAndRollback(t *testing.T) {
 	}
 
 	// The newest release rolls back...
-	undone, err := m.Rollback(ctx, 2)
-	if err != nil || len(undone) != 2 || undone[0] != "000028_lock_sync.sql" || undone[1] != "000027_training_runs.sql" {
+	want := []string{"000040_erasure.sql", "000039_quality.sql", "000038_evidence.sql", "000037_tiering_costs.sql", "000036_pack_streaming.sql", "000035_copy_engine.sql",
+		"000034_residency_keys.sql", "000033_storage_posture.sql", "000032_access_governance.sql", "000031_adoption.sql",
+		"000030_governance.sql", "000029_content_checks.sql", "000028_lock_sync.sql", "000027_training_runs.sql"}
+	undone, err := m.Rollback(ctx, len(want))
+	if err != nil || !slices.Equal(undone, want) {
 		t.Fatalf("rollback: %v %v", undone, err)
 	}
 	var tables int
 	if err := conn.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables
-		WHERE table_name IN ('lock_sync_requests', 'training_runs', 'models')`).Scan(&tables); err != nil || tables != 0 {
+		WHERE table_name IN ('erasure_requests', 'erasure_items', 'dataset_quality', 'version_profiles', 'leakage_checks', 'evidence_settings', 'audit_anchors', 'audit_reviews', 'tier_rules', 'tier_moves', 'archive_restores', 'cost_budgets', 'repack_requests', 'run_checkpoints', 'run_verifications', 'tenant_packing', 'copy_jobs', 'asset_replicas', 'connection_posture', 'storage_drift_findings', 'api_tokens', 'security_alerts', 'adoption_jobs', 'governance_approvals', 'disposition_certificates', 'content_findings', 'lock_sync_requests', 'training_runs', 'models')`).Scan(&tables); err != nil || tables != 0 {
 		t.Fatalf("after rollback, %d of the release's tables remain (%v)", tables, err)
 	}
 	// ...but not past it: 000026 has no rollback file, and nothing changes.
@@ -138,7 +142,7 @@ func TestMigrationsFromScratchAndRollback(t *testing.T) {
 		t.Fatalf("rolling back a migration without a rollback file: %v", err)
 	}
 	// And forward again, to the same schema.
-	if again, err := m.ApplyUp(ctx); err != nil || len(again) != 2 {
+	if again, err := m.ApplyUp(ctx); err != nil || len(again) != len(want) {
 		t.Fatalf("forward again: %v %v", again, err)
 	}
 	if onlyA, onlyB := diff(schemaOf(t, ctx, conn), fresh); len(onlyA)+len(onlyB) > 0 {

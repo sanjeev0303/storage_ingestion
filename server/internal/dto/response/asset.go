@@ -13,6 +13,8 @@ type AssetResponse struct {
 	Dataset         string `json:"dataset,omitempty"`
 	Status          string `json:"status"`
 	RejectionReason string `json:"rejection_reason,omitempty"`
+	BlockedReason   string `json:"blocked_reason,omitempty"`
+	Classification  string `json:"classification,omitempty"`
 	// Deliverable reports whether a download would be served now.
 	Deliverable bool `json:"deliverable"`
 	// ETag is the download validator for If-Range / If-None-Match.

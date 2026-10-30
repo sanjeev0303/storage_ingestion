@@ -434,8 +434,13 @@ func (s *Service) evaluate(ctx context.Context, owner string, job model.Validati
 	for i, m := range batch {
 		worst := model.Severity("")
 		for _, c := range members {
-			issues := c.member(m)
 			count := b.RuleCounts[c.rule.ID]
+			if c.applies != nil && !c.applies(m) {
+				count.Skipped++
+				b.RuleCounts[c.rule.ID] = count
+				continue
+			}
+			issues := c.member(m)
 			count.Checked++
 			if len(issues) > 0 {
 				count.Failed++
@@ -554,41 +559,16 @@ func (s *Service) checkContent(ctx context.Context, tenantID string, rule *conte
 	if s.deps.Content == nil || s.deps.ContentBucket == "" {
 		return contentResult{}
 	}
-	// The member is read through the connection its version is stored on.
-	reader, bucket := s.deps.Content, s.deps.ContentBucket
-	if !model.IsPlatformConnection(m.StorageConnectionID) {
-		if s.deps.Router == nil {
-			return contentResult{}
-		}
-		loc, err := s.deps.Router.Locate(ctx, tenantID, m.StorageConnectionID)
-		if err != nil {
-			return contentResult{}
-		}
-		reader, bucket = loc.Storage, loc.ReadyBucket
-	}
-	// A packed version is read from its entry in the pack: exactly its
-	// byte range, pinned to the pack as written.
-	key, first, last := m.ObjectKey, int64(0), int64(-1)
-	cond := interfaces.ReadCondition{VersionID: m.StorageVersionID}
-	if s.deps.Packs != nil {
-		loc, packed, err := s.deps.Packs.PackedLocation(ctx, tenantID, m.AssetID)
-		if err != nil {
-			return contentResult{}
-		}
-		if packed {
-			if first, last, err = loc.Range(0, -1); err != nil {
-				return contentResult{}
-			}
-			bucket, key = loc.Bucket, loc.ObjectKey
-			cond = interfaces.ReadCondition{IfMatch: loc.StorageETag, VersionID: loc.StorageVersionID}
-		}
+	src, err := s.memberSource(ctx, tenantID, m)
+	if err != nil {
+		return contentResult{}
 	}
 
 	var r contentResult
-	err := s.content.Do(ctx, func(ctx context.Context) error {
+	err = s.content.Do(ctx, func(ctx context.Context) error {
 		ctx, cancel := context.WithTimeout(ctx, s.cfg.ObjectTimeout)
 		defer cancel()
-		body, err := reader.OpenRange(ctx, bucket, key, first, last, cond)
+		body, err := src.open(ctx)
 		if err != nil {
 			return err
 		}
@@ -624,6 +604,53 @@ func (s *Service) checkContent(ctx context.Context, tenantID string, rule *conte
 		return contentResult{bytes: r.bytes}
 	}
 	return r
+}
+
+// memberBytes is where a member's pinned bytes are read from.
+type memberBytes struct {
+	reader      ContentReader
+	bucket, key string
+	first, last int64
+	cond        interfaces.ReadCondition
+}
+
+func (b memberBytes) open(ctx context.Context) (io.ReadCloser, error) {
+	return b.reader.OpenRange(ctx, b.bucket, b.key, b.first, b.last, b.cond)
+}
+
+// memberSource finds a member's bytes: through the connection its version
+// is stored on, and for a packed version exactly its byte range in the
+// pack, pinned to the pack as written.
+func (s *Service) memberSource(ctx context.Context, tenantID string, m model.MemberEvidence) (memberBytes, error) {
+	b := memberBytes{reader: s.deps.Content, bucket: s.deps.ContentBucket, key: m.ObjectKey, last: -1,
+		cond: interfaces.ReadCondition{VersionID: m.StorageVersionID}}
+	if !model.IsPlatformConnection(m.StorageConnectionID) {
+		if s.deps.Router == nil {
+			return b, errors.New("no storage router")
+		}
+		loc, err := s.deps.Router.Locate(ctx, tenantID, m.StorageConnectionID)
+		if err != nil {
+			return b, err
+		}
+		b.reader, b.bucket = loc.Storage, loc.ReadyBucket
+	}
+	if b.reader == nil || b.bucket == "" {
+		return b, errors.New("no storage to read from")
+	}
+	if s.deps.Packs != nil {
+		loc, packed, err := s.deps.Packs.PackedLocation(ctx, tenantID, m.AssetID)
+		if err != nil {
+			return b, err
+		}
+		if packed {
+			if b.first, b.last, err = loc.Range(0, -1); err != nil {
+				return b, err
+			}
+			b.bucket, b.key = loc.Bucket, loc.ObjectKey
+			b.cond = interfaces.ReadCondition{IfMatch: loc.StorageETag, VersionID: loc.StorageVersionID}
+		}
+	}
+	return b, nil
 }
 
 // finding turns an issue into a finding with an ID stable for the job:
@@ -739,7 +766,9 @@ type reportBody struct {
 		Sizes        struct {
 			Total int64 `json:"total_bytes"`
 			Min   int64 `json:"min_bytes"`
-			Max   int64 `json:"max_bytes"`
+			Max    int64 `json:"max_bytes"`
+			Median int64 `json:"median_bytes"`
+			Packed int64 `json:"packed_members"`
 		} `json:"sizes"`
 	} `json:"distributions"`
 	Readiness *readinessReport `json:"readiness,omitempty"`
@@ -763,6 +792,9 @@ func (s *Service) finish(ctx context.Context, owner string, job model.Validation
 	notes := map[string]string{}
 	failures := map[string]int64{}
 	for _, c := range datasetLevel {
+		if c.load != nil {
+			c.dataset = c.load(ctx, s, job.TenantID, job.DatasetVersionID)
+		}
 		issues, note := c.dataset(agg)
 		notes[c.rule.ID] = note
 		failures[c.rule.ID] = int64(len(issues))
@@ -847,6 +879,7 @@ func (s *Service) finish(ctx context.Context, owner string, job model.Validation
 	d.Splits, d.Labels, d.LabelCount, d.Unlabeled = agg.Splits, agg.Labels, agg.LabelCount, agg.Unlabeled
 	d.ContentTypes, d.Extensions = agg.ContentTypes, agg.Extensions
 	d.Sizes.Total, d.Sizes.Min, d.Sizes.Max = agg.TotalBytes, agg.MinSize, agg.MaxSize
+	d.Sizes.Median, d.Sizes.Packed = agg.MedianSize, agg.PackedMembers
 
 	outcome := job.Profile.Thresholds.Outcome(errorCount, warningCount)
 	body.Status = string(outcome)

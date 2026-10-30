@@ -25,11 +25,16 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/logger"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/metrics"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/retry"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/access"
 	assetservice "github.com/sanjeev0303/object-storage-platform/internal/service/asset"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/audit"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/catalog"
 	cleanupservice "github.com/sanjeev0303/object-storage-platform/internal/service/cleanup"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/erasure"
 	eventservice "github.com/sanjeev0303/object-storage-platform/internal/service/events"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/evidence"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/storageconn"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/tiering"
 	cleanupworker "github.com/sanjeev0303/object-storage-platform/internal/worker/cleanup"
 )
 
@@ -122,8 +127,21 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("load storage connection configuration: %w", err)
 	}
+	connectionRepo := postgres.NewStorageConnectionRepository(db)
 	router, err := storageregistry.ForProcess(storageCfg, storage, bucket, deliveryBucket, lc.PromotionPrefix,
-		postgres.NewStorageConnectionRepository(db), registry)
+		connectionRepo, registry)
+	if err != nil {
+		return fmt.Errorf("configure storage connections: %w", err)
+	}
+	sealer, err := storageregistry.Sealer(storageCfg)
+	if err != nil {
+		return fmt.Errorf("configure storage connections: %w", err)
+	}
+	// Bucket posture and out-of-band changes, checked on a schedule.
+	storageHealth, err := storageconn.NewService(storageconn.Dependencies{
+		Connections: connectionRepo, Sealer: sealer, Clients: router, Log: log,
+		Health: connectionRepo, Alerts: postgres.NewAccessRepository(db), Drift: connectionRepo,
+	}, storageCfg, storageregistry.Policy(storageCfg))
 	if err != nil {
 		return fmt.Errorf("configure storage connections: %w", err)
 	}
@@ -140,7 +158,8 @@ func run() error {
 		Assets: assets, Uploads: uploads, Jobs: jobs, Quarantine: postgres.NewQuarantineRepository(db),
 		Policies: postgres.NewRetentionPolicyRepository(db), Holds: holds, Deletions: postgres.NewDeletionRepository(db),
 		Events: events, Cursors: cursors, Storage: storage, Metrics: registry, Router: router, Packs: packs,
-		Locks: postgres.NewObjectLockRepository(db), Shared: assets, LockSync: postgres.NewLockSyncRepository(db),
+		Locks: postgres.NewObjectLockRepository(db), Shared: assets, LockSync: postgres.NewLockSyncRepository(db), Governance: postgres.NewGovernanceRepository(db),
+		Escrow: postgres.NewCopyRepository(db),
 	}, assetservice.Config{
 		Owner: owner, QuarantineBucket: bucket, DeliveryBucket: deliveryBucket, DeliveryPrefix: lc.PromotionPrefix,
 		Platform: assetservice.PlatformRetention{
@@ -151,7 +170,9 @@ func run() error {
 			MinRetentionFloor:          lc.MinRetentionFloor,
 			DeletionGraceFloor:         lc.DeletionGraceFloor,
 			QuarantineRetentionFloor:   lc.QuarantineRetention,
+			ComplianceMaxRetention:     lc.ComplianceMaxRetention,
 		},
+		Signer:    assetservice.Signer{KeyID: lc.CertificateKeyID, Key: lc.CertificateKey},
 		BatchSize: lc.BatchSize, Concurrency: lc.Concurrency, Lease: lc.LeaseDuration,
 		Retry:           retry.Policy{BaseDelay: lc.BackoffBase, MaxDelay: lc.BackoffMax, MaxAttempts: lc.MaxAttempts},
 		RecheckInterval: lc.RecheckInterval, ExpireAssets: lc.ExpireAssets, MaxDeletionsPerRun: lc.MaxDeletionsPerRun,
@@ -268,6 +289,125 @@ func run() error {
 		log.Info("consuming lifecycle events", "visibility", ec.ConsumerVisibility.String(),
 			"concurrency", ec.ConsumerConcurrency, "max_attempts", ec.ConsumerMaxAttempts)
 	}
+	// Read anomalies, against each member's own history, every five minutes.
+	detector := access.NewService(postgres.NewAccessRepository(db), nil, log)
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			if stats, err := detector.Detect(ctx); err != nil {
+				log.Warn("read anomaly detection failed", "error", err)
+			} else if stats.Alerts > 0 {
+				log.Warn("read anomalies", "members", stats.Members, "alerts", stats.Alerts)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	go func() {
+		ticker := time.NewTicker(15 * time.Minute)
+		defer ticker.Stop()
+		for {
+			if stats, err := storageHealth.CheckDue(ctx, storageCfg.PostureInterval, 50); err != nil {
+				log.Warn("posture checks failed", "error", err)
+			} else if stats.Checked > 0 || stats.ExpiredCredentials > 0 {
+				log.Info("posture checked", "connections", stats.Checked, "failing", stats.Failing, "errors", stats.Errors,
+					"expired_credentials", stats.ExpiredCredentials)
+			}
+			if stats, err := storageHealth.ScanDrift(ctx, storageCfg.DriftInterval, 20, storageCfg.DriftBudget); err != nil {
+				log.Warn("drift scan failed", "error", err)
+			} else if stats.Connections > 0 {
+				log.Info("drift scanned", "connections", stats.Connections, "objects", stats.Checked, "found", stats.Found, "errors", stats.Errors)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	// Tier rules and archive restores (docs/tiering.md).
+	tiers := tiering.New(tiering.Deps{Store: postgres.NewTieringRepository(db), Assets: postgres.NewAssetRepository(db),
+		Router: router, Log: log}, tiering.Config{PlatformTiering: os.Getenv("PLATFORM_STORAGE_TIERING") == "true"})
+	every := os.Getenv("TIERING_INTERVAL")
+	if every == "" {
+		every = "10m"
+	}
+	tierEvery, err := time.ParseDuration(every)
+	if err != nil || tierEvery < time.Minute {
+		return fmt.Errorf("TIERING_INTERVAL must be a duration of at least 1m")
+	}
+	go func() {
+		ticker := time.NewTicker(tierEvery)
+		defer ticker.Stop()
+		for {
+			if stats, err := tiers.RunOnce(ctx); err != nil {
+				log.Warn("tiering pass failed", "error", err)
+			} else if stats != (tiering.Stats{}) {
+				log.Info("tiering pass", "moved", stats.Moved, "failed", stats.Failed, "restores_started", stats.RestoresStarted,
+					"restores_ready", stats.RestoresReady, "restores_failed", stats.RestoresFailed, "restores_expired", stats.RestoresExpired)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	// Audit chain anchors, scheduled reviews and training-summary reminders
+	// (docs/evidence.md). Each organization's settings pace its anchors.
+	proofs := evidence.New(evidence.Deps{Store: postgres.NewEvidenceRepository(db), Chains: postgres.NewAuditRepository(db),
+		Router: router, Alerts: postgres.NewAccessRepository(db), TSA: os.Getenv("AUDIT_TSA_URL"), Log: log,
+		Signer: evidence.Signer{KeyID: lc.CertificateKeyID, Key: lc.CertificateKey}})
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			if n, err := proofs.AnchorAll(ctx); err != nil {
+				log.Warn("anchoring audit chains failed", "error", err)
+			} else if n > 0 {
+				log.Info("audit chains anchored", "chains", n)
+			}
+			if n, err := proofs.DueReviews(ctx); err != nil {
+				log.Warn("building audit reviews failed", "error", err)
+			} else if n > 0 {
+				log.Info("audit reviews built", "reviews", n)
+			}
+			if n, err := proofs.RemindSummaries(ctx); err != nil {
+				log.Warn("training summary reminders failed", "error", err)
+			} else if n > 0 {
+				log.Info("training summaries due", "models", n)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	// Erasures: follows each file's deletion, and certifies the erasure
+	// once every file is gone (docs/erasure.md).
+	erasures := erasure.New(erasure.Deps{Store: postgres.NewErasureRepository(db), Lifecycle: lifecycle, Catalog: catalogService,
+		Audit: auditService, Log: log, Signer: erasure.Signer{KeyID: lc.CertificateKeyID, Key: lc.CertificateKey}})
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			if n, err := erasures.Progress(ctx); err != nil {
+				log.Warn("erasure progress failed", "error", err)
+			} else if n > 0 {
+				log.Info("erasures completed", "erasures", n)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 	cleanupworker.Run(ctx, lifecycle, cleanup, phases, lc.PollInterval, log)
 	wg.Wait()
 	log.Info("cleanup worker stopped")

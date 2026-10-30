@@ -109,6 +109,14 @@ func (b *Builder) Build(ctx context.Context, c model.StorageConnection, secrets 
 			}
 		case model.ProviderAWSS3:
 			cfg.StrictChecksums = true
+			cfg.ExpectedOwner = c.ExpectedOwner
+		}
+		// An explicit mode wins over the provider's default.
+		switch c.ChecksumMode {
+		case model.ChecksumWhenSupported:
+			cfg.StrictChecksums = true
+		case model.ChecksumWhenRequired:
+			cfg.StrictChecksums = false
 		}
 		if c.AuthMethod == model.AuthAssumeRole {
 			base, err := b.platformAWS(ctx)
@@ -124,10 +132,26 @@ func (b *Builder) Build(ctx context.Context, c model.StorageConnection, secrets 
 		}
 		storage := s3storage.NewObjectStorage(client)
 		storage.SetTransferPartBytes(b.partBytes)
+		if cfg.ExpectedOwner != "" {
+			plainCfg := cfg
+			plainCfg.ExpectedOwner = ""
+			plain, err := s3storage.NewConnectionClient(ctx, plainCfg)
+			if err != nil {
+				return nil, nil, err
+			}
+			storage.UsePlain(plain)
+		}
+		if c.Provider == model.ProviderAWSS3 {
+			storage.EnableAccountChecks()
+		}
+		if c.EncryptionKey != "" {
+			storage.UseKMSKey(c.EncryptionKey)
+		}
 		return storage, func() {}, nil
 	case model.ProviderGCS:
 		storage, err := gcs.New(ctx, gcs.Config{
 			ServiceAccountJSON: []byte(secrets.ServiceAccountJSON), HTTPClient: b.http, Endpoint: endpoint, PartBytes: int(b.partBytes),
+			KMSKey: c.EncryptionKey,
 		})
 		if err != nil {
 			return nil, nil, err
@@ -140,7 +164,7 @@ func (b *Builder) Build(ctx context.Context, c model.StorageConnection, secrets 
 		}
 		storage, err := azure.New(azure.Config{
 			AccountName: c.AccountID, AccountKey: secrets.AccountKey, SASToken: secrets.SASToken,
-			Endpoint: endpoint, HTTPClient: b.http, PartBytes: b.partBytes,
+			Endpoint: endpoint, HTTPClient: b.http, PartBytes: b.partBytes, EncryptionScope: c.EncryptionKey,
 		})
 		if err != nil {
 			return nil, nil, err

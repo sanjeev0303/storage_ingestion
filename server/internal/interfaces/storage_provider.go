@@ -123,8 +123,32 @@ type ConnectionChange struct {
 	Endpoint       *string
 	ForcePathStyle *bool
 	StagingMode    *model.StagingMode
-	Actor          string
-	At             time.Time
+	ChecksumMode   *string
+	// ExpectedOwner: "" unpins the owner.
+	ExpectedOwner *string
+	// EncryptionKey: "" returns to the bucket's default encryption.
+	EncryptionKey *string
+	Actor         string
+	At            time.Time
+}
+
+// PlacementGuard says whether a dataset's data may be stored on a
+// connection ("" is the organization's default).
+type PlacementGuard interface {
+	CheckPlacement(ctx context.Context, p model.Principal, rules model.PlacementRules, connectionID string) error
+	CheckDatasetPlacement(ctx context.Context, p model.Principal, dataset, connectionID string) error
+}
+
+// PostureInspector is a provider that can describe its bucket's security
+// settings (docs/storage-posture.md).
+type PostureInspector interface {
+	Posture(ctx context.Context, bucket string, opts model.PostureOptions) (model.PostureFacts, error)
+}
+
+// SSECProber is a provider that can try a write encrypted with a
+// customer-provided key, to learn whether the bucket refuses one.
+type SSECProber interface {
+	ProbeSSEC(ctx context.Context, bucket, key string) (accepted bool, err error)
 }
 
 // ConnectionTestRecord is what a connection test found, sanitized.

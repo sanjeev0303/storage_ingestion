@@ -293,7 +293,7 @@ func lifecycleService(ctx context.Context, db *postgres.DB) (*assetservice.Servi
 		Deletions: postgres.NewDeletionRepository(db), Events: postgres.NewLifecycleEventRepository(db),
 		Cursors: postgres.NewCursorRepository(db), Storage: platformStorage, Router: router,
 		Packs: postgres.NewPackRepository(db), Shared: postgres.NewAssetRepository(db),
-		LockSync: postgres.NewLockSyncRepository(db),
+		LockSync: postgres.NewLockSyncRepository(db), Governance: postgres.NewGovernanceRepository(db),
 	}, assetservice.Config{
 		Owner: "lifecycle-admin", QuarantineBucket: bucket, DeliveryBucket: deliveryBucket, DeliveryPrefix: lc.PromotionPrefix,
 		Platform: assetservice.PlatformRetention{
@@ -304,7 +304,9 @@ func lifecycleService(ctx context.Context, db *postgres.DB) (*assetservice.Servi
 			MinRetentionFloor:          lc.MinRetentionFloor,
 			DeletionGraceFloor:         lc.DeletionGraceFloor,
 			QuarantineRetentionFloor:   lc.QuarantineRetention,
+			ComplianceMaxRetention:     lc.ComplianceMaxRetention,
 		},
+		Signer: assetservice.Signer{KeyID: lc.CertificateKeyID, Key: lc.CertificateKey},
 		BatchSize: lc.BatchSize, Concurrency: lc.Concurrency, Lease: lc.LeaseDuration,
 		Retry:           retry.Policy{BaseDelay: lc.BackoffBase, MaxDelay: lc.BackoffMax, MaxAttempts: lc.MaxAttempts},
 		RecheckInterval: lc.RecheckInterval, MaxDeletionsPerRun: lc.MaxDeletionsPerRun,

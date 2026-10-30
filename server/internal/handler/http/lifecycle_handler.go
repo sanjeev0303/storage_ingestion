@@ -27,7 +27,10 @@ func NewLifecycleHandler(service *assetservice.Service, log *slog.Logger) *Lifec
 // period, unless restored first. Repeating the request is harmless.
 func (h *LifecycleHandler) Delete(w nethttp.ResponseWriter, r *nethttp.Request) {
 	principal, _ := middleware.PrincipalFrom(r.Context())
-	result, err := h.service.RequestDeletion(r.Context(), principal, r.PathValue("id"))
+	result, err := h.service.RequestDeletionGoverned(r.Context(), principal, r.PathValue("id"), r.URL.Query().Get("reason"))
+	if writeApproval(w, err) {
+		return
+	}
 	if err != nil {
 		h.writeError(w, err)
 		return
@@ -110,6 +113,8 @@ func (h *LifecycleHandler) writeError(w nethttp.ResponseWriter, err error) {
 		writeJSON(w, nethttp.StatusConflict, map[string]string{"error": "asset is being processed; delete it once processing has finished"})
 	case errors.Is(err, model.ErrNotRestorable):
 		writeJSON(w, nethttp.StatusConflict, map[string]string{"error": "nothing to restore: no deletion, or its objects are already being removed"})
+	case errors.Is(err, model.ErrGovernanceInvalid):
+		writeJSON(w, nethttp.StatusBadRequest, map[string]string{"error": err.Error()})
 	case errors.Is(err, model.ErrInvalidAssetState):
 		writeJSON(w, nethttp.StatusConflict, map[string]string{"error": "the asset changed during the request; try again"})
 	default:

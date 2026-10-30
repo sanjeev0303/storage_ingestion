@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,19 +26,26 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/retry"
 	"github.com/sanjeev0303/object-storage-platform/internal/server"
 	"github.com/sanjeev0303/object-storage-platform/internal/server/middleware"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/access"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/adoption"
 	assetservice "github.com/sanjeev0303/object-storage-platform/internal/service/asset"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/audit"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/catalog"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/copyengine"
 	datasetservice "github.com/sanjeev0303/object-storage-platform/internal/service/dataset"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/delivery"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/erasure"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/events"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/evidence"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/identity"
 	ingestionservice "github.com/sanjeev0303/object-storage-platform/internal/service/ingestion"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/processing"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/quota"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/storageconn"
-	"github.com/sanjeev0303/object-storage-platform/internal/service/webhook"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/streaming"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/tiering"
 	uploadservice "github.com/sanjeev0303/object-storage-platform/internal/service/upload"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/webhook"
 )
 
 // newIngestion builds the bulk-ingestion service behind the dataset and
@@ -161,7 +169,13 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("configure delivery: %w", err)
 	}
+	// Access governance: API tokens authenticate through identity; links,
+	// egress and classification are enforced by delivery.
+	accessRepo := postgres.NewAccessRepository(db)
+	identityService.WithTokens(accessRepo)
+	routes.Access = access.NewService(accessRepo, auditService, log)
 	routes.Delivery.Guard(identityService.PrincipalFor, auditService)
+	routes.Delivery.Govern(routes.Access)
 	routes.Lifecycle.Guard(auditService)
 	routes.Ingestion, err = newIngestion(db, uploadRepository, uploadService, multipartService, objectStorage, bucket, auditService, log)
 	if err != nil {
@@ -199,6 +213,13 @@ func run() error {
 	}
 	storageMetrics := metrics.New()
 	connections := postgres.NewStorageConnectionRepository(db)
+	// Placement checks and residency reports place the platform's own
+	// bucket where the operator configured it.
+	if region := os.Getenv("S3_REGION"); region != "" {
+		if err := connections.SetPlatformRegion(context.Background(), strings.ToLower(region)); err != nil {
+			return err
+		}
+	}
 	// The catalog reports the caller's default connection as its last
 	// passing test found it; the platform's bucket when that is the default.
 	routes.StorageCapabilities = func(r *http.Request) (interfaces.StorageCapabilities, error) {
@@ -237,10 +258,18 @@ func run() error {
 	}
 	routes.StorageConnections, err = storageconn.NewService(storageconn.Dependencies{
 		Connections: connections, Sealer: sealer, Clients: storageRegistry, Audit: auditService, Log: log,
+		Health: connections, Alerts: accessRepo, Drift: connections,
 	}, storageCfg, storageregistry.Policy(storageCfg))
 	if err != nil {
 		return fmt.Errorf("configure storage connections: %w", err)
 	}
+	storageRegistry.GuardPlacement(routes.StorageConnections)
+	copyRepo := postgres.NewCopyRepository(db)
+	routes.Copies = copyengine.NewService(copyengine.Dependencies{
+		Store: copyRepo, Router: storageRegistry, Packs: postgres.NewPackRepository(db), Locks: postgres.NewObjectLockRepository(db),
+		Posture: connections, Alerts: accessRepo, Audit: auditService,
+	}, copyengine.Config{Owner: "api"}, log)
+	routes.Delivery.FailOver(routes.Copies)
 
 	// Managed datasets. The API records imports and validations; the
 	// dataset worker runs them, so this service reads no object content.
@@ -252,11 +281,33 @@ func run() error {
 	datasetRepo := postgres.NewDatasetRepository(db)
 	routes.Datasets, err = datasetservice.NewService(datasetservice.Dependencies{
 		Repo: datasetRepo, Manifests: objectStorage, ManifestBucket: bucket, Quotas: quotaService,
-		Audit: auditService, Metrics: datasetMetrics, Log: log,
+		Audit: auditService, Metrics: datasetMetrics, Log: log, Placement: routes.StorageConnections, Protection: routes.Copies,
+		Quality: postgres.NewQualityRepository(db),
 	}, datasetConfig)
 	if err != nil {
 		return fmt.Errorf("configure datasets: %w", err)
 	}
+	signing, err := config.LoadLifecycle()
+	if err != nil {
+		return fmt.Errorf("load lifecycle configuration: %w", err)
+	}
+	routes.Streaming = streaming.New(streaming.Deps{Datasets: routes.Datasets, Delivery: routes.Delivery,
+		Store: postgres.NewStreamingRepository(db), Packs: postgres.NewPackRepository(db), Audit: auditService,
+		Signer: streaming.Signer{KeyID: signing.CertificateKeyID, Key: signing.CertificateKey}})
+	routes.Tiering = tiering.New(tiering.Deps{Store: postgres.NewTieringRepository(db), Assets: postgres.NewAssetRepository(db),
+		Router: storageRegistry, Datasets: routes.Datasets, Audit: auditService, Alerts: accessRepo, Log: log,
+		Delete: func(ctx context.Context, p model.Principal, assetID string) error {
+			_, err := lifecycle.RequestDeletionGoverned(ctx, p, assetID, "snapshot expiry")
+			return err
+		}}, tiering.Config{PlatformTiering: os.Getenv("PLATFORM_STORAGE_TIERING") == "true"})
+	routes.Delivery.Tiered(routes.Tiering)
+	routes.Evidence = evidence.New(evidence.Deps{Store: postgres.NewEvidenceRepository(db), Chains: postgres.NewAuditRepository(db),
+		Audit: auditService, Router: storageRegistry, Datasets: routes.Datasets, Delivery: routes.Delivery, Streaming: routes.Streaming,
+		Access: routes.Access, Holds: lifecycle, Alerts: accessRepo, TSA: os.Getenv("AUDIT_TSA_URL"), Log: log,
+		Signer: evidence.Signer{KeyID: signing.CertificateKeyID, Key: signing.CertificateKey}})
+	routes.Datasets.GateProvenance(routes.Evidence)
+	routes.Erasure = erasure.New(erasure.Deps{Store: postgres.NewErasureRepository(db), Lifecycle: lifecycle, Catalog: routes.Catalog,
+		Audit: auditService, Log: log, Signer: erasure.Signer{KeyID: signing.CertificateKeyID, Key: signing.CertificateKey}})
 
 	dead := postgres.NewDeadLetterRepository(db)
 	eventAdmin := events.NewAdmin(postgres.NewOutboxRepository(db), postgres.NewInboxRepository(db), dead, events.Checks{
@@ -275,7 +326,8 @@ func run() error {
 	routes.DeadLetters = events.NewGuardedAdmin(eventAdmin, dead, auditService)
 	routes.Uploads, routes.Multipart = uploadService, multipartService
 	routes.Quarantine = processing.NewQuarantine(postgres.NewAssetRepository(db), postgres.NewProcessingJobRepository(db),
-		postgres.NewQuarantineRepository(db), postgres.NewProcessingEventRepository(db), auditService)
+		postgres.NewQuarantineRepository(db), postgres.NewProcessingEventRepository(db), auditService).
+		WithChecks(postgres.NewContentCheckRepository(db))
 	routes.Limiter, routes.Rates, routes.TrustProxyHeaders = limiter, rates, sec.Auth.TrustProxyHeaders
 	// The security and catalog counters join the expvar listener started
 	// below.
@@ -290,6 +342,13 @@ func run() error {
 	routes.Identity.EnableSSO(postgres.NewSSORepository(db), sealer, storageregistry.Policy(storageCfg))
 	// Webhook endpoints are managed here; cmd/webhook-worker delivers.
 	routes.Webhooks = webhook.NewService(postgres.NewWebhookRepository(db), sealer, storageregistry.Policy(storageCfg), auditService)
+	// Adoption jobs are created and read here; the processing worker runs them.
+	adoptions := postgres.NewAdoptionRepository(db)
+	routes.Adoptions = adoption.NewService(adoption.Dependencies{
+		Store: adoptions, Router: storageRegistry, Net: storageregistry.Policy(storageCfg), Audit: auditService,
+	}, adoption.Config{}, log)
+	routes.Exports = adoption.Exporter{Versions: datasetRepo, Digests: adoptions, Assets: postgres.NewAssetRepository(db),
+		Packs: postgres.NewPackRepository(db), Router: storageRegistry, Platform: objectStorage, Bucket: deliveryBucket, Audit: auditService}
 	if routes.MetricsAddr != "" {
 		stopMetrics := metrics.Serve(routes.MetricsAddr, db.Pool.Ping, log)
 		defer stopMetrics()
@@ -368,7 +427,8 @@ func lifecycleService(db *postgres.DB, storage *s3storage.ObjectStorage, quarant
 		Policies: postgres.NewRetentionPolicyRepository(db), Holds: postgres.NewLegalHoldRepository(db),
 		Deletions: postgres.NewDeletionRepository(db), Events: postgres.NewLifecycleEventRepository(db),
 		Cursors: postgres.NewCursorRepository(db), Storage: storage, Packs: postgres.NewPackRepository(db),
-		Locks: postgres.NewObjectLockRepository(db), LockSync: postgres.NewLockSyncRepository(db),
+		Locks: postgres.NewObjectLockRepository(db), LockSync: postgres.NewLockSyncRepository(db), Governance: postgres.NewGovernanceRepository(db),
+		Escrow: postgres.NewCopyRepository(db),
 	}, assetservice.Config{
 		Owner: "api", QuarantineBucket: quarantineBucket, DeliveryBucket: deliveryBucket, DeliveryPrefix: prefix,
 		Platform: assetservice.PlatformRetention{
@@ -379,7 +439,9 @@ func lifecycleService(db *postgres.DB, storage *s3storage.ObjectStorage, quarant
 			MinRetentionFloor:          lc.MinRetentionFloor,
 			DeletionGraceFloor:         lc.DeletionGraceFloor,
 			QuarantineRetentionFloor:   lc.QuarantineRetention,
+			ComplianceMaxRetention:     lc.ComplianceMaxRetention,
 		},
+		Signer:    assetservice.Signer{KeyID: lc.CertificateKeyID, Key: lc.CertificateKey},
 		BatchSize: lc.BatchSize, Concurrency: lc.Concurrency, Lease: lc.LeaseDuration,
 		Retry:           retry.Policy{BaseDelay: lc.BackoffBase, MaxDelay: lc.BackoffMax, MaxAttempts: lc.MaxAttempts},
 		RecheckInterval: lc.RecheckInterval, MaxDeletionsPerRun: lc.MaxDeletionsPerRun,

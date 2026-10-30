@@ -7,6 +7,7 @@
 package storageconn
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -14,6 +15,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -45,6 +48,12 @@ type Dependencies struct {
 	Clients Clients
 	Audit   interfaces.AuditRecorder
 	Log     *slog.Logger
+	// Health keeps posture reports and staged credentials; Alerts raises
+	// security alerts on posture changes. Either may be nil.
+	Health HealthStore
+	Alerts Alerter
+	// Drift keeps the out-of-band change scan; nil turns it off.
+	Drift DriftStore
 }
 
 type Service struct {
@@ -53,6 +62,9 @@ type Service struct {
 	policy netguard.Policy
 	now    func() time.Time
 	newID  func() string
+	// partHTTP sends the multipart probe's part to its presigned URL; nil
+	// is the network-guarded client.
+	partHTTP *http.Client
 }
 
 func NewService(deps Dependencies, cfg config.Storage, policy netguard.Policy) (*Service, error) {
@@ -226,7 +238,14 @@ type UpdateInput struct {
 	Endpoint       *string
 	ForcePathStyle *bool
 	StagingMode    *model.StagingMode
+	ChecksumMode   *string
+	// ExpectedOwner pins the bucket's owner; "" unpins it.
+	ExpectedOwner *string
+	// EncryptionKey sets the customer-managed key; "" removes it.
+	EncryptionKey *string
 }
+
+var ownerPattern = regexp.MustCompile(`^[0-9]{6,20}$`)
 
 // Update changes a connection's settings at the revision the caller read.
 // Uploads and assets stay bound to the connection, not to its settings,
@@ -265,16 +284,44 @@ func (s *Service) Update(ctx context.Context, p model.Principal, connectionID st
 	if in.StagingMode != nil {
 		changed.StagingMode = *in.StagingMode
 	}
+	if in.ChecksumMode != nil {
+		mode := strings.ToUpper(*in.ChecksumMode)
+		if !model.ValidChecksumMode(mode) {
+			return model.StorageConnection{}, TestResult{}, fmt.Errorf("%w: checksum_mode is AUTO, WHEN_SUPPORTED or WHEN_REQUIRED", ErrInvalidRequest)
+		}
+		in.ChecksumMode, changed.ChecksumMode = &mode, mode
+	}
+	if in.ExpectedOwner != nil {
+		owner := strings.TrimSpace(*in.ExpectedOwner)
+		pinnable := current.Provider == model.ProviderAWSS3 || current.Provider == model.ProviderGCS
+		if owner != "" && (!ownerPattern.MatchString(owner) || !pinnable) {
+			return model.StorageConnection{}, TestResult{}, fmt.Errorf("%w: expected_owner is an AWS account ID or a Google project number", ErrInvalidRequest)
+		}
+		in.ExpectedOwner, changed.ExpectedOwner = &owner, owner
+	}
+	if in.EncryptionKey != nil {
+		key := strings.TrimSpace(*in.EncryptionKey)
+		if key != "" && !model.ValidEncryptionKey(current.Provider, key) {
+			return model.StorageConnection{}, TestResult{}, fmt.Errorf("%w: encryption_key is a KMS key ID, ARN or alias on S3, "+
+				"a Cloud KMS key name on GCS, or an encryption scope on Azure", ErrInvalidRequest)
+		}
+		in.EncryptionKey, changed.EncryptionKey = &key, key
+	}
 	if err := s.validate(changed); err != nil {
 		return model.StorageConnection{}, TestResult{}, err
 	}
 	var result TestResult
-	moved := changed.Region != current.Region || changed.Endpoint != current.Endpoint || changed.ForcePathStyle != current.ForcePathStyle
-	if moved && current.HoldsWork() {
+	// Pinning an owner or changing how checksums are sent changes every
+	// request, so it is tested like a move.
+	moved := changed.Region != current.Region || changed.Endpoint != current.Endpoint || changed.ForcePathStyle != current.ForcePathStyle ||
+		changed.ExpectedOwner != current.ExpectedOwner || changed.ChecksumMode != current.ChecksumMode
+	// A new key must be able to write: the test writes with it.
+	rekeyed := changed.EncryptionKey != current.EncryptionKey
+	if (moved && current.HoldsWork()) || (rekeyed && current.HasCredential()) {
 		if err := s.enabled(); err != nil {
 			return model.StorageConnection{}, TestResult{}, err
 		}
-		if result, err = s.check(ctx, changed, s.stored(changed), false); err != nil {
+		if result, err = s.check(ctx, changed, s.stored(changed), rekeyed); err != nil {
 			return model.StorageConnection{}, TestResult{}, err
 		}
 		if !result.OK {
@@ -286,7 +333,7 @@ func (s *Service) Update(ctx context.Context, p model.Principal, connectionID st
 	// change made meanwhile fails this with a conflict.
 	stored, err := s.deps.Connections.UpdateConnection(ctx, p.TenantID, connectionID, revision, interfaces.ConnectionChange{
 		Name: in.Name, Region: in.Region, Endpoint: in.Endpoint, ForcePathStyle: in.ForcePathStyle, StagingMode: in.StagingMode,
-		Actor: p.UserID, At: s.now(),
+		ChecksumMode: in.ChecksumMode, ExpectedOwner: in.ExpectedOwner, EncryptionKey: in.EncryptionKey, Actor: p.UserID, At: s.now(),
 	})
 	if err != nil {
 		return model.StorageConnection{}, TestResult{}, err
@@ -429,13 +476,22 @@ func (s *Service) Enable(ctx context.Context, p model.Principal, connectionID st
 
 // Delete removes a disabled or never-activated connection that nothing
 // depends on, and erases its credentials. Its bucket and objects are the
-// customer's and are left alone.
+// customer's and are left alone, but for a tombstone: one small object
+// under the platform's prefix saying the prefix is no longer managed, so
+// whoever finds it (or a bucket re-created under the same name) knows.
+// The database row is kept as a tombstone too.
 func (s *Service) Delete(ctx context.Context, p model.Principal, connectionID string) (model.StorageConnection, interfaces.ConnectionDependents, error) {
 	if err := audit.Require(ctx, s.deps.Audit, p, model.PermStorageManage, "storage_connection.delete", "storage_connection", connectionID); err != nil {
 		return model.StorageConnection{}, interfaces.ConnectionDependents{}, err
 	}
-	if _, err := s.ownConnection(ctx, p, connectionID); err != nil {
+	c, err := s.ownConnection(ctx, p, connectionID)
+	if err != nil {
 		return model.StorageConnection{}, interfaces.ConnectionDependents{}, err
+	}
+	if c.Status != model.ConnectionActive && c.HasCredential() && s.enabled() == nil {
+		if d, err := s.deps.Connections.Dependents(ctx, p.TenantID, connectionID); err == nil && !d.Any() {
+			s.tombstone(ctx, p, c)
+		}
 	}
 	stored, err := s.deps.Connections.Delete(ctx, p.TenantID, connectionID, p.UserID, s.now())
 	if errors.Is(err, model.ErrConnectionInUse) {
@@ -451,6 +507,28 @@ func (s *Service) Delete(ctx context.Context, p model.Principal, connectionID st
 	s.deps.Clients.Invalidate(connectionID)
 	s.record(ctx, p, "storage_connection.delete", stored, nil)
 	return stored, interfaces.ConnectionDependents{}, nil
+}
+
+// tombstone writes the marker object. It is best effort: a bucket that
+// is already gone, or credentials already revoked, must not stop a delete.
+func (s *Service) tombstone(ctx context.Context, p model.Principal, c model.StorageConnection) {
+	client, closeClient, err := s.deps.Clients.BuildStored(ctx, c)
+	if err != nil {
+		return
+	}
+	defer closeClient()
+	body, _ := json.MarshalIndent(map[string]string{
+		"notice":          "This prefix was used by an object storage platform connection that has been removed. Nothing here is managed by the platform any more.",
+		"connection_id":   c.ID,
+		"connection_name": c.Name,
+		"organization_id": c.TenantID,
+		"removed_by":      p.UserID,
+		"removed_at":      s.now().Format(time.RFC3339),
+	}, "", "  ")
+	key := c.ReadyPrefix + "/" + c.TenantID + "/.osp-tombstone.json"
+	if _, err := client.WriteObject(ctx, c.Bucket, key, bytes.NewReader(body), int64(len(body)), "application/json"); err != nil {
+		s.deps.Log.Info("connection tombstone not written", "connection_id", c.ID, "category", Categorize(err))
+	}
 }
 
 // record audits a change. Details never hold credentials, endpoints'

@@ -84,6 +84,37 @@ export function getVersion(id: string, versionId: string, signal?: AbortSignal) 
   return api<DatasetVersion>(`/datasets/${id}/versions/${versionId}`, { signal });
 }
 
+export type VersionIntegrity = {
+  degraded: boolean;
+  objects: { path: string; kind: string; detail: string; detected_at: string }[];
+};
+
+// Whether a snapshot's members changed outside the platform since it was
+// taken (docs/storage-posture.md).
+export function getVersionIntegrity(id: string, versionId: string, signal?: AbortSignal) {
+  return api<VersionIntegrity>(`/datasets/${id}/versions/${versionId}/integrity`, { signal });
+}
+
+export type VersionResidency = {
+  allowed: string[];
+  require_customer_key: boolean;
+  inside: boolean;
+  locations: {
+    connection_id: string;
+    location: string;
+    location_verified: boolean;
+    encryption_key?: string;
+    members: number;
+    bytes: number;
+    allowed: boolean;
+  }[];
+};
+
+// Where a snapshot's bytes are, against its dataset's rules (docs/residency.md).
+export function getVersionResidency(id: string, versionId: string, signal?: AbortSignal) {
+  return api<VersionResidency>(`/datasets/${id}/versions/${versionId}/residency`, { signal });
+}
+
 export function listVersionMembers(id: string, versionId: string, after: number | undefined, signal?: AbortSignal) {
   return api<VersionMemberPage>(`/datasets/${id}/versions/${versionId}/members`, { query: { after }, signal });
 }

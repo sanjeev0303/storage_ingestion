@@ -24,7 +24,7 @@ func Run(
 		if err != nil && ctx.Err() == nil {
 			log.Error("processing cycle failed", "error", err)
 		}
-		if stats.Claimed > 0 || stats.Enqueued > 0 {
+		if stats.Claimed > 0 || stats.Enqueued > 0 || stats.Rescanned > 0 {
 			log.Info("processing cycle",
 				"enqueued", stats.Enqueued,
 				"claimed", stats.Claimed,
@@ -33,6 +33,8 @@ func Run(
 				"retried", stats.Retried,
 				"exhausted", stats.Exhausted,
 				"lease_lost", stats.LeaseLost,
+				"rescanned", stats.Rescanned,
+				"rescan_infected", stats.Infected,
 			)
 		}
 

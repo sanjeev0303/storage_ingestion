@@ -43,6 +43,9 @@ type TrainingRun struct {
 	Params     map[string]string
 	Metrics    map[string]float64
 	VersionIDs []string
+	// Roles says what the run used a version for (TRAIN, VALIDATION,
+	// TEST), where the caller said.
+	Roles      map[string]string
 	Models     []Model
 	CreatedBy  string
 	CreatedAt  time.Time

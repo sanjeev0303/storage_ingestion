@@ -215,7 +215,8 @@ def diff(client, dataset_id, base_version_id, target_version_id):
     return {"summary": first["summary"], "differences": differences}
 
 
-VALIDATION_DONE = {"COMPLETED", "FAILED", "CANCELLED"}
+# A job has ended in any other state, COMPLETED_WITH_WARNINGS included.
+VALIDATION_RUNNING = {"QUEUED", "RUNNING"}
 
 
 def validate(client, dataset_id, version_id, profile="builtin:general", mode="METADATA", poll=2.0):
@@ -227,7 +228,7 @@ def validate(client, dataset_id, version_id, profile="builtin:general", mode="ME
     first page."""
     job = client.post(f"/api/v1/datasets/{dataset_id}/validations",
                       {"version_id": version_id, "profile_id": profile, "mode": mode})
-    while job["state"] not in VALIDATION_DONE:
+    while job["state"] in VALIDATION_RUNNING:
         time.sleep(poll)
         job = client.get(f"/api/v1/validation-jobs/{job['id']}")
     if not job.get("report_id"):

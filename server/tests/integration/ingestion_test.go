@@ -1469,7 +1469,8 @@ func TestIngestionSurvivesDatabaseAndStorageOutages(t *testing.T) {
 	if len(first.Grants) != 2 || first.Failed != 1 {
 		t.Fatalf("claim during a provider outage: %+v", first)
 	}
-	if big := e.entry(t, job.ID, 3); big.State != model.EntryRetryable || big.ErrorCode != model.EntryErrStorage {
+	// It waits for the provider without using up an attempt.
+	if big := e.entry(t, job.ID, 3); big.State != model.EntryRetryable || big.ErrorCode != model.EntryErrStorage || big.Attempts != 0 {
 		t.Fatalf("multipart entry: %+v", big)
 	}
 	if u := e.usage(t); u.ActiveUploads != 2 || u.ActiveMultipart != 0 || u.ReservedBytes != 600 {

@@ -29,6 +29,29 @@ type PackCandidateFilter struct {
 	PublishedBefore time.Time
 }
 
+// PackCursor is where a tenant's candidates resume: after this asset in
+// path order.
+type PackCursor struct {
+	Namespace, PathKey, AssetID string
+}
+
+// PackCandidate is an asset packing may take, with its catalog path, so
+// files of one sample (one path stem) are packed side by side.
+type PackCandidate struct {
+	model.Asset
+	Namespace, PathKey string
+}
+
+// RepackEntry is a published pack entry of a dataset, with the pack it is
+// in now and its place in the dataset's path order.
+type RepackEntry struct {
+	Entry model.PackEntry
+	Pack  model.Pack
+	// PackLive counts the pack's published entries.
+	PackLive int
+	PathKey  string
+}
+
 // PackSource is a published entry whose standalone source copy may be
 // retired, with its asset as it is now.
 type PackSource struct {
@@ -51,9 +74,23 @@ type PackRepository interface {
 	// PackingTenants pages through the tenants with published assets.
 	PackingTenants(ctx context.Context, after string, limit int) ([]string, error)
 	// PackCandidates pages through one tenant's assets that packing may
-	// take, in ID order after afterAssetID: published, verified, standalone,
-	// within the filter, under no legal hold, and in no pack.
-	PackCandidates(ctx context.Context, tenantID, afterAssetID string, f PackCandidateFilter, limit int) ([]model.Asset, error)
+	// take, in catalog path order after the cursor: published, verified,
+	// standalone, within the filter, under no legal hold, and in no pack.
+	PackCandidates(ctx context.Context, tenantID string, after PackCursor, f PackCandidateFilter, limit int) ([]PackCandidate, error)
+	// TargetPackBytes is the organization's own target pack size, 0 when
+	// it has none.
+	TargetPackBytes(ctx context.Context, tenantID string) (int64, error)
+	SetTargetPackBytes(ctx context.Context, tenantID string, bytes int64, by string, now time.Time) error
+	// RepackEntries pages through the published pack entries of a
+	// dataset's assets (its draft and every snapshot), in path order after
+	// (afterKey, afterAsset).
+	RepackEntries(ctx context.Context, tenantID, datasetID, afterKey, afterAsset string, limit int) ([]RepackEntry, error)
+	CreateRepack(ctx context.Context, r model.RepackRequest) error
+	Repacks(ctx context.Context, tenantID, datasetID string, limit int) ([]model.RepackRequest, error)
+	PendingRepacks(ctx context.Context, limit int) ([]model.RepackRequest, error)
+	// AdvanceRepack records what one planning pass did; done ends it.
+	AdvanceRepack(ctx context.Context, id, cursorKey, cursorAsset string, packs, entries int, done bool, now time.Time) error
+	CancelRepack(ctx context.Context, tenantID, id string, now time.Time) error
 	// BuildingPacks counts a tenant's packs still being built.
 	BuildingPacks(ctx context.Context, tenantID string) (int, error)
 	// CreatePack stores a PLANNED pack with its RESERVED entries and the
@@ -77,9 +114,10 @@ type PackRepository interface {
 	// released, those of excluded assets marked EXCLUDED.
 	FailPack(ctx context.Context, packID, owner string, now time.Time, lastError string, excluded []string) error
 	// PublishPack publishes a verified pack in one transaction: entries of
-	// assets still published become PUBLISHED (moving them out of the pack
-	// rewritten, if any), the others DELETED, and the pack PUBLISHED with
-	// its manifest's checksum.
+	// assets still published become PUBLISHED (moving them out of the packs
+	// they were copied from, which retire once nothing is served from
+	// them), the others DELETED, and the pack PUBLISHED with its
+	// manifest's checksum.
 	PublishPack(ctx context.Context, packID, owner, manifestSHA256 string, now time.Time) (published, dead int, err error)
 
 	// SourcesToRetire lists published entries whose standalone source is

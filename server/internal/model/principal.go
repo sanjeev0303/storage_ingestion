@@ -16,6 +16,8 @@ type Principal struct {
 	// Service marks a trusted internal caller (a worker or an operator
 	// CLI) acting with every permission of one tenant.
 	Service bool
+	// Scope confines a caller that used an API token.
+	Scope Scope
 }
 
 // Valid reports whether the principal identifies a caller.

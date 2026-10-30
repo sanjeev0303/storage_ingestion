@@ -140,6 +140,11 @@ type PackEntry struct {
 	SourceKey       string
 	SourceETag      string
 	SourceVersionID string
+	// SourcePackID and SourceOffset, when set, are the pack and offset the
+	// bytes are copied from (a rewrite or a repack); SourceKey is then that
+	// pack's object.
+	SourcePackID    string
+	SourceOffset    int64
 	State           PackEntryState
 	SourceRetiredAt *time.Time
 	DeletedAt       *time.Time
@@ -180,3 +185,26 @@ func (l PackedLocation) Range(first, last int64) (int64, int64, error) {
 	}
 	return l.Offset + first, l.Offset + last, nil
 }
+
+// RepackRequest gathers a dataset's packed entries, in path order, into
+// new packs of the organization's target size (docs/streaming.md).
+type RepackRequest struct {
+	ID             string     `json:"id"`
+	TenantID       string     `json:"-"`
+	DatasetID      string     `json:"dataset_id"`
+	State          string     `json:"state"` // PENDING, DONE or CANCELLED
+	CursorKey      string     `json:"-"`
+	CursorAsset    string     `json:"-"`
+	PacksPlanned   int        `json:"packs_planned"`
+	EntriesPlanned int        `json:"entries_planned"`
+	RequestedBy    string     `json:"requested_by"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+	FinishedAt     *time.Time `json:"finished_at,omitempty"`
+}
+
+var (
+	// ErrRepackActive: the dataset already has a repack under way.
+	ErrRepackActive   = errors.New("a repack of this dataset is already under way")
+	ErrRepackNotFound = errors.New("repack not found")
+)

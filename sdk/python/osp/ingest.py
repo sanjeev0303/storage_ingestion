@@ -98,7 +98,7 @@ def remote_versions(client, dataset):
     return current
 
 
-def ingest_folder(client, folder, dataset, concurrency=8, wait=True, progress=None, branch=None):
+def ingest_folder(client, folder, dataset, concurrency=8, wait=True, progress=None, branch=None, into=None):
     """Brings the dataset up to date with a local folder, uploading only
     what changed.
 
@@ -120,6 +120,10 @@ def ingest_folder(client, folder, dataset, concurrency=8, wait=True, progress=No
 
     Running it again resumes: the bulk job's key is the SHA-256 of its
     manifest, and uploads are keyed by path and content.
+
+    into is the dataset (as the API answers it) when it already exists and
+    was made with options a plain create would not match, such as a
+    derived one.
     Returns a summary dict (new, changed, unchanged, members, failed, job).
     """
     say = progress or (lambda message: None)
@@ -129,7 +133,7 @@ def ingest_folder(client, folder, dataset, concurrency=8, wait=True, progress=No
     say(f"hashing {len(files)} files")
     hash_files(files, workers=concurrency)
 
-    ds = client.post("/api/v1/datasets", {"name": dataset})
+    ds = into or client.post("/api/v1/datasets", {"name": dataset})
     current = remote_versions(client, dataset)
     new = [f for f in files if f.path not in current]
     changed = [f for f in files if f.path in current and current[f.path].get("checksum_sha256") != f.sha256]
@@ -193,7 +197,8 @@ def _upload_new_versions(client, dataset, files, concurrency, wait, say):
         if f.size <= SINGLE_UPLOAD_LIMIT:
             created = client.post("/api/v1/uploads", body)
             upload_id = created["upload_id"]
-            put_bytes(created["upload_url"], lambda: open(f.disk_path, "rb"), f.size, f.content_type)
+            put_bytes(created["upload_url"], lambda: open(f.disk_path, "rb"), f.size, f.content_type,
+                      headers=created.get("upload_headers"))
             client.post(f"/api/v1/uploads/{upload_id}/complete")
         else:
             upload_id = client.post("/api/v1/uploads/multipart", body)["upload_id"]
@@ -318,7 +323,8 @@ def _upload_one(client, job_path, by_path, grant):
     entry_path = f"{job_path}/entries/{entry['position']}"
 
     if entry.get("strategy") == "SINGLE":
-        put_bytes(grant["upload_url"], lambda: open(local.disk_path, "rb"), local.size, entry.get("content_type"))
+        put_bytes(grant["upload_url"], lambda: open(local.disk_path, "rb"), local.size, entry.get("content_type"),
+                  headers=grant.get("upload_headers"))
         client.post(entry_path + "/complete")
         return
 

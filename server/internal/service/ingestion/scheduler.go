@@ -31,6 +31,9 @@ type Grant struct {
 	// asks for part URLs with its upload ID.
 	UploadURL    string
 	URLExpiresAt time.Time
+	// UploadHeaders must be sent with the PUT: Azure's blob type, or the
+	// customer-managed key a connection encrypts with.
+	UploadHeaders map[string]string
 }
 
 // ClaimResult is what one claim granted.
@@ -151,7 +154,7 @@ func (s *Service) prepare(ctx context.Context, job model.IngestionJob, dataset m
 				return err
 			}
 			grant.Entry.UploadID = res.Upload.ID
-			grant.UploadURL, grant.URLExpiresAt = res.Plan.UploadURL, res.Plan.ExpiresAt
+			grant.UploadURL, grant.URLExpiresAt, grant.UploadHeaders = res.Plan.UploadURL, res.Plan.ExpiresAt, res.Plan.Headers
 		case model.StrategyMultipart:
 			res, err := s.deps.Multipart.Start(ctx, upload.StartMultipartInput{
 				Dataset: dataset.Name, TenantID: e.TenantID, OwnerID: job.CreatedBy, FileName: model.BaseName(e.Path),
@@ -197,7 +200,31 @@ func (s *Service) uploadFailed(ctx context.Context, e model.IngestionEntry, caus
 	case errors.Is(cause, model.ErrQuotaExceeded):
 		code = model.EntryErrQuotaExceeded
 	}
+	if code == model.EntryErrStorage && !retry.IsPermanent(cause) {
+		// The provider is down, slow or unreachable: the entry waits for it
+		// in the queue without using up an attempt, so an outage of an
+		// hour does not fail a whole ingestion. Refusals that retrying
+		// cannot fix (access denied, bad credentials) still count.
+		s.wait(ctx, e, []model.EntryState{model.EntryScheduled, model.EntryUploading}, code, retry.Sanitize(cause))
+		return
+	}
 	s.fail(ctx, e, []model.EntryState{model.EntryScheduled, model.EntryUploading}, code, retry.Sanitize(cause), permanent)
+}
+
+// wait puts an entry back in the queue after a backoff without counting
+// an attempt, and releases its slot like fail does.
+func (s *Service) wait(ctx context.Context, e model.IngestionEntry, from []model.EntryState, code, detail string) {
+	now := s.now()
+	next := now.Add(s.backoff(e.Attempts + 1))
+	change := interfaces.EntryChange{
+		JobID: e.JobID, Position: e.Position, From: from, Now: now, UploadID: e.UploadID, To: model.EntryRetryable,
+		ErrorCode: code, ErrorDetail: detail, NewGeneration: true, NextAttemptAt: &next,
+	}
+	if _, err := s.deps.Repo.Transition(ctx, change); err != nil && !errors.Is(err, model.ErrInvalidEntryState) {
+		s.deps.Log.Warn("queue entry during an outage", "job_id", e.JobID, "position", e.Position, "error", retry.Sanitize(err))
+		return
+	}
+	s.count("ingestion_entries_waiting_on_storage", 1)
 }
 
 // fail moves an entry to FAILED_RETRYABLE with a backoff, or to FAILED
@@ -274,7 +301,7 @@ func (s *Service) RefreshUpload(ctx context.Context, p model.Principal, jobID st
 	if e.Strategy == model.StrategySingle {
 		err := s.onStorage(ctx, func(ctx context.Context) error {
 			res, err := s.deps.Uploads.Plan(ctx, e.TenantID, e.UploadID)
-			grant.UploadURL, grant.URLExpiresAt = res.Plan.UploadURL, res.Plan.ExpiresAt
+			grant.UploadURL, grant.URLExpiresAt, grant.UploadHeaders = res.Plan.UploadURL, res.Plan.ExpiresAt, res.Plan.Headers
 			return err
 		})
 		if err != nil {

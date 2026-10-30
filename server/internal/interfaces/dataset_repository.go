@@ -116,6 +116,11 @@ type DatasetFilter struct {
 	Limit     int
 }
 
+// ProtectionGuard checks a dataset's protection settings (copyengine).
+type ProtectionGuard interface {
+	CheckProtection(ctx context.Context, p model.Principal, prot model.Protection, primaryConnectionID string) error
+}
+
 // DatasetPatch changes a dataset's descriptive fields; nil leaves one as
 // it is.
 type DatasetPatch struct {
@@ -127,6 +132,17 @@ type DatasetPatch struct {
 	ProfileVersion *int
 	// StorageConnectionID chooses the dataset's connection; "" clears it.
 	StorageConnectionID *string
+	// DataClass marks regulated data (PHI, PCI, PII); "" clears it.
+	DataClass *string
+	// Residency replaces the allowed locations; RequireCustomerKey sets
+	// whether a customer-managed key is required.
+	Residency          *[]string
+	RequireCustomerKey *bool
+	// Protection settings; ReplicaConnectionID "" removes the replica.
+	ReplicaConnectionID *string
+	Escrow              *bool
+	VaultRetentionDays  *int
+	ScrubDays           *int
 }
 
 // ObjectRef names a catalog object by ID or by namespace and path key, and

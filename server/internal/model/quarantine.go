@@ -67,4 +67,7 @@ type ContentPolicy struct {
 	// UnknownTypeAction is "allow" or "reject": what to do when the bytes
 	// do not reveal a recognisable type.
 	UnknownTypeAction string
+	// FindingActions override what a content check's finding does, by
+	// code or family (see FindingAction).
+	FindingActions map[string]string
 }
