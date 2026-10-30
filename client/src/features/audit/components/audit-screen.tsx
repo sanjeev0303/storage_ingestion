@@ -16,6 +16,7 @@ import { describeError } from "@/lib/api/errors";
 import { useSession } from "@/lib/auth/session";
 import { splitList } from "@/lib/utils/forgive";
 import { formatNumber } from "@/lib/utils/format";
+import { AuditTabs } from "@/features/evidence/components/audit-tabs";
 import { useAuditEvents, useVerifyAudit } from "../hooks";
 import type { AuditChain, AuditEvent, AuditFilters, AuditOutcome } from "../types";
 import { validateAction } from "../validate";
@@ -74,6 +75,7 @@ export function AuditScreen() {
           </Button>
         }
       />
+      <AuditTabs />
 
       {isPlatform && (
         <div className="mb-4 max-w-sm">

@@ -40,8 +40,21 @@ export type Dataset = {
   updated_by?: string;
   archived_at?: string;
   storage_connection_id?: string;
+  // PHI, PCI or PII when the dataset holds regulated data.
+  data_class?: DataClass;
+  // Where the data may be stored, and whether a customer-managed key is required (docs/residency.md).
+  residency?: string[];
+  require_customer_key?: boolean;
+  // Protection (docs/copy-engine.md).
+  replica_connection_id?: string;
+  escrow?: boolean;
+  vault_retention_days?: number;
+  scrub_days?: number;
+  clean_version_id?: string;
   branch?: BranchInfo;
 };
+
+export type DataClass = "PHI" | "PCI" | "PII";
 
 export type BranchInfo = {
   parent_id: string;
@@ -80,6 +93,13 @@ export type UpdateDatasetRequest = {
   profile_id?: string;
   profile_version?: number;
   storage_connection_id?: string;
+  data_class?: DataClass | "";
+  residency?: string[];
+  require_customer_key?: boolean;
+  replica_connection_id?: string;
+  escrow?: boolean;
+  vault_retention_days?: number;
+  scrub_days?: number;
 };
 
 export type DatasetMember = {
@@ -148,6 +168,9 @@ export type DatasetVersion = {
   latest_report_id?: string;
   created_by: string;
   created_at: string;
+  // An erasure made a successor without some members; not read for training.
+  superseded_by?: string;
+  superseded_reason?: string;
 };
 
 export type VersionPage = { versions: DatasetVersion[]; next_before?: number };
@@ -287,6 +310,8 @@ export type TrainingRun = {
   params: Record<string, string>;
   metrics: Record<string, number>;
   dataset_version_ids: string[];
+  // What the run used each version for, where it said.
+  roles?: Record<string, "TRAIN" | "VALIDATION" | "TEST">;
   models: TrainingModel[];
   created_by: string;
   created_at: string;

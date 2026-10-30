@@ -66,6 +66,14 @@ export type StorageConnection = {
   last_tested_at?: string;
   last_test_ok_at?: string;
   last_error_category?: TestCategory;
+  // How request checksums are sent, and the account or project number the
+  // bucket must belong to (docs/storage-posture.md).
+  checksum_mode?: ChecksumMode;
+  expected_owner?: string;
+  // The customer-managed key every write is encrypted with (docs/residency.md).
+  encryption_key?: string;
+  staged_credential?: { rotation: number; staged_at?: string; staged_by?: string };
+  previous_credential_until?: string;
   revision: number;
   created_by?: string;
   updated_by?: string;
@@ -73,6 +81,38 @@ export type StorageConnection = {
   updated_at: string;
   disabled_at?: string;
   deleted_at?: string;
+};
+
+export type ChecksumMode = "AUTO" | "WHEN_SUPPORTED" | "WHEN_REQUIRED";
+
+export type PostureStatus = "PASS" | "WARN" | "FAIL" | "NOT_CHECKED";
+
+export type PostureCheck = { name: string; status: PostureStatus; detail: string };
+
+export type PostureReport = {
+  connection_id: string;
+  checked_at: string;
+  worst: "PASS" | "WARN" | "FAIL";
+  phi_safe: boolean;
+  checks: PostureCheck[];
+  owner_account?: string;
+  location?: string;
+  location_verified?: boolean;
+  encryption_key?: string;
+};
+
+export type DriftKind = "OVERWRITTEN" | "DELETED" | "NEW_VERSION" | "UNREADABLE" | "UNKNOWN_OBJECT";
+
+export type DriftFinding = {
+  id: string;
+  connection_id: string;
+  asset_id?: string;
+  object_key: string;
+  kind: DriftKind;
+  detail: string;
+  detected_at: string;
+  resolved_at?: string;
+  resolved_by?: string;
 };
 
 export type ConnectionList = {
@@ -107,6 +147,7 @@ export type TestResponse = {
   capabilities?: Capabilities;
   tested_at: string;
   connection?: StorageConnection;
+  posture?: PostureReport;
 };
 
 export type StorageCredentials = {
@@ -141,4 +182,7 @@ export type UpdateConnectionRequest = {
   endpoint?: string;
   force_path_style?: boolean;
   staging_mode?: StagingMode;
+  checksum_mode?: ChecksumMode;
+  expected_owner?: string;
+  encryption_key?: string;
 };

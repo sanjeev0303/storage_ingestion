@@ -65,7 +65,8 @@ class StreamTest(unittest.TestCase):
         self.storage.close()
 
     def stream(self, **kw):
-        return SnapshotStream(self.client, "ds", "v1", **kw)
+        # These read file by file; ShardStreamTest reads shard streams.
+        return SnapshotStream(self.client, "ds", "v1", **{"read": "files", **kw})
 
     def test_shares_cover_every_member_once_and_shuffle_alike(self):
         s = self.stream(split="train", shuffle_seed=7)

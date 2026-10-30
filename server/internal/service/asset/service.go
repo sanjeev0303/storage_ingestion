@@ -54,6 +54,17 @@ type Dependencies struct {
 	// assets are locked within a cycle instead of on the sweep's next
 	// pass; nil leaves that to the sweep.
 	LockSync LockSync
+	// Governance keeps governance settings, approvals and disposition
+	// certificates; nil turns them off.
+	Governance Governance
+	// Escrow says whether an asset belongs to a dataset that keeps escrow
+	// copies and lacks one (docs/copy-engine.md); nil turns escrow off.
+	Escrow Escrow
+}
+
+// Escrow is the copy repository's escrow check.
+type Escrow interface {
+	EscrowMissing(ctx context.Context, tenantID, assetID string) (string, bool, error)
 }
 
 // LockSync is the queue of scopes to lock ahead of the sweep
@@ -98,6 +109,9 @@ type Config struct {
 	TenantID string
 	// DryRun reports what a cycle would do and writes nothing.
 	DryRun bool
+	// Signer signs disposition certificates; without a key they are
+	// stored unsigned, with their SHA-256.
+	Signer Signer
 }
 
 // Service runs the asset lifecycle. Several instances may run at once:
@@ -301,6 +315,15 @@ func (s *Service) requestDeletion(ctx context.Context, asset model.Asset, reason
 			return DeletionResult{}, model.ErrDeletionBlocked
 		}
 	}
+	if s.deps.Escrow != nil {
+		dataset, missing, err := s.deps.Escrow.EscrowMissing(ctx, asset.TenantID, asset.ID)
+		if err != nil {
+			return DeletionResult{}, err
+		}
+		if missing {
+			return DeletionResult{}, fmt.Errorf("%w: %w (dataset %s)", model.ErrDeletionBlocked, model.ErrEscrowRequired, dataset)
+		}
+	}
 
 	now := s.now()
 	policy, err := s.policyFor(ctx, asset, now)
@@ -415,8 +438,29 @@ func (s *Service) PlaceHold(ctx context.Context, hold model.LegalHold) (model.Le
 		if _, err := s.tenantAsset(ctx, hold.TenantID, hold.ScopeKey); err != nil {
 			return model.LegalHold{}, err
 		}
+	case model.ScopeQuery:
+		// The scope key names the matter; the query selects the assets,
+		// now and as they are created.
+		if hold.Query == nil {
+			return model.LegalHold{}, errors.New("a QUERY hold needs a query")
+		}
+		if err := hold.Query.Validate(); err != nil {
+			return model.LegalHold{}, err
+		}
+		if hold.ScopeKey == "" {
+			hold.ScopeKey = hold.Matter
+		}
+		if hold.ScopeKey == "" || len(hold.ScopeKey) > 200 {
+			return model.LegalHold{}, errors.New("a QUERY hold needs a matter name of at most 200 characters")
+		}
 	default:
-		return model.LegalHold{}, errors.New("hold scope must be TENANT, DATASET or ASSET")
+		return model.LegalHold{}, errors.New("hold scope must be TENANT, DATASET, ASSET or QUERY")
+	}
+	if hold.Scope != model.ScopeQuery {
+		hold.Query = nil
+	}
+	if len(hold.Matter) > 200 || len(hold.Custodians) > 100 {
+		return model.LegalHold{}, errors.New("the matter is limited to 200 characters and custodians to 100")
 	}
 	if hold.TenantID == "" || hold.Reason == "" || hold.PlacedBy == "" {
 		return model.LegalHold{}, errors.New("tenant, reason and actor are required")
@@ -428,7 +472,7 @@ func (s *Service) PlaceHold(ctx context.Context, hold model.LegalHold) (model.Le
 	if err != nil {
 		return model.LegalHold{}, err
 	}
-	s.requestLockSync(ctx, hold.TenantID, hold.Scope, hold.ScopeKey, "hold "+stored.ID)
+	s.requestLockSync(ctx, hold.TenantID, hold.Scope, lockSyncKey(stored), "hold "+stored.ID)
 	s.deps.Metrics.Add("legal_holds_placed", 1)
 	s.record(ctx, s.newEvent(hold.TenantID, assetIDOf(hold.Scope, hold.ScopeKey), "", "hold_placed", "",
 		fmt.Sprintf("hold %s on %s %s: %s", stored.ID, hold.Scope, hold.ScopeKey, hold.Reason), hold.PlacedBy))
@@ -457,10 +501,19 @@ func (s *Service) ReleaseHold(ctx context.Context, tenantID, holdID, actor strin
 		return err
 	}
 	if scope.ID != "" {
-		s.requestLockSync(ctx, tenantID, scope.Scope, scope.ScopeKey, "released hold "+holdID)
+		s.requestLockSync(ctx, tenantID, scope.Scope, lockSyncKey(scope), "released hold "+holdID)
 	}
 	s.record(ctx, s.newEvent(tenantID, "", "", "hold_released", "", "hold "+holdID, actor))
 	return nil
+}
+
+// lockSyncKey is what a lock sync request names for a hold's scope: the
+// hold itself for a QUERY hold, whose query selects the assets.
+func lockSyncKey(hold model.LegalHold) string {
+	if hold.Scope == model.ScopeQuery {
+		return hold.ID
+	}
+	return hold.ScopeKey
 }
 
 // Requeue gives a FAILED deletion a fresh attempt budget.
@@ -517,7 +570,7 @@ func (s *Service) inspect(ctx context.Context, asset model.Asset) (Inspection, e
 	if err != nil {
 		return Inspection{}, err
 	}
-	out := Inspection{Asset: asset, Policy: policy, RetainUntil: policy.RetainUntil(asset.CreatedAt)}
+	out := Inspection{Asset: asset, Policy: policy, RetainUntil: policy.RetainUntilFor(asset)}
 	if at, ok := policy.ExpiresAt(asset.CreatedAt); ok {
 		out.ExpiresAt = &at
 	}

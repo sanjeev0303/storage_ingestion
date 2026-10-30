@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -220,8 +219,8 @@ func TestPackingPacksSmallAssetsAndServesEachExactly(t *testing.T) {
 	}
 	p := packs[0]
 
-	// Back to back in asset order; the stored pack is exactly that.
-	sort.Slice(assets, func(i, j int) bool { return assets[i].ID < assets[j].ID })
+	// Back to back in path order (small/item-0 .. item-4); the stored pack
+	// is exactly that.
 	var want []byte
 	for i, e := range rig.entries(t, p.ID) {
 		a := assets[i]
@@ -286,6 +285,12 @@ func TestPackingPacksSmallAssetsAndServesEachExactly(t *testing.T) {
 	}
 	if _, ok := s.ie.storage.Object(large.ObjectKey); !ok {
 		t.Fatal("an unpacked asset keeps its object")
+	}
+	// A connection test reads back an object the connection holds: never a
+	// packed source that was retired.
+	held, err := postgres.NewStorageConnectionRepository(s.db).HeldObject(ctx, acme.org.ID, large.StorageConnectionID)
+	if _, ok := s.ie.storage.Object(held); err != nil || !ok {
+		t.Fatalf("the held object %q is not stored (%v)", held, err)
 	}
 
 	// Reconciliation finds every packed version in its pack and does not
@@ -434,8 +439,7 @@ func TestPackingRecoversFromCrashesAndDuplicateWorkers(t *testing.T) {
 	if stats := rig.run(t, w2); stats.Published != 1 {
 		t.Fatalf("another worker takes it over: %+v", stats)
 	}
-	sort.Slice(assets, func(i, j int) bool { return assets[i].ID < assets[j].ID })
-	var want []byte
+	var want []byte // in path order, the order they were made
 	for _, a := range assets {
 		want = append(want, data[a.ID]...)
 	}
@@ -466,8 +470,7 @@ func TestPackingRecoversFromCrashesAndDuplicateWorkers(t *testing.T) {
 	if err := rig.repo.AdvancePack(ctx, q.ID, crashed, model.PackPlanned, model.PackWriting, interfaces.PackChange{}, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	sort.Slice(extra, func(i, j int) bool { return extra[i].ID < extra[j].ID })
-	var written []byte
+	var written []byte // in path order
 	for _, a := range extra {
 		written = append(written, extraData[a.ID]...)
 	}

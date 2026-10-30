@@ -45,6 +45,12 @@ type Storage struct {
 	// TransferPartBytes is the buffer of a streaming copy between
 	// connections: the most of one object held in memory.
 	TransferPartBytes int64
+	// PostureInterval is how often each connection's bucket posture is
+	// checked; DriftInterval how often the drift scan visits it, checking
+	// up to DriftBudget objects (docs/storage-posture.md).
+	PostureInterval time.Duration
+	DriftInterval   time.Duration
+	DriftBudget     int
 }
 
 // LoadStorage reads STORAGE_* and BYOS_ENABLED. With BYOS enabled, a
@@ -61,6 +67,7 @@ func LoadStorage() (Storage, error) {
 	}{
 		{"STORAGE_CLIENT_CACHE_SIZE", "256", &s.ClientCacheSize},
 		{"STORAGE_MAX_CONCURRENT_PER_CONNECTION", "32", &s.MaxConcurrentPerConnection},
+		{"STORAGE_DRIFT_BUDGET", "2000", &s.DriftBudget},
 	} {
 		if *n.target, err = strconv.Atoi(getEnv(n.key, n.fallback)); err != nil || *n.target <= 0 {
 			return Storage{}, fmt.Errorf("%s must be a positive integer", n.key)
@@ -74,6 +81,8 @@ func LoadStorage() (Storage, error) {
 		{"STORAGE_CONNECTION_CACHE_TTL", "10s", &s.ConnectionCacheTTL},
 		{"STORAGE_OPERATION_TIMEOUT", "2m", &s.OperationTimeout},
 		{"STORAGE_TEST_TIMEOUT", "20s", &s.TestTimeout},
+		{"STORAGE_POSTURE_INTERVAL", "24h", &s.PostureInterval},
+		{"STORAGE_DRIFT_INTERVAL", "6h", &s.DriftInterval},
 	} {
 		if *d.target, err = time.ParseDuration(getEnv(d.key, d.fallback)); err != nil || *d.target <= 0 {
 			return Storage{}, fmt.Errorf("%s must be a positive duration", d.key)

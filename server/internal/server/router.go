@@ -12,17 +12,24 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/ratelimit"
 	"github.com/sanjeev0303/object-storage-platform/internal/server/middleware"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/access"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/adoption"
 	assetservice "github.com/sanjeev0303/object-storage-platform/internal/service/asset"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/audit"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/catalog"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/copyengine"
 	datasetservice "github.com/sanjeev0303/object-storage-platform/internal/service/dataset"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/delivery"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/erasure"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/events"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/evidence"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/identity"
 	ingestionservice "github.com/sanjeev0303/object-storage-platform/internal/service/ingestion"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/processing"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/quota"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/storageconn"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/streaming"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/tiering"
 	uploadservice "github.com/sanjeev0303/object-storage-platform/internal/service/upload"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/webhook"
 )
@@ -59,6 +66,28 @@ type Routes struct {
 	StorageCapabilities func(*http.Request) (interfaces.StorageCapabilities, error)
 	// Webhooks manages the organization's webhook endpoints.
 	Webhooks *webhook.Service
+	// Adoptions registers objects already in an organization's bucket and
+	// imports URL lists and STAC catalogs; Exports writes MHL and BagIt.
+	Adoptions *adoption.Service
+	Exports   adoption.Exporter
+	// Access serves API tokens, link and egress policy, classification
+	// and security alerts.
+	Access *access.Service
+	// Copies runs replicas, migrations, restores, drills and export
+	// bundles (docs/copy-engine.md).
+	Copies *copyengine.Service
+	// Streaming serves shard streams, signed manifests, packing settings,
+	// repacks and runs' verification (docs/streaming.md).
+	Streaming *streaming.Service
+	// Tiering serves tier rules, archive restores, costs, budgets and
+	// snapshot expiry (docs/tiering.md).
+	Tiering *tiering.Service
+	// Evidence serves anchors, audit exports and reviews, provenance,
+	// evidence packs and control mappings (docs/evidence.md).
+	Evidence *evidence.Service
+	// Erasure serves erasure, withdrawal and destroy-by-provenance
+	// (docs/erasure.md).
+	Erasure *erasure.Service
 
 	// ProxyEnabled adds GET/HEAD /api/v1/assets/{id}/content and the token
 	// link routes, which stream through the API.
@@ -188,6 +217,9 @@ func NewRouter(rt Routes) http.Handler {
 		for pattern, h := range datasets.Routes() {
 			mux.Handle(pattern, byTenant(datasetOperation(pattern), h))
 		}
+		for pattern, h := range datasets.QualityRoutes() {
+			mux.Handle(pattern, byTenant(datasetOperation(pattern), h))
+		}
 	}
 
 	if rt.StorageConnections != nil {
@@ -200,6 +232,83 @@ func NewRouter(rt Routes) http.Handler {
 	if rt.Webhooks != nil {
 		hooks := httpapi.NewWebhookHandler(rt.Webhooks, rt.Log)
 		for pattern, h := range hooks.Routes() {
+			op := "admin"
+			if strings.HasPrefix(pattern, "GET ") {
+				op = "listing"
+			}
+			mux.Handle(pattern, byTenant(op, h))
+		}
+	}
+
+	if rt.Access != nil {
+		accessRoutes := httpapi.NewAccessHandler(rt.Access, rt.Log)
+		for pattern, h := range accessRoutes.Routes() {
+			op := "admin"
+			if strings.HasPrefix(pattern, "GET ") {
+				op = "listing"
+			}
+			mux.Handle(pattern, byTenant(op, h))
+		}
+	}
+
+	if rt.Copies != nil {
+		copies := httpapi.NewCopyHandler(rt.Copies, rt.Log)
+		for pattern, h := range copies.Routes() {
+			op := "admin"
+			if strings.HasPrefix(pattern, "GET ") {
+				op = "listing"
+			}
+			mux.Handle(pattern, byTenant(op, h))
+		}
+	}
+
+	if rt.Streaming != nil {
+		stream := httpapi.NewStreamingHandler(rt.Streaming, rt.Log)
+		for pattern, h := range stream.Routes() {
+			op := "admin"
+			if strings.HasPrefix(pattern, "GET ") {
+				op = "listing"
+			}
+			mux.Handle(pattern, byTenant(op, h))
+		}
+	}
+
+	if rt.Evidence != nil {
+		ev := httpapi.NewEvidenceHandler(rt.Evidence, rt.Log)
+		for pattern, h := range ev.Routes() {
+			op := "admin"
+			if strings.HasPrefix(pattern, "GET ") {
+				op = "listing"
+			}
+			mux.Handle(pattern, byTenant(op, h))
+		}
+	}
+
+	if rt.Erasure != nil {
+		er := httpapi.NewErasureHandler(rt.Erasure, rt.Log)
+		for pattern, h := range er.Routes() {
+			op := "admin"
+			if strings.HasPrefix(pattern, "GET ") {
+				op = "listing"
+			}
+			mux.Handle(pattern, byTenant(op, h))
+		}
+	}
+
+	if rt.Tiering != nil {
+		tiers := httpapi.NewTieringHandler(rt.Tiering, rt.Log)
+		for pattern, h := range tiers.Routes() {
+			op := "admin"
+			if strings.HasPrefix(pattern, "GET ") {
+				op = "listing"
+			}
+			mux.Handle(pattern, byTenant(op, h))
+		}
+	}
+
+	if rt.Adoptions != nil {
+		adoptions := httpapi.NewAdoptionHandler(rt.Adoptions, rt.Exports, rt.Log)
+		for pattern, h := range adoptions.Routes() {
 			op := "admin"
 			if strings.HasPrefix(pattern, "GET ") {
 				op = "listing"

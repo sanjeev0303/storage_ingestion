@@ -112,6 +112,14 @@ type DatasetVersionResponse struct {
 	LatestReportID   string          `json:"latest_report_id,omitempty"`
 	CreatedBy        string          `json:"created_by"`
 	CreatedAt        time.Time       `json:"created_at"`
+	// ExpiredAt: the version expired; its record stays, its member list
+	// is gone (docs/tiering.md).
+	ExpiredAt *time.Time `json:"expired_at,omitempty"`
+	// SupersededBy: an erasure made this successor without some of the
+	// version's members; the version is not read for training any more
+	// (docs/erasure.md).
+	SupersededBy     string `json:"superseded_by,omitempty"`
+	SupersededReason string `json:"superseded_reason,omitempty"`
 }
 
 type DatasetVersionPageResponse struct {

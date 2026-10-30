@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -28,6 +29,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/logger"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/metrics"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/retry"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/adoption"
 	assetservice "github.com/sanjeev0303/object-storage-platform/internal/service/asset"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/events"
 	processingservice "github.com/sanjeev0303/object-storage-platform/internal/service/processing"
@@ -136,6 +138,24 @@ func run() error {
 			MaxRatio:             workerCfg.ArchiveMaxRatio,
 		}})
 	}
+	if workerCfg.ContentChecks {
+		validators = append(validators, processingservice.ContentInspector{
+			Limits: processingservice.ArchiveLimits{
+				MaxArchiveBytes:      workerCfg.ArchiveMaxBytes,
+				MaxEntries:           workerCfg.ArchiveMaxEntries,
+				MaxUncompressedBytes: workerCfg.ArchiveMaxExpanded,
+				MaxRatio:             workerCfg.ArchiveMaxRatio,
+			},
+			MaxBytes:        workerCfg.ContentMaxBytes,
+			SecretScanBytes: workerCfg.SecretScanBytes,
+		})
+	}
+	if workerCfg.ContentHookURL != "" {
+		validators = append(validators, processingservice.HookChecker{
+			URL: workerCfg.ContentHookURL, Token: workerCfg.ContentHookToken, MaxBytes: workerCfg.ContentHookBytes,
+			Client: &http.Client{Timeout: workerCfg.ContentHookTimeout},
+		})
+	}
 
 	registry := metrics.New()
 	// Records bound to tenants' storage connections are reached through
@@ -172,6 +192,8 @@ func run() error {
 		Promoter:   promoter,
 		Metrics:    registry,
 		Router:     router,
+		Checks:     postgres.NewContentCheckRepository(db),
+		Packs:      postgres.NewPackRepository(db),
 	}
 	if workerCfg.Scanner == "clamav" {
 		deps.Scanner = clamav.New(workerCfg.ClamAVAddress, workerCfg.ClamAVTimeout)
@@ -185,6 +207,8 @@ func run() error {
 	service, err := processingservice.NewService(deps, processingservice.Config{
 		Owner:          owner,
 		Bucket:         bucket,
+		ReadyBucket:    destinationBucket,
+		RescanBatch:    workerCfg.RescanBatch,
 		BatchSize:      workerCfg.BatchSize,
 		Concurrency:    workerCfg.Concurrency,
 		Lease:          workerCfg.LeaseDuration,
@@ -294,6 +318,9 @@ func run() error {
 		"batch_size", workerCfg.BatchSize,
 		"lease", workerCfg.LeaseDuration.String(),
 		"archive_inspection", workerCfg.ArchiveInspection,
+		"content_checks", workerCfg.ContentChecks,
+		"content_hook", workerCfg.ContentHookURL != "",
+		"rescan_batch", workerCfg.RescanBatch,
 		"unknown_type_action", workerCfg.UnknownType,
 		"quarantine_retention", workerCfg.QuarantineRetention.String(),
 	)
@@ -312,6 +339,38 @@ func run() error {
 		log.Info("consuming processing events", "visibility", ec.ConsumerVisibility.String(),
 			"concurrency", ec.ConsumerConcurrency, "max_attempts", ec.ConsumerMaxAttempts)
 	}
+	// Adoption jobs: objects checked and published where they are, and
+	// URL and STAC imports sent through ordinary uploads.
+	adoptions := adoption.NewService(adoption.Dependencies{
+		Store: postgres.NewAdoptionRepository(db), Router: router, Platform: storage, PlatformBucket: bucket,
+		Validators: validators, Scanner: deps.Scanner, Policies: deps.Policies, Checks: deps.Checks,
+		Uploads: uploadservice.NewService(uploads, storage, bucket, cfg.UploadMaxSize, cfg.UploadSessionTTL).Route(router, router),
+		Net:     storageregistry.Policy(storageCfg),
+	}, adoption.Config{
+		Owner: owner, Policy: model.ContentPolicy{AllowedTypes: workerCfg.AllowedTypes, DeniedTypes: workerCfg.DeniedTypes,
+			MaxSizeBytes: workerCfg.MaxFileBytes, UnknownTypeAction: workerCfg.UnknownType},
+		ScanTimeout: workerCfg.ClamAVTimeout, ScanSegmentBytes: workerCfg.ScanSegmentBytes, MaxImportBytes: cfg.UploadMaxSize,
+	}, log)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(workerCfg.PollInterval)
+		defer ticker.Stop()
+		for {
+			if stats, err := adoptions.RunOnce(ctx); err != nil {
+				log.Warn("adoption cycle failed", "error", err)
+			} else if stats.Jobs > 0 && stats.Adopted+stats.Imported+stats.Rejected+stats.Failed > 0 {
+				log.Info("adoption cycle", "adopted", stats.Adopted, "imported", stats.Imported, "rejected", stats.Rejected, "failed", stats.Failed)
+			} else if stats.Jobs > 0 {
+				continue // a job moved on (read its source, or finished): take the next at once
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 	processingworker.Run(ctx, service, workerCfg.PollInterval, log)
 	wg.Wait()
 	log.Info("processing worker stopped")

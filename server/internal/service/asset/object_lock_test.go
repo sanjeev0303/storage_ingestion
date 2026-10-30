@@ -9,6 +9,7 @@ import (
 	"time"
 
 	storagememory "github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/memory"
+	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
 )
 
@@ -21,17 +22,31 @@ type lockingStorage struct {
 	calls   int
 	until   map[string]time.Time
 	hold    map[string]bool
+	mode    map[string]string
 }
 
 func (l *lockingStorage) ObjectLockEnabled(context.Context, string) (bool, error) { return l.enabled, nil }
 
-func (l *lockingStorage) LockObjectVersion(_ context.Context, _, _, versionID string, until time.Time, hold bool) error {
+func (l *lockingStorage) LockObjectVersion(_ context.Context, _, _, versionID string, lock interfaces.VersionLock) error {
 	l.calls++
-	if !until.IsZero() {
-		l.until[versionID] = until
+	if !lock.Until.IsZero() {
+		// Like S3: a lock in force cannot be shortened or change its mode
+		// without the governance bypass.
+		if l.clock.Before(l.until[versionID]) && (lock.Mode != l.mode[versionID] || lock.Until.Before(l.until[versionID])) {
+			return errors.New("InvalidRequest: retention in force cannot be reduced or change mode")
+		}
+		l.until[versionID] = lock.Until
+		if l.mode == nil {
+			l.mode = map[string]string{}
+		}
+		l.mode[versionID] = lock.Mode
 	}
-	l.hold[versionID] = hold
+	l.hold[versionID] = lock.LegalHold
 	return nil
+}
+
+func (l *lockingStorage) ObjectLockStatus(_ context.Context, _, _, versionID string) (interfaces.VersionLock, error) {
+	return interfaces.VersionLock{Mode: l.mode[versionID], Until: l.until[versionID], LegalHold: l.hold[versionID]}, nil
 }
 
 func (l *lockingStorage) DeleteObjectVersion(ctx context.Context, bucket, key, versionID string) error {
@@ -50,6 +65,23 @@ func (m memLocks) GetLock(_ context.Context, _, assetID string) (model.ObjectLoc
 
 func (m memLocks) PutLock(_ context.Context, l model.ObjectLock) error {
 	m[l.AssetID] = l
+	return nil
+}
+
+func (m memLocks) DueVerification(_ context.Context, now time.Time, limit int) ([]model.ObjectLock, error) {
+	var out []model.ObjectLock
+	for _, l := range m {
+		if len(out) < limit && (l.LegalHold || (l.RetainUntil != nil && l.RetainUntil.After(now))) {
+			out = append(out, l)
+		}
+	}
+	return out, nil
+}
+
+func (m memLocks) RecordVerification(_ context.Context, assetID, result string, at time.Time) error {
+	l := m[assetID]
+	l.VerifiedAt, l.VerifyResult = &at, result
+	m[assetID] = l
 	return nil
 }
 

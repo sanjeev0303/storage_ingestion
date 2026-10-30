@@ -71,7 +71,7 @@ func copyPartSize(size, configured int64) (int64, error) {
 // of mixing bytes. A failure aborts the upload. The destination key holds
 // the only record of a copy in progress: an upload a crashed attempt left
 // on it is aborted first, so a retry starts clean.
-func (s *ObjectStorage) copyInParts(ctx context.Context, sourceBucket, sourceKey, sourceETag string, size int64, destinationBucket, destinationKey string) error {
+func (s *ObjectStorage) copyInParts(ctx context.Context, sourceBucket, sourceKey, sourceETag string, size int64, destinationBucket, destinationKey string, class ...types.StorageClass) error {
 	configured := s.copyPartBytes
 	if configured <= 0 {
 		configured = copyPartBytes
@@ -91,9 +91,14 @@ func (s *ObjectStorage) copyInParts(ctx context.Context, sourceBucket, sourceKey
 		}
 	}
 
-	created, err := s.client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
-		Bucket: aws.String(destinationBucket), Key: aws.String(destinationKey),
-	})
+	begin := &s3.CreateMultipartUploadInput{Bucket: aws.String(destinationBucket), Key: aws.String(destinationKey)}
+	if len(class) > 0 {
+		begin.StorageClass = class[0]
+	}
+	if s.kmsKey != "" {
+		begin.ServerSideEncryption, begin.SSEKMSKeyId = types.ServerSideEncryptionAwsKms, aws.String(s.kmsKey)
+	}
+	created, err := s.client.CreateMultipartUpload(ctx, begin)
 	if err != nil {
 		return classify("begin multipart copy", err)
 	}

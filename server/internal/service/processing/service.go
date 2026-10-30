@@ -65,12 +65,21 @@ type Dependencies struct {
 	// Router reaches tenants' storage connections; without it every asset
 	// is processed on the platform's quarantine bucket.
 	Router interfaces.StorageRouter
+	// Checks keeps content checks' findings and re-scan claims; optional.
+	Checks interfaces.ContentCheckRepository
+	// Packs finds published assets packed with others, for re-scans.
+	Packs interfaces.PackLocator
 }
 
 type Config struct {
 	// Owner identifies this worker on the leases it takes.
-	Owner       string
-	Bucket      string
+	Owner  string
+	Bucket string
+	// ReadyBucket is where the platform publishes; re-scans read there.
+	ReadyBucket string
+	// RescanBatch is how many published assets a cycle re-scans after
+	// the scanner's signatures change; 0 turns re-scans off.
+	RescanBatch int
 	BatchSize   int
 	Concurrency int
 	// Lease is how long a claim lasts unrenewed: after a crash, the job
@@ -183,6 +192,8 @@ type CycleStats struct {
 	Exhausted int
 	LeaseLost int
 	Purged    int
+	Rescanned int
+	Infected  int
 }
 
 // RunOnce creates jobs for newly completed uploads, claims a batch and
@@ -234,6 +245,15 @@ func (s *Service) RunOnce(ctx context.Context) (CycleStats, error) {
 
 	if ctx.Err() != nil {
 		return stats, nil
+	}
+	// Published assets are re-scanned with new signatures only while
+	// uploads are not waiting: they always come first.
+	if stats.Claimed < s.cfg.BatchSize {
+		rescans, err := s.RescanStale(ctx, s.cfg.RescanBatch)
+		if err != nil {
+			s.log.Warn("re-scan cycle failed", "error", err)
+		}
+		stats.Rescanned, stats.Infected = rescans.Rescanned, rescans.Infected
 	}
 	purged, err := s.PurgeExpired(ctx)
 	stats.Purged = purged
@@ -566,6 +586,7 @@ func (s *Service) verify(ctx context.Context, job *model.ProcessingJob, asset mo
 		Head:         head,
 		DeclaredType: asset.ContentType,
 		FileName:     asset.FileName,
+		AssetID:      asset.ID,
 		SizeBytes:    asset.SizeBytes,
 		Open: func(ctx context.Context) (io.ReadCloser, error) {
 			return storage.OpenObject(ctx, bucket, key)
@@ -574,6 +595,9 @@ func (s *Service) verify(ctx context.Context, job *model.ProcessingJob, asset mo
 	result, err := RunValidators(ctx, s.deps.Validators, sample, policy)
 	if err != nil {
 		return "", fmt.Errorf("validate content: %w", err)
+	}
+	if err := s.recordChecks(ctx, job, result); err != nil {
+		return "", err
 	}
 	job.DetectedContentType = result.DetectedType
 	if result.RejectReason != "" {
@@ -957,6 +981,7 @@ type Inspection struct {
 	Job        model.ProcessingJob
 	Quarantine []model.QuarantineRecord
 	Events     []model.ProcessingEvent
+	Findings   []model.ContentFinding
 }
 
 // Inspect returns an asset's processing record for operators.
@@ -967,7 +992,58 @@ func (s *Service) Inspect(ctx context.Context, tenantID, assetID string) (Inspec
 func (s *Service) quarantine() *Quarantine {
 	q := NewQuarantine(s.deps.Assets, s.deps.Jobs, s.deps.Quarantine, s.deps.Events, nil)
 	q.now = s.now
+	if s.deps.Checks != nil {
+		q.findings = s.deps.Checks
+	}
 	return q
+}
+
+// contentChecked: the content inspector is in the validator chain.
+func (s *Service) contentChecked() bool {
+	for _, v := range s.deps.Validators {
+		if v.Name() == "content" {
+			return true
+		}
+	}
+	return false
+}
+
+// recordChecks keeps what the content checks found and noted. A retried
+// job replaces its earlier findings, so they are never counted twice.
+func (s *Service) recordChecks(ctx context.Context, job *model.ProcessingJob, result interfaces.ValidationResult) error {
+	if s.deps.Checks != nil {
+		if err := s.deps.Checks.ReplaceFindings(ctx, job.TenantID, job.AssetID, job.ID, result.Findings, s.now()); err != nil {
+			return err
+		}
+		codes := make([]string, len(result.Findings))
+		for i, f := range result.Findings {
+			codes[i] = f.Code
+		}
+		if class := model.ClassForFindings(codes); class != "" {
+			if err := s.deps.Checks.RaiseClassification(ctx, job.TenantID, job.AssetID, class); err != nil {
+				return err
+			}
+		}
+		if s.contentChecked() {
+			coverage := "FULL"
+			if len(result.Notes) > 0 {
+				coverage = "PARTIAL"
+			}
+			if err := s.deps.Checks.RecordCoverage(ctx, job.ID, coverage); err != nil {
+				return err
+			}
+		}
+	}
+	for _, f := range result.Findings {
+		s.deps.Metrics.Add("content_finding_"+f.Action, 1)
+		if f.Action == model.FindingFlag {
+			s.event(ctx, *job, "content_flagged", f.Code+": "+f.Detail)
+		}
+	}
+	if len(result.Notes) > 0 {
+		s.event(ctx, *job, "content_checks_partial", strings.Join(result.Notes, "; "))
+	}
+	return nil
 }
 
 // purgeHeld reports whether a legal hold covers the record's asset.
@@ -1043,6 +1119,19 @@ func (s *Service) policyFor(ctx context.Context, tenantID string) (model.Content
 // mergePolicy narrows the platform policy with a tenant's own: the tenant
 // can add denied types, set its own allow list, lower the size limit and
 // reject unknown types, but cannot loosen any platform rule.
+// PolicyFor is the platform's content policy narrowed by the tenant's
+// own, as processing applies it; for other services that run the checks.
+func PolicyFor(ctx context.Context, platform model.ContentPolicy, policies interfaces.ContentPolicyRepository, tenantID string) (model.ContentPolicy, error) {
+	if policies == nil {
+		return platform, nil
+	}
+	tenant, ok, err := policies.Get(ctx, tenantID)
+	if err != nil || !ok {
+		return platform, err
+	}
+	return mergePolicy(platform, tenant)
+}
+
 func mergePolicy(platform, tenant model.ContentPolicy) (model.ContentPolicy, error) {
 	merged := platform
 	merged.DeniedTypes = append(append([]string(nil), platform.DeniedTypes...), tenant.DeniedTypes...)
@@ -1067,6 +1156,9 @@ func mergePolicy(platform, tenant model.ContentPolicy) (model.ContentPolicy, err
 	if tenant.UnknownTypeAction == "reject" {
 		merged.UnknownTypeAction = "reject"
 	}
+	// What a finding does is the tenant's choice; FindingAction keeps
+	// malware rejecting whatever it says.
+	merged.FindingActions = tenant.FindingActions
 	return merged, nil
 }
 

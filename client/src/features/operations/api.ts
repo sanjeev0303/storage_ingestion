@@ -13,8 +13,11 @@ import type {
   QuotaReconcileResponse,
   ReleaseQuarantineResponse,
   RestoreAssetResponse,
+  PendingApproval,
+  PolicyImpact,
   RetentionPolicyRequest,
   RetentionPolicyResponse,
+  RetentionTemplate,
   StorageConnection,
 } from "./types";
 
@@ -28,7 +31,8 @@ export const getLifecycle = (id: string, signal?: AbortSignal) =>
 export const getProcessing = (id: string, signal?: AbortSignal) =>
   api<ProcessingRecord>(`${assetPath(id)}/quarantine`, { signal });
 
-export const deleteAsset = (id: string) => api<DeleteAssetResponse>(assetPath(id), { method: "DELETE" });
+// Under the GxP vault profile a deletion waits for approval (202, PendingApproval).
+export const deleteAsset = (id: string) => api<DeleteAssetResponse | PendingApproval>(assetPath(id), { method: "DELETE" });
 
 export const restoreAsset = (id: string) =>
   api<RestoreAssetResponse>(`${assetPath(id)}/restore`, { method: "POST" });
@@ -37,7 +41,13 @@ export const releaseQuarantine = (id: string) =>
   api<ReleaseQuarantineResponse>(`${assetPath(id)}/quarantine/release`, { method: "POST" });
 
 export const setRetentionPolicy = (body: RetentionPolicyRequest) =>
-  api<RetentionPolicyResponse>("/retention/policies", { method: "PUT", body });
+  api<RetentionPolicyResponse | PendingApproval>("/retention/policies", { method: "PUT", body });
+
+export const previewRetentionPolicy = (body: RetentionPolicyRequest) =>
+  api<{ dry_run: true; impact: PolicyImpact }>("/retention/policies", { method: "PUT", body: { ...body, dry_run: true } });
+
+export const listTemplates = (signal?: AbortSignal) =>
+  api<{ templates: RetentionTemplate[] }>("/retention/templates", { signal });
 
 export const listPolicies = (signal?: AbortSignal) =>
   api<{ policies: PolicyInEffect[] }>("/retention/policies", { signal });
@@ -52,8 +62,14 @@ export const listHolds = (includeReleased: boolean, signal?: AbortSignal) =>
 export const placeLegalHold = (body: LegalHoldRequest) =>
   api<LegalHold>("/legal-holds", { method: "POST", body });
 
-export const releaseLegalHold = (id: string) =>
-  api<void>(`/legal-holds/${encodeURIComponent(id)}`, { method: "DELETE" });
+export const releaseLegalHold = (id: string, reason = "") =>
+  api<PendingApproval | undefined>(`/legal-holds/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    query: { reason: reason || undefined },
+  });
+
+export const isPending = (value: unknown): value is PendingApproval =>
+  typeof value === "object" && value !== null && (value as PendingApproval).status === "PENDING_APPROVAL";
 
 // Admin routes reject an organization header that is not the caller's, so org is omitted.
 export const listDeadLetters = (status: string, signal?: AbortSignal) =>

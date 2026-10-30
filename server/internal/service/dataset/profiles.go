@@ -109,13 +109,72 @@ var builtinProfiles = func() []model.ValidationProfile {
 	return profiles
 }()
 
-// BuiltinProfiles lists the built-in profiles.
-func BuiltinProfiles() []model.ValidationProfile { return slices.Clone(builtinProfiles) }
+// Version 2 of the built-in profiles adds the content-checks rule wherever
+// malware scans are checked. Version 1 stays resolvable, so the reports
+// that used it can still be read against what they were judged by.
+var builtinProfilesV2 = func() []model.ValidationProfile {
+	var out []model.ValidationProfile
+	for _, p := range builtinProfiles {
+		p.Version = 2
+		rules := slices.Clone(p.Definition.Rules)
+		if slices.ContainsFunc(rules, func(r model.Rule) bool { return r.Type == "malware_scan" }) {
+			rules = append(rules, rule("content-checks", "content_checks", model.SeverityWarning, ""))
+		}
+		p.Definition.Rules = rules
+		out = append(out, p)
+	}
+	return out
+}()
+
+// Version 3 adds the storage-integrity rule beside the content checks:
+// members changed outside the platform, and connections failing posture.
+var builtinProfilesV3 = func() []model.ValidationProfile {
+	var out []model.ValidationProfile
+	for _, p := range builtinProfilesV2 {
+		p.Version = 3
+		rules := slices.Clone(p.Definition.Rules)
+		if slices.ContainsFunc(rules, func(r model.Rule) bool { return r.Type == "content_checks" }) {
+			rules = append(rules, rule("storage-integrity", "storage_integrity", model.SeverityError, ""))
+		}
+		p.Definition.Rules = rules
+		out = append(out, p)
+	}
+	return out
+}()
+
+// Version 4 adds the residency rule: members stored outside the locations
+// their dataset allows. It finds nothing for datasets that allow anywhere.
+var builtinProfilesV4 = func() []model.ValidationProfile {
+	var out []model.ValidationProfile
+	for _, p := range builtinProfilesV3 {
+		p.Version = 4
+		p.Definition.Rules = append(slices.Clone(p.Definition.Rules), rule("residency", "residency", model.SeverityError, ""))
+		out = append(out, p)
+	}
+	return out
+}()
+
+// Version 5 adds the small-files warning: a version of mostly small,
+// unpacked files that a data loader reads slowly.
+var builtinProfilesV5 = func() []model.ValidationProfile {
+	var out []model.ValidationProfile
+	for _, p := range builtinProfilesV4 {
+		p.Version = 5
+		p.Definition.Rules = append(slices.Clone(p.Definition.Rules), rule("small-files", "small_files", model.SeverityWarning, ""))
+		out = append(out, p)
+	}
+	return out
+}()
+
+// BuiltinProfiles lists the latest version of each built-in profile.
+func BuiltinProfiles() []model.ValidationProfile { return slices.Clone(builtinProfilesV5) }
 
 func builtinProfile(id string, version int) (model.ValidationProfile, bool) {
-	for _, p := range builtinProfiles {
-		if p.ID == id && (version == 0 || version == p.Version) {
-			return p, true
+	for _, list := range [][]model.ValidationProfile{builtinProfilesV5, builtinProfilesV4, builtinProfilesV3, builtinProfilesV2, builtinProfiles} {
+		for _, p := range list {
+			if p.ID == id && (version == 0 || version == p.Version) {
+				return p, true
+			}
 		}
 	}
 	return model.ValidationProfile{}, false

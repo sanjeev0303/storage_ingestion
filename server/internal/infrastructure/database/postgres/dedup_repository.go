@@ -108,8 +108,14 @@ func (r *AssetRepository) PublishShared(ctx context.Context, tenantID, assetID s
 // objectKey: its bytes must stay.
 func (r *AssetRepository) KeyInUse(ctx context.Context, tenantID, objectKey, exceptID string) (string, error) {
 	var id string
+	// An asset whose own deletion has started (no longer restorable) does
+	// not keep the bytes: when two sharers are deleted together, each
+	// would otherwise leave them to the other and neither remove them.
 	err := r.db.Pool.QueryRow(ctx, `
-		SELECT id FROM assets WHERE tenant_id = $1 AND object_key = $2 AND id <> $3 AND status <> 'DELETED' LIMIT 1`,
+		SELECT a.id FROM assets a WHERE a.tenant_id = $1 AND a.object_key = $2 AND a.id <> $3 AND a.status <> 'DELETED'
+		  AND NOT EXISTS (SELECT 1 FROM deletion_operations d WHERE d.tenant_id = a.tenant_id AND d.asset_id = a.id
+		                  AND d.state IN ('IN_PROGRESS', 'STORAGE_DELETED'))
+		LIMIT 1`,
 		tenantID, objectKey, exceptID).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil

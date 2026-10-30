@@ -1,6 +1,10 @@
 package response
 
-import "time"
+import (
+	"time"
+
+	"github.com/sanjeev0303/object-storage-platform/internal/model"
+)
 
 // Authentication, organization and administration responses. None of
 // them carries a password hash or a token hash; tokens appear only in the
@@ -165,6 +169,9 @@ type ProcessingRecordResponse struct {
 	// reused instead of scanning again.
 	Scan   *ScanResponse    `json:"scan,omitempty"`
 	Events []map[string]any `json:"events"`
+	// Findings are what the content checks found: flagged ones were
+	// published anyway, rejecting ones stopped the upload.
+	Findings []model.ContentFinding `json:"findings"`
 }
 
 type ScanResponse struct {

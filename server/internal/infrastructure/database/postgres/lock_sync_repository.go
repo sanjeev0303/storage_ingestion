@@ -56,7 +56,10 @@ func (r *LockSyncRepository) Assets(ctx context.Context, req model.LockSyncReque
 	rows, err := r.db.Pool.Query(ctx, `
 		SELECT `+assetColumns+` FROM assets
 		WHERE tenant_id = $1 AND status = 'AVAILABLE' AND id > $2
-		  AND CASE $3 WHEN 'TENANT' THEN true WHEN 'DATASET' THEN dataset = $4 ELSE id = $4 END
+		  AND CASE $3 WHEN 'TENANT' THEN true WHEN 'DATASET' THEN dataset = $4
+		      WHEN 'QUERY' THEN EXISTS (SELECT 1 FROM legal_holds AS h WHERE h.tenant_id = $1 AND h.id = $4
+		                                AND `+matchesQuery("h", "assets.id")+`)
+		      ELSE id = $4 END
 		ORDER BY id LIMIT $5`, req.TenantID, req.Position, req.Scope, req.ScopeKey, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list assets to lock: %w", err)

@@ -37,6 +37,7 @@ func (h *AssetHandler) Get(w nethttp.ResponseWriter, r *nethttp.Request) {
 	writeJSON(w, nethttp.StatusOK, response.AssetResponse{
 		ID: info.ID, FileName: info.FileName, ContentType: info.ContentType, SizeBytes: info.SizeBytes,
 		ChecksumSHA256: info.ChecksumSHA256, Dataset: info.Dataset, Status: string(info.Status), RejectionReason: info.RejectionReason,
+		BlockedReason: info.BlockedReason, Classification: info.Classification,
 		Deliverable: info.Deliverable, ETag: info.ETag, PublishedAt: info.PublishedAt,
 		CreatedAt: info.CreatedAt, UpdatedAt: info.UpdatedAt,
 	})
@@ -54,6 +55,16 @@ func writeDeliveryError(w nethttp.ResponseWriter, log *slog.Logger, err error, t
 		writeSecurityError(w, log, err)
 	case errors.Is(err, delivery.ErrInvalidRequest):
 		writeJSON(w, nethttp.StatusBadRequest, map[string]string{"error": err.Error()})
+	case errors.Is(err, model.ErrLinksDisabled), errors.Is(err, model.ErrLinkClassified):
+		writeJSON(w, nethttp.StatusForbidden, map[string]string{"error": err.Error(), "code": "link_policy"})
+	case errors.Is(err, model.ErrRestoreRequired):
+		writeJSON(w, nethttp.StatusConflict, map[string]string{"error": err.Error(), "code": "restore_required"})
+	case errors.Is(err, model.ErrCostBudget):
+		w.Header().Set("Retry-After", "3600")
+		writeJSON(w, nethttp.StatusTooManyRequests, map[string]string{"error": err.Error(), "code": "cost_budget_exceeded"})
+	case errors.Is(err, model.ErrEgressBudget):
+		w.Header().Set("Retry-After", "3600")
+		writeJSON(w, nethttp.StatusTooManyRequests, map[string]string{"error": err.Error(), "code": "egress_budget_exceeded"})
 	case errors.Is(err, delivery.ErrTokenInvalid):
 		writeJSON(w, nethttp.StatusForbidden, map[string]string{"error": "download link is invalid or has expired"})
 	case errors.Is(err, delivery.ErrNotFound):

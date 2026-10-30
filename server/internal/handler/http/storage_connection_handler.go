@@ -38,6 +38,18 @@ func (h *StorageConnectionHandler) Routes() map[string]nethttp.HandlerFunc {
 		"POST /api/v1/storage-connections/{id}/disable":            h.disable,
 		"POST /api/v1/storage-connections/{id}/enable":             h.enable,
 		"DELETE /api/v1/storage-connections/{id}":                  h.delete,
+
+		"GET /api/v1/storage-connections/{id}/posture":               h.posture,
+		"POST /api/v1/storage-connections/{id}/posture":              h.checkPosture,
+		"POST /api/v1/storage-connections/{id}/credentials/stage":    h.stage,
+		"POST /api/v1/storage-connections/{id}/credentials/promote":  h.promote,
+		"POST /api/v1/storage-connections/{id}/credentials/rollback": h.rollback,
+		"DELETE /api/v1/storage-connections/{id}/credentials/staged": h.discard,
+		"GET /api/v1/storage-connections/{id}/drift":                 h.drift,
+		"GET /api/v1/storage-drift":                                  h.allDrift,
+		"POST /api/v1/storage-drift/{id}/resolve":                    h.resolveDrift,
+		"GET /api/v1/datasets/{id}/versions/{versionID}/integrity":   h.integrity,
+		"GET /api/v1/datasets/{id}/versions/{versionID}/residency":   h.residency,
 	}
 }
 
@@ -68,6 +80,11 @@ func connectionResponse(c model.StorageConnection, defaultID string) response.St
 		CapabilitiesCheckedAt: c.CapabilitiesCheckedAt, LastTestedAt: c.LastTestedAt, LastTestOKAt: c.LastTestOKAt,
 		LastErrorCategory: c.LastErrorCategory, Revision: c.Revision, CreatedBy: c.CreatedBy, UpdatedBy: c.UpdatedBy,
 		CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt, DisabledAt: c.DisabledAt, DeletedAt: c.DeletedAt,
+		ChecksumMode: c.ChecksumMode, ExpectedOwner: c.ExpectedOwner, PreviousCredentialUntil: c.PreviousUntil,
+		EncryptionKey: c.EncryptionKey,
+	}
+	if c.StagedCredentialVersion > 0 {
+		out.StagedCredential = &response.StagedCredential{Rotation: c.StagedCredentialVersion, StagedAt: c.StagedAt, StagedBy: c.StagedBy}
 	}
 	if c.Capabilities != nil {
 		caps := capabilitiesResponse(*c.Capabilities)
@@ -88,6 +105,7 @@ func testResponse(result storageconn.TestResult) response.StorageTestResponse {
 		caps := capabilitiesResponse(*result.Capabilities)
 		out.Capabilities = &caps
 	}
+	out.Posture = result.Posture
 	return out
 }
 
@@ -207,7 +225,8 @@ func (h *StorageConnectionHandler) update(w nethttp.ResponseWriter, r *nethttp.R
 		h.fail(w, err)
 		return
 	}
-	in := storageconn.UpdateInput{Name: body.Name, Region: body.Region, Endpoint: body.Endpoint, ForcePathStyle: body.ForcePathStyle}
+	in := storageconn.UpdateInput{Name: body.Name, Region: body.Region, Endpoint: body.Endpoint, ForcePathStyle: body.ForcePathStyle,
+		ChecksumMode: body.ChecksumMode, ExpectedOwner: body.ExpectedOwner, EncryptionKey: body.EncryptionKey}
 	if body.StagingMode != nil {
 		mode := model.StagingMode(*body.StagingMode)
 		in.StagingMode = &mode
@@ -322,9 +341,147 @@ func (h *StorageConnectionHandler) delete(w nethttp.ResponseWriter, r *nethttp.R
 	w.WriteHeader(nethttp.StatusNoContent)
 }
 
+func (h *StorageConnectionHandler) posture(w nethttp.ResponseWriter, r *nethttp.Request) {
+	report, checked, err := h.service.PostureFor(r.Context(), principalOf(r), r.PathValue("id"))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	if !checked {
+		writeJSON(w, nethttp.StatusNotFound, problem{Error: "the connection's posture has not been checked yet", Code: "not_checked"})
+		return
+	}
+	writeJSON(w, nethttp.StatusOK, report)
+}
+
+func (h *StorageConnectionHandler) checkPosture(w nethttp.ResponseWriter, r *nethttp.Request) {
+	var body struct {
+		Probe bool `json:"probe"`
+	}
+	if r.ContentLength != 0 && !decodeJSON(w, r, &body) {
+		return
+	}
+	report, err := h.service.CheckPosture(r.Context(), principalOf(r), r.PathValue("id"), body.Probe)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	writeJSON(w, nethttp.StatusOK, report)
+}
+
+func (h *StorageConnectionHandler) stage(w nethttp.ResponseWriter, r *nethttp.Request) {
+	var body struct {
+		Credentials request.StorageCredentials `json:"credentials"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	c, result, err := h.service.StageCredentials(r.Context(), principalOf(r), r.PathValue("id"), secretsOf(body.Credentials))
+	if errors.Is(err, storageconn.ErrTestFailed) {
+		w.Header().Set("Cache-Control", "private, no-store")
+		writeJSON(w, nethttp.StatusUnprocessableEntity, testResponse(result))
+		return
+	}
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	h.writeTest(w, r, c, result)
+}
+
+func (h *StorageConnectionHandler) promote(w nethttp.ResponseWriter, r *nethttp.Request) {
+	c, result, err := h.service.PromoteCredentials(r.Context(), principalOf(r), r.PathValue("id"))
+	if errors.Is(err, storageconn.ErrTestFailed) {
+		// The staged credentials stay staged; the current ones still work.
+		w.Header().Set("Cache-Control", "private, no-store")
+		writeJSON(w, nethttp.StatusUnprocessableEntity, testResponse(result))
+		return
+	}
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	h.writeTest(w, r, c, result)
+}
+
+func (h *StorageConnectionHandler) rollback(w nethttp.ResponseWriter, r *nethttp.Request) {
+	c, err := h.service.RollbackCredentials(r.Context(), principalOf(r), r.PathValue("id"))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	h.writeConnection(w, r, nethttp.StatusOK, c)
+}
+
+func (h *StorageConnectionHandler) discard(w nethttp.ResponseWriter, r *nethttp.Request) {
+	c, err := h.service.DiscardStagedCredentials(r.Context(), principalOf(r), r.PathValue("id"))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	h.writeConnection(w, r, nethttp.StatusOK, c)
+}
+
+func (h *StorageConnectionHandler) writeDrift(w nethttp.ResponseWriter, r *nethttp.Request, connectionID string) {
+	list, err := h.service.DriftFor(r.Context(), principalOf(r), connectionID, r.URL.Query().Get("all") == "true")
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	writeJSON(w, nethttp.StatusOK, map[string]any{"findings": append([]model.DriftFinding{}, list...)})
+}
+
+func (h *StorageConnectionHandler) drift(w nethttp.ResponseWriter, r *nethttp.Request) {
+	h.writeDrift(w, r, r.PathValue("id"))
+}
+
+func (h *StorageConnectionHandler) allDrift(w nethttp.ResponseWriter, r *nethttp.Request) {
+	h.writeDrift(w, r, "")
+}
+
+func (h *StorageConnectionHandler) resolveDrift(w nethttp.ResponseWriter, r *nethttp.Request) {
+	f, err := h.service.ResolveDriftFor(r.Context(), principalOf(r), r.PathValue("id"))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	writeJSON(w, nethttp.StatusOK, f)
+}
+
+func (h *StorageConnectionHandler) integrity(w nethttp.ResponseWriter, r *nethttp.Request) {
+	report, err := h.service.IntegrityOf(r.Context(), principalOf(r), r.PathValue("versionID"))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	writeJSON(w, nethttp.StatusOK, report)
+}
+
+func (h *StorageConnectionHandler) residency(w nethttp.ResponseWriter, r *nethttp.Request) {
+	report, err := h.service.ResidencyOf(r.Context(), principalOf(r), r.PathValue("id"), r.PathValue("versionID"))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	writeJSON(w, nethttp.StatusOK, report)
+}
+
 func (h *StorageConnectionHandler) fail(w nethttp.ResponseWriter, err error) {
-	if errors.Is(err, storageconn.ErrInvalidRequest) {
+	switch {
+	case errors.Is(err, storageconn.ErrInvalidRequest):
 		writeJSON(w, nethttp.StatusBadRequest, problem{Error: err.Error(), Code: "invalid_request"})
+		return
+	case errors.Is(err, model.ErrNoStagedCredential):
+		writeJSON(w, nethttp.StatusConflict, problem{Error: err.Error(), Code: "no_staged_credential"})
+		return
+	case errors.Is(err, model.ErrNoPreviousCredential):
+		writeJSON(w, nethttp.StatusConflict, problem{Error: "no credential to roll back to, or the rollback window has passed", Code: "no_previous_credential"})
+		return
+	case errors.Is(err, model.ErrDriftNotFound), errors.Is(err, model.ErrDatasetNotFound):
+		writeJSON(w, nethttp.StatusNotFound, problem{Error: "not found", Code: "not_found"})
+		return
+	case errors.Is(err, storageconn.ErrPostureOff):
+		writeJSON(w, nethttp.StatusNotImplemented, problem{Error: err.Error(), Code: "posture_disabled"})
 		return
 	}
 	writeSecurityError(w, h.log, err)

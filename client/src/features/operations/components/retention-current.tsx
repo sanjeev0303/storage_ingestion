@@ -13,10 +13,11 @@ import { Time } from "@/components/ui/time";
 import { notify } from "@/components/ui/toast";
 import { useSession } from "@/lib/auth/session";
 import { orgKey } from "@/lib/query/keys";
-import { listHolds, listPolicies, policyHistory, releaseLegalHold } from "../api";
+import { HoldProofDialog } from "@/features/governance/components/hold-proof";
+import { isPending, listHolds, listPolicies, policyHistory, releaseLegalHold } from "../api";
 import type { HeldHold, PolicyInEffect } from "../types";
 
-const SCOPE_TEXT: Record<string, string> = { TENANT: "Whole organization", DATASET: "Dataset", ASSET: "Asset" };
+const SCOPE_TEXT: Record<string, string> = { TENANT: "Whole organization", DATASET: "Dataset", ASSET: "Asset", QUERY: "Query" };
 
 // "720h0m0s" as people say it: "30 days".
 export function readableDuration(value: string | null | undefined) {
@@ -113,6 +114,7 @@ export function HoldsInEffect() {
   const refresh = useRetentionKeys();
   const [showReleased, setShowReleased] = useState(false);
   const [releasing, setReleasing] = useState<HeldHold | null>(null);
+  const [proving, setProving] = useState<HeldHold | null>(null);
   const holds = useQuery({
     queryKey: orgKey(organizationId, "retention", "holds", showReleased),
     queryFn: ({ signal }) => listHolds(showReleased, signal),
@@ -152,8 +154,15 @@ export function HoldsInEffect() {
                 <Td>
                   <div>{SCOPE_TEXT[hold.scope] ?? hold.scope}</div>
                   {hold.scope_key && <div className="mono-data text-sm text-muted">{hold.scope_key}</div>}
+                  {hold.query && <div className="mono-data text-sm text-muted [overflow-wrap:anywhere]">{describeQuery(hold.query)}</div>}
                 </Td>
-                <Td className="max-w-sm">{hold.reason}</Td>
+                <Td className="max-w-sm">
+                  {hold.matter && <div className="font-medium">{hold.matter}</div>}
+                  {hold.reason}
+                  {hold.custodians && hold.custodians.length > 0 && (
+                    <div className="text-sm text-muted">Custodians: {hold.custodians.join(", ")}</div>
+                  )}
+                </Td>
                 <Td>
                   <Time value={hold.placed_at} />
                   <div className="text-sm text-muted">{hold.placed_by}</div>
@@ -164,13 +173,20 @@ export function HoldsInEffect() {
                       Released <Time value={hold.released_at} />
                     </StateBadge>
                   ) : (
-                    <Button onClick={() => setReleasing(hold)}>Release</Button>
+                    <span className="flex flex-wrap justify-end gap-2">
+                      <Button onClick={() => setProving(hold)}>Proof</Button>
+                      <Button onClick={() => setReleasing(hold)}>Release</Button>
+                    </span>
                   )}
                 </Td>
               </tr>
             ))}
           </tbody>
         </Table>
+      )}
+
+      {proving && (
+        <HoldProofDialog holdId={proving.id} title={proving.matter || proving.scope_key || "this hold"} onClose={() => setProving(null)} />
       )}
 
       <ConfirmDialog
@@ -187,13 +203,25 @@ export function HoldsInEffect() {
         confirmLabel="Release hold"
         onConfirm={async () => {
           if (!releasing) return;
-          await releaseLegalHold(releasing.id);
+          const answer = await releaseLegalHold(releasing.id, "released from the console");
           await refresh();
-          notify.success("Hold released");
+          if (isPending(answer)) notify.info("Sent for approval", "A second member approves the release under Governance.");
+          else notify.success("Hold released");
         }}
       />
     </Panel>
   );
+}
+
+function describeQuery(q: NonNullable<HeldHold["query"]>) {
+  const parts: string[] = [];
+  if (q.dataset) parts.push(`dataset ${q.dataset}`);
+  if (q.path_prefix) parts.push(`path ${q.path_prefix}*`);
+  if (q.content_type_prefix) parts.push(`type ${q.content_type_prefix}*`);
+  for (const [k, v] of Object.entries(q.metadata ?? {})) parts.push(`${k}=${v}`);
+  if (q.created_after) parts.push(`created from ${q.created_after.slice(0, 10)}`);
+  if (q.created_before) parts.push(`created before ${q.created_before.slice(0, 10)}`);
+  return parts.join(", ");
 }
 
 // Earlier versions are kept, never edited; loaded when someone opens them.

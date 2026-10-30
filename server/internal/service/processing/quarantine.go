@@ -19,6 +19,18 @@ type Quarantine struct {
 	events  interfaces.ProcessingEventRepository
 	audit   interfaces.AuditRecorder
 	now     func() time.Time
+	// findings is optional; with it, inspections include content findings.
+	findings interface {
+		ListFindings(ctx context.Context, tenantID, assetID string) ([]model.ContentFinding, error)
+	}
+	checks interfaces.ContentChecks
+}
+
+// WithChecks adds content findings to inspections, and serves blast
+// radius and the tenant content policy.
+func (q *Quarantine) WithChecks(checks interfaces.ContentChecks) *Quarantine {
+	q.findings, q.checks = checks, checks
+	return q
 }
 
 func NewQuarantine(assets interfaces.AssetRepository, jobs interfaces.ProcessingJobRepository,
@@ -40,6 +52,11 @@ func (q *Quarantine) Inspect(ctx context.Context, tenantID, assetID string) (Ins
 	}
 	if out.Quarantine, err = q.records.ListForAsset(ctx, tenantID, assetID); err != nil {
 		return out, err
+	}
+	if q.findings != nil {
+		if out.Findings, err = q.findings.ListFindings(ctx, tenantID, assetID); err != nil {
+			return out, err
+		}
 	}
 	out.Events, err = q.events.ListForAsset(ctx, tenantID, assetID)
 	return out, err

@@ -248,10 +248,10 @@ func (r *ContentPolicyRepository) Get(ctx context.Context, tenantID string) (mod
 	var policy model.ContentPolicy
 	var maxSize *int64
 	err := r.db.Pool.QueryRow(ctx, `
-		SELECT allowed_types, denied_types, max_size_bytes, COALESCE(unknown_type_action, '')
+		SELECT allowed_types, denied_types, max_size_bytes, COALESCE(unknown_type_action, ''), finding_actions
 		FROM tenant_content_policies
 		WHERE tenant_id = $1
-	`, tenantID).Scan(&policy.AllowedTypes, &policy.DeniedTypes, &maxSize, &policy.UnknownTypeAction)
+	`, tenantID).Scan(&policy.AllowedTypes, &policy.DeniedTypes, &maxSize, &policy.UnknownTypeAction, &policy.FindingActions)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.ContentPolicy{}, false, nil
 	}

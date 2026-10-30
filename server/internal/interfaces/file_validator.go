@@ -14,7 +14,11 @@ import (
 type ContentSample struct {
 	Head         []byte
 	DeclaredType string
+	// DetectedType is what the type check found in the bytes; checks
+	// later in the chain see it.
+	DetectedType string
 	FileName     string
+	AssetID      string
 	SizeBytes    int64
 	Open         func(ctx context.Context) (io.ReadCloser, error)
 }
@@ -26,6 +30,12 @@ type ValidationResult struct {
 	DetectedType string
 	RejectReason string
 	Detail       string
+	// Findings are what a content check found. Each has a Code and Detail,
+	// and may suggest an Action; the tenant's policy decides the action.
+	Findings []model.ContentFinding
+	// Notes say what a check did not look at (an object over its size
+	// limit, a text file read only in part), for the processing record.
+	Notes []string
 }
 
 // FileValidator judges stored content by its own bytes. New formats are

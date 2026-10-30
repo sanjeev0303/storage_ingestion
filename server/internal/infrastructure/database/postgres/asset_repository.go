@@ -62,21 +62,29 @@ const assetColumns = `
 	COALESCE(rejection_reason, ''), COALESCE(storage_etag, ''), COALESCE(storage_version_id, ''),
 	published_at, created_at, updated_at, COALESCE(dataset, ''),
 	COALESCE(object_id, ''), COALESCE(version, 0), metadata, storage_connection_id, staging_connection_id,
-	COALESCE(shared_from, '')
+	COALESCE(shared_from, ''), COALESCE(blocked_reason, ''), COALESCE(adoption, ''), COALESCE(classification, ''),
+	storage_tier, tiered_at, readable_until
 `
 
 func scanAsset(row pgx.Row) (*model.Asset, error) {
+	return scanAssetWith(row)
+}
+
+// scanAssetWith scans assetColumns and then the extra columns after them.
+func scanAssetWith(row pgx.Row, extra ...any) (*model.Asset, error) {
 	var asset model.Asset
-	var status string
+	var status, tier string
 	var metadata []byte
-	err := row.Scan(
+	err := row.Scan(append([]any{
 		&asset.ID, &asset.TenantID, &asset.OwnerID, &asset.UploadID, &asset.ObjectKey, &asset.FileName,
 		&asset.ContentType, &asset.SizeBytes, &asset.ChecksumSHA256, &status,
 		&asset.RejectionReason, &asset.StorageETag, &asset.StorageVersionID,
 		&asset.PublishedAt, &asset.CreatedAt, &asset.UpdatedAt, &asset.Dataset,
 		&asset.ObjectID, &asset.Version, &metadata, &asset.StorageConnectionID, &asset.StagingConnectionID,
-		&asset.SharedFrom,
-	)
+		&asset.SharedFrom, &asset.BlockedReason, &asset.Adoption, &asset.Classification,
+		&tier, &asset.TieredAt, &asset.ReadableUntil,
+	}, extra...)...)
+	asset.StorageTier = model.StorageTier(tier)
 	if err != nil {
 		return nil, err
 	}

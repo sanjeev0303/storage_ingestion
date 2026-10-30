@@ -88,7 +88,7 @@ func derivationInfo(d *model.Derivation) *response.DerivationInfo {
 	if d == nil {
 		return nil
 	}
-	out := &response.DerivationInfo{VersionIDs: d.SourceVersionIDs, Splits: d.Splits, Labels: d.Labels}
+	out := &response.DerivationInfo{VersionIDs: d.SourceVersionIDs, Splits: d.Splits, Labels: d.Labels, Empty: d.Empty}
 	if t := d.Transformation; t != nil {
 		out.Transformation = &response.TransformationInfo{Name: t.Name, Version: t.Version, ConfigSHA256: t.ConfigSHA256}
 	}
@@ -104,7 +104,9 @@ func managedDatasetResponse(d model.Dataset) response.DatasetResponse {
 		Revision: d.Revision, MemberCount: d.MemberCount, CurrentVersionID: d.CurrentVersionID,
 		ProfileID: d.ProfileID, ProfileVersion: d.ProfileVersion, LatestReportID: d.LatestReportID,
 		Derivation: derivationInfo(d.Derivation), CreatedBy: d.CreatedBy, UpdatedBy: d.UpdatedBy, ArchivedAt: d.ArchivedAt,
-		StorageConnectionID: d.StorageConnectionID,
+		StorageConnectionID: d.StorageConnectionID, DataClass: d.DataClass, Residency: append([]string{}, d.Residency...),
+		RequireCustomerKey: d.RequireCustomerKey, ReplicaConnectionID: d.ReplicaConnectionID, Escrow: d.Escrow,
+		VaultRetentionDays: d.VaultRetentionDays, ScrubDays: d.ScrubDays, CleanVersionID: d.CleanVersionID,
 	}
 	if d.ParentID != "" {
 		out.Branch = &response.BranchInfo{ParentID: d.ParentID, Name: d.BranchName, ForkVersionID: d.ForkVersionID,
@@ -146,6 +148,7 @@ func datasetVersionResponse(v model.DatasetVersion) response.DatasetVersionRespo
 		MemberCount: v.MemberCount, TotalBytes: v.TotalBytes, ManifestSHA256: v.ManifestSHA256, ManifestFormat: v.ManifestFormat,
 		ProfileID: v.ProfileID, ProfileVersion: v.ProfileVersion, Config: v.Config, ParentVersionID: v.ParentVersionID,
 		Derivation: derivationInfo(v.Derivation), LatestReportID: v.LatestReportID, CreatedBy: v.CreatedBy, CreatedAt: v.CreatedAt,
+		ExpiredAt: v.ExpiredAt, SupersededBy: v.SupersededBy, SupersededReason: v.SupersededReason,
 	}
 	if out.Config == nil {
 		out.Config = map[string]any{}
@@ -204,6 +207,7 @@ func (h *DatasetHandler) create(w nethttp.ResponseWriter, r *nethttp.Request) {
 	}
 	if from := body.DerivedFrom; from != nil {
 		in.SourceVersionIDs, in.Splits, in.Labels = from.VersionIDs, from.Splits, from.Labels
+		in.Empty = from.CopyMembers != nil && !*from.CopyMembers
 		if from.VersionIDs == nil {
 			in.SourceVersionIDs = []string{}
 		}
@@ -268,6 +272,9 @@ func (h *DatasetHandler) update(w nethttp.ResponseWriter, r *nethttp.Request) {
 	d, err := h.service.Update(r.Context(), principalOf(r), r.PathValue("id"), revision, dataset.UpdateInput{
 		Description: body.Description, Tags: body.Tags, Metadata: body.Metadata,
 		ProfileID: body.ProfileID, ProfileVersion: body.ProfileVersion, StorageConnectionID: body.StorageConnectionID,
+		DataClass: body.DataClass, Residency: body.Residency, RequireCustomerKey: body.RequireCustomerKey,
+		ReplicaConnectionID: body.ReplicaConnectionID, Escrow: body.Escrow, VaultRetentionDays: body.VaultRetentionDays,
+		ScrubDays: body.ScrubDays,
 	})
 	if err != nil {
 		h.fail(w, err)
@@ -911,6 +918,12 @@ func (h *DatasetHandler) fail(w nethttp.ResponseWriter, err error) {
 		status, code = nethttp.StatusNotFound, "not_found"
 	case errors.Is(err, model.ErrModelExists):
 		status, code = nethttp.StatusConflict, "model_exists"
+	case errors.Is(err, model.ErrProvenanceRequired):
+		status, code = nethttp.StatusConflict, "provenance_required"
+	case errors.Is(err, model.ErrProvenanceOrder):
+		status, code = nethttp.StatusConflict, "provenance_order"
+	case errors.Is(err, model.ErrVersionSuperseded):
+		status, code = nethttp.StatusConflict, "version_superseded"
 	case errors.Is(err, model.ErrDatasetArchived):
 		status, code = nethttp.StatusConflict, "dataset_archived"
 	case errors.Is(err, model.ErrDatasetTransition):

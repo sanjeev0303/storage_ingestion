@@ -41,7 +41,11 @@ type DeliveryAuditEvent struct {
 	ByteRange string
 	// BytesSent is set on transfer failures.
 	BytesSent int64
-	CreatedAt time.Time
+	// SourceIP is where the request came from; CredentialID the API token
+	// it used ("" for a session).
+	SourceIP     string
+	CredentialID string
+	CreatedAt    time.Time
 }
 
 // DownloadToken is a revocable download link. Only the SHA-256 of the

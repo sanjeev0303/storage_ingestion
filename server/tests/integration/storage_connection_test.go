@@ -27,6 +27,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/server"
 	"github.com/sanjeev0303/object-storage-platform/internal/server/middleware"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/identity"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/copyengine"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/storageconn"
 )
 
@@ -43,7 +44,9 @@ func testKeyring(t *testing.T) *secretbox.Keyring {
 }
 
 // activeConnection stores a tested connection for tenantID.
-func activeConnection(t *testing.T, repo *postgres.StorageConnectionRepository, tenantID, name string, keyring *secretbox.Keyring) model.StorageConnection {
+// activeConnection makes an S3-compatible connection, or one of provider
+// when given.
+func activeConnection(t *testing.T, repo *postgres.StorageConnectionRepository, tenantID, name string, keyring *secretbox.Keyring, provider ...model.StorageProviderType) model.StorageConnection {
 	t.Helper()
 	ctx := context.Background()
 	c := model.StorageConnection{
@@ -51,6 +54,9 @@ func activeConnection(t *testing.T, repo *postgres.StorageConnectionRepository, 
 		AuthMethod: model.AuthAccessKey, Bucket: "tenant-bucket", Endpoint: "https://s3.example.com",
 		StagingPrefix: "staging", ReadyPrefix: "published", StagingMode: model.StagingInPlace,
 		CreatedBy: "it", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if len(provider) > 0 {
+		c.Provider, c.Endpoint, c.Region = provider[0], "", "ap-south-1"
 	}
 	plain := []byte(`{"AccessKeyID":"AKIDIT","SecretAccessKey":"it-secret-value"}`)
 	sealed, err := keyring.Seal(plain, c.CredentialAAD(1))
@@ -391,6 +397,8 @@ type byosStack struct {
 	*securityStack
 	registry    *registry.Registry
 	connections *postgres.StorageConnectionRepository
+	health      *storageconn.Service
+	copies      *copyengine.Service
 }
 
 func openBYOSStack(t *testing.T) *byosStack {
@@ -425,10 +433,20 @@ func openBYOSStack(t *testing.T) *byosStack {
 	s.lifecycle.Route(reg)
 	connService, err := storageconn.NewService(storageconn.Dependencies{
 		Connections: connections, Sealer: keyring, Clients: reg, Audit: s.audit, Log: s.log,
+		Health: connections, Alerts: postgres.NewAccessRepository(s.db), Drift: connections,
 	}, cfg, policy)
 	if err != nil {
 		t.Fatal(err)
 	}
+	reg.GuardPlacement(connService)
+	s.placement = connService
+	copies := copyengine.NewService(copyengine.Dependencies{
+		Store: postgres.NewCopyRepository(s.db), Router: reg, Packs: postgres.NewPackRepository(s.db),
+		Locks: postgres.NewObjectLockRepository(s.db), Posture: connections, Alerts: postgres.NewAccessRepository(s.db), Audit: s.audit,
+	}, copyengine.Config{Owner: "it-copies", Batch: 100, MassDeletions: 1}, s.log)
+	s.protection = copies
+	s.delivery.FailOver(copies)
+	s.datasets = s.newDatasetService(t, nil)
 
 	rates := map[string]ratelimit.Rule{}
 	for name, rule := range s.sec.Rates {
@@ -439,10 +457,11 @@ func openBYOSStack(t *testing.T) *byosStack {
 		Identity: s.identity, Quotas: s.quotas, Audit: s.audit,
 		Uploads: s.ie.single, Multipart: s.ie.multi, Delivery: s.delivery, Lifecycle: s.lifecycle, Datasets: s.datasets,
 		StorageConnections: connService, ProxyEnabled: true, Limiter: s.limiter, Rates: rates, Log: s.log,
+		Access: s.access, Copies: copies,
 	}))
 	t.Cleanup(api.Close)
 	s.api = api
-	return &byosStack{securityStack: s, registry: reg, connections: connections}
+	return &byosStack{securityStack: s, registry: reg, connections: connections, health: connService, copies: copies}
 }
 
 // removePrefix deletes what the test wrote to the tenant bucket.

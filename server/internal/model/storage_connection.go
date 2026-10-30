@@ -181,6 +181,23 @@ type StorageConnection struct {
 	// LastErrorCategory is a sanitized category, never a provider message.
 	LastErrorCategory string
 
+	// ChecksumMode is AUTO, WHEN_SUPPORTED or WHEN_REQUIRED; ExpectedOwner
+	// the AWS account or Google project number the bucket must belong to
+	// ("" when not pinned). See docs/storage-posture.md.
+	ChecksumMode  string
+	ExpectedOwner string
+	// EncryptionKey is the customer-managed key every write is encrypted
+	// with: a KMS key on AWS, a Cloud KMS key on GCS, an encryption scope
+	// on Azure ("" uses the bucket's default). See docs/residency.md.
+	EncryptionKey string
+	// A second credential, tested and waiting to be promoted, and the one a
+	// promotion replaced, kept for a rollback until PreviousUntil.
+	StagedCredentialVersion   int
+	StagedAt                  *time.Time
+	StagedBy                  string
+	PreviousCredentialVersion int
+	PreviousUntil             *time.Time
+
 	Revision   int64
 	CreatedBy  string
 	UpdatedBy  string

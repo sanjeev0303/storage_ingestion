@@ -27,7 +27,8 @@ func NewRetentionPolicyRepository(db *DB) *RetentionPolicyRepository {
 const policyColumns = `
 	id, tenant_id, scope, scope_key, version,
 	min_retention_seconds, max_age_seconds, deletion_grace_seconds, quarantine_retention_seconds,
-	effective_from, created_by, reason, created_at
+	effective_from, created_by, reason, created_at,
+	COALESCE(lock_mode, ''), COALESCE(retain_from_key, ''), COALESCE(template, '')
 `
 
 func scanPolicy(row pgx.Row) (model.RetentionPolicy, error) {
@@ -35,7 +36,8 @@ func scanPolicy(row pgx.Row) (model.RetentionPolicy, error) {
 	var minRetention, maxAge, grace, quarantine *int64
 	err := row.Scan(&p.ID, &p.TenantID, &p.Scope, &p.ScopeKey, &p.Version,
 		&minRetention, &maxAge, &grace, &quarantine,
-		&p.EffectiveFrom, &p.CreatedBy, &p.Reason, &p.CreatedAt)
+		&p.EffectiveFrom, &p.CreatedBy, &p.Reason, &p.CreatedAt,
+		&p.LockMode, &p.RetainFromKey, &p.Template)
 	p.MinRetention = fromSeconds(minRetention)
 	p.MaxAge = fromSeconds(maxAge)
 	p.DeletionGrace = fromSeconds(grace)
@@ -68,15 +70,17 @@ func (r *RetentionPolicyRepository) AddVersion(ctx context.Context, policy model
 			INSERT INTO retention_policies (
 				id, tenant_id, scope, scope_key, version,
 				min_retention_seconds, max_age_seconds, deletion_grace_seconds, quarantine_retention_seconds,
-				effective_from, created_by, reason, created_at
+				effective_from, created_by, reason, created_at, lock_mode, retain_from_key, template
 			)
-			SELECT $1, $2, $3, $4, COALESCE(MAX(version), 0) + 1, $5, $6, $7, $8, $9, $10, $11, $12
+			SELECT $1, $2, $3, $4, COALESCE(MAX(version), 0) + 1, $5, $6, $7, $8, $9, $10, $11, $12,
+			       NULLIF($13, ''), NULLIF($14, ''), NULLIF($15, '')
 			FROM retention_policies
 			WHERE tenant_id = $2 AND scope = $3 AND scope_key = $4
 			RETURNING `+policyColumns,
 			policy.ID, policy.TenantID, policy.Scope, policy.ScopeKey,
 			toSeconds(policy.MinRetention), toSeconds(policy.MaxAge), toSeconds(policy.DeletionGrace), toSeconds(policy.QuarantineRetention),
-			policy.EffectiveFrom, policy.CreatedBy, policy.Reason, policy.CreatedAt))
+			policy.EffectiveFrom, policy.CreatedBy, policy.Reason, policy.CreatedAt,
+			policy.LockMode, policy.RetainFromKey, policy.Template))
 
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" && attempt < 3 {
@@ -165,21 +169,46 @@ func NewLegalHoldRepository(db *DB) *LegalHoldRepository {
 
 const holdColumns = `
 	id, tenant_id, scope, scope_key, reason, placed_by, placed_at,
-	COALESCE(released_by, ''), released_at
+	COALESCE(released_by, ''), released_at, query, matter, custodians
 `
 
 func scanHold(row pgx.Row) (model.LegalHold, error) {
 	var h model.LegalHold
-	err := row.Scan(&h.ID, &h.TenantID, &h.Scope, &h.ScopeKey, &h.Reason, &h.PlacedBy, &h.PlacedAt, &h.ReleasedBy, &h.ReleasedAt)
+	err := row.Scan(&h.ID, &h.TenantID, &h.Scope, &h.ScopeKey, &h.Reason, &h.PlacedBy, &h.PlacedAt, &h.ReleasedBy, &h.ReleasedAt,
+		&h.Query, &h.Matter, &h.Custodians)
 	return h, err
 }
 
+// matchesQuery is true when the asset $assetParam matches the hold row's
+// query. It is evaluated whenever the asset is checked, so a QUERY hold
+// covers assets created after it too.
+func matchesQuery(holds, assetParam string) string {
+	return `EXISTS (
+		SELECT 1 FROM assets AS qa
+		LEFT JOIN catalog_objects AS qo ON qo.id = qa.object_id AND qo.tenant_id = qa.tenant_id
+		WHERE qa.tenant_id = ` + holds + `.tenant_id AND qa.id = ` + assetParam + `
+		  AND (NOT ` + holds + `.query ? 'dataset' OR qa.dataset = ` + holds + `.query->>'dataset')
+		  AND (NOT ` + holds + `.query ? 'path_prefix' OR starts_with(COALESCE(qo.path, qa.file_name), ` + holds + `.query->>'path_prefix'))
+		  AND (NOT ` + holds + `.query ? 'content_type_prefix' OR starts_with(qa.content_type, ` + holds + `.query->>'content_type_prefix'))
+		  AND (NOT ` + holds + `.query ? 'metadata' OR COALESCE(qa.metadata, '{}'::jsonb) @> (` + holds + `.query->'metadata'))
+		  AND (NOT ` + holds + `.query ? 'created_after' OR qa.created_at >= (` + holds + `.query->>'created_after')::timestamptz)
+		  AND (NOT ` + holds + `.query ? 'created_before' OR qa.created_at < (` + holds + `.query->>'created_before')::timestamptz))`
+}
+
 func (r *LegalHoldRepository) Place(ctx context.Context, hold model.LegalHold) (model.LegalHold, error) {
+	var query []byte
+	if hold.Query != nil {
+		query = hold.Query.JSON()
+	}
+	custodians := hold.Custodians
+	if custodians == nil {
+		custodians = []string{}
+	}
 	stored, err := scanHold(r.db.Pool.QueryRow(ctx, `
-		INSERT INTO legal_holds (id, tenant_id, scope, scope_key, reason, placed_by, placed_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO legal_holds (id, tenant_id, scope, scope_key, reason, placed_by, placed_at, query, matter, custodians)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING `+holdColumns,
-		hold.ID, hold.TenantID, hold.Scope, hold.ScopeKey, hold.Reason, hold.PlacedBy, hold.PlacedAt))
+		hold.ID, hold.TenantID, hold.Scope, hold.ScopeKey, hold.Reason, hold.PlacedBy, hold.PlacedAt, query, hold.Matter, custodians))
 	if err != nil {
 		return model.LegalHold{}, fmt.Errorf("place legal hold: %w", err)
 	}
@@ -221,7 +250,8 @@ func (r *LegalHoldRepository) Active(ctx context.Context, tenantID, dataset, ass
 		  AND released_at IS NULL
 		  AND (scope = 'TENANT'
 		       OR (scope = 'DATASET' AND $2 <> '' AND scope_key = $2)
-		       OR (scope = 'ASSET' AND $3 <> '' AND scope_key = $3))
+		       OR (scope = 'ASSET' AND $3 <> '' AND scope_key = $3)
+		       OR (scope = 'QUERY' AND $3 <> '' AND `+matchesQuery("legal_holds", "$3")+`))
 		ORDER BY placed_at, id
 	`, tenantID, dataset, assetID)
 }

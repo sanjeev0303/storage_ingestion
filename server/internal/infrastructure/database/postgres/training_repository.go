@@ -84,8 +84,8 @@ func (r *DatasetRepository) CreateTrainingRun(ctx context.Context, tenantID stri
 			if err != nil {
 				return err
 			}
-			if _, err := tx.Exec(ctx, `INSERT INTO training_run_inputs (run_id, version_id, tenant_id) VALUES ($1, $2, $3)
-				ON CONFLICT DO NOTHING`, run.ID, versionID, tenantID); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO training_run_inputs (run_id, version_id, tenant_id, role) VALUES ($1, $2, $3, NULLIF($4, ''))
+				ON CONFLICT DO NOTHING`, run.ID, versionID, tenantID, run.Roles[versionID]); err != nil {
 				return fmt.Errorf("record training input: %w", err)
 			}
 		}
@@ -214,21 +214,25 @@ func (r *DatasetRepository) attachRunDetails(ctx context.Context, tenantID strin
 		ids[i] = runs[i].ID
 		runs[i].TenantID = tenantID
 		runs[i].VersionIDs = []string{}
+		runs[i].Roles = map[string]string{}
 		runs[i].Models = []model.Model{}
 		byID[runs[i].ID] = &runs[i]
 	}
-	rows, err := r.db.Pool.Query(ctx, `SELECT run_id, version_id FROM training_run_inputs
+	rows, err := r.db.Pool.Query(ctx, `SELECT run_id, version_id, COALESCE(role, '') FROM training_run_inputs
 		WHERE tenant_id = $1 AND run_id = ANY($2) ORDER BY run_id, version_id`, tenantID, ids)
 	if err != nil {
 		return fmt.Errorf("list training inputs: %w", err)
 	}
 	for rows.Next() {
-		var runID, versionID string
-		if err := rows.Scan(&runID, &versionID); err != nil {
+		var runID, versionID, role string
+		if err := rows.Scan(&runID, &versionID, &role); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan training input: %w", err)
 		}
 		byID[runID].VersionIDs = append(byID[runID].VersionIDs, versionID)
+		if role != "" {
+			byID[runID].Roles[versionID] = role
+		}
 	}
 	rows.Close()
 	rows, err = r.db.Pool.Query(ctx, `SELECT id, run_id, name, version, uri, created_by, created_at FROM models

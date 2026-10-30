@@ -30,6 +30,31 @@ type reconcileEnv struct {
 	tenant  string
 }
 
+// sweepStaleIngestion clears what a run killed mid-test left behind: an
+// ingestion job of an earlier run holding a global slot, which the
+// slot-limit tests would count. Only jobs idle for an hour are taken, it
+// never waits long on a lock, and it is best effort.
+func sweepStaleIngestion(ctx context.Context, db *postgres.DB) {
+	tx, err := db.Pool.Begin(ctx)
+	if err != nil {
+		return
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	for _, q := range []string{
+		`SET LOCAL lock_timeout = '2s'`,
+		`DELETE FROM ingestion_entries WHERE job_id IN (SELECT id FROM ingestion_jobs
+			WHERE tenant_id LIKE 'reconcile-test-%' AND updated_at < now() - interval '1 hour')`,
+		`DELETE FROM ingestion_jobs WHERE tenant_id LIKE 'reconcile-test-%' AND updated_at < now() - interval '1 hour'`,
+		`DELETE FROM ingestion_tenant_usage AS u WHERE tenant_id LIKE 'reconcile-test-%'
+			AND NOT EXISTS (SELECT 1 FROM ingestion_jobs AS j WHERE j.tenant_id = u.tenant_id)`,
+	} {
+		if _, err := tx.Exec(ctx, q); err != nil {
+			return
+		}
+	}
+	_ = tx.Commit(ctx)
+}
+
 func openReconcileEnv(t *testing.T) *reconcileEnv {
 	t.Helper()
 	databaseURL := os.Getenv("TEST_DATABASE_URL")
@@ -43,6 +68,7 @@ func openReconcileEnv(t *testing.T) *reconcileEnv {
 	if err != nil {
 		t.Fatalf("open test database: %v", err)
 	}
+	sweepStaleIngestion(ctx, db)
 
 	env := &reconcileEnv{
 		db:      db,
@@ -54,7 +80,8 @@ func openReconcileEnv(t *testing.T) *reconcileEnv {
 		ctx := context.Background()
 		// Tasks go with their sessions (ON DELETE CASCADE); events, written
 		// by completions, are removed by tenant.
-		for _, table := range []string{"outbox_events", "event_inbox", "dead_letters", "event_discrepancies"} {
+		for _, table := range []string{"outbox_events", "event_inbox", "dead_letters", "event_discrepancies",
+			"ingestion_entries", "ingestion_jobs", "ingestion_tenant_usage"} {
 			_, _ = db.Pool.Exec(ctx, `DELETE FROM `+table+` WHERE tenant_id = $1`, env.tenant)
 		}
 		_, _ = db.Pool.Exec(ctx, `DELETE FROM upload_sessions WHERE tenant_id = $1`, env.tenant)

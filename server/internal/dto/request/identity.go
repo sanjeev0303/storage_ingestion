@@ -1,5 +1,7 @@
 package request
 
+import "github.com/sanjeev0303/object-storage-platform/internal/model"
+
 // Authentication, organization and administration requests.
 
 type LoginRequest struct {
@@ -110,10 +112,22 @@ type RetentionPolicyRequest struct {
 	DeletionGrace       string `json:"deletion_grace,omitempty"`
 	QuarantineRetention string `json:"quarantine_retention,omitempty"`
 	Reason              string `json:"reason"`
+	// LockMode is GOVERNANCE or COMPLIANCE; a COMPLIANCE policy also needs
+	// ConfirmCompliance. RetainFromKey counts retention from a metadata
+	// date; Template fills unset settings from a retention template.
+	LockMode          string `json:"lock_mode,omitempty"`
+	RetainFromKey     string `json:"retain_from_key,omitempty"`
+	Template          string `json:"template,omitempty"`
+	ConfirmCompliance bool   `json:"confirm_compliance,omitempty"`
+	DryRun            bool   `json:"dry_run,omitempty"`
 }
 
 type LegalHoldRequest struct {
 	Scope    string `json:"scope"`
 	ScopeKey string `json:"scope_key,omitempty"`
 	Reason   string `json:"reason"`
+	// Query selects the assets of a QUERY hold, now and as they come.
+	Query      *model.HoldQuery `json:"query,omitempty"`
+	Matter     string           `json:"matter,omitempty"`
+	Custodians []string         `json:"custodians,omitempty"`
 }

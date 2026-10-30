@@ -24,9 +24,17 @@ const EVENT_TEXT: Record<string, string> = {
   "object.available": "An upload passed verification and scanning and was published",
   "object.rejected": "Processing rejected an upload",
   "object.erased": "A deletion finished and the bytes are gone from storage",
+  "object.flagged": "A content check flagged or rejected a file, or a re-scan blocked a published one",
+  "object.deletion_blocked": "A deletion is held back by a legal hold, a retention period or a lock",
+  "object.lock_tampered": "A lock read back from the provider no longer matches what was applied",
+  "retention.change_requested": "Someone tried to shorten retention or release a hold",
+  "governance.approval_requested": "A change waits for a second member's approval",
   "ingestion.finished": "A bulk ingestion job ended",
   "dataset.snapshot_created": "A snapshot froze a new dataset version",
   "dataset.validation_finished": "A validation job ended",
+  "object.scrub_failed": "A scrub found a stored object damaged or missing, and whether it was rewritten from a replica",
+  "copy.job_finished": "A migration, restore, drill or export bundle ended",
+  "security.alert": "Unusual reads, mass share links, a new network, a used-up download budget, a failing bucket or a change outside the platform",
   "webhook.test": "A test event you send from this page",
 };
 

@@ -63,7 +63,9 @@ export const getEntry = (id: string, position: number, signal?: AbortSignal) =>
   api<IngestionEntry>(entryPath(id, position), { signal });
 
 export const entryUploadUrl = (id: string, position: number) =>
-  api<{ entry: IngestionEntry; upload_url?: string }>(`${entryPath(id, position)}/upload-url`, { method: "POST" });
+  api<{ entry: IngestionEntry; upload_url?: string; upload_headers?: Record<string, string> }>(`${entryPath(id, position)}/upload-url`, {
+    method: "POST",
+  });
 
 export const entryPartUrls = (id: string, position: number, partNumbers: number[]) =>
   api<{ parts: PartUrl[] }>(`${entryPath(id, position)}/parts/urls`, {

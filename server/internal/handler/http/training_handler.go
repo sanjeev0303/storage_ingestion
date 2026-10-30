@@ -44,6 +44,7 @@ type trainingRunResponse struct {
 	Params     map[string]string  `json:"params"`
 	Metrics    map[string]float64 `json:"metrics"`
 	VersionIDs []string           `json:"dataset_version_ids"`
+	Roles      map[string]string  `json:"roles"`
 	Models     []modelResponse    `json:"models"`
 	CreatedBy  string             `json:"created_by"`
 	CreatedAt  time.Time          `json:"created_at"`
@@ -54,7 +55,7 @@ type trainingRunResponse struct {
 func trainingRunResponseOf(run model.TrainingRun) trainingRunResponse {
 	out := trainingRunResponse{
 		ID: run.ID, Name: run.Name, Source: string(run.Source), ExternalID: run.ExternalID, URL: run.URL, Status: string(run.Status),
-		Params: run.Params, Metrics: run.Metrics, VersionIDs: run.VersionIDs, Models: []modelResponse{},
+		Params: run.Params, Metrics: run.Metrics, VersionIDs: run.VersionIDs, Roles: run.Roles, Models: []modelResponse{},
 		CreatedBy: run.CreatedBy, CreatedAt: run.CreatedAt, UpdatedAt: run.UpdatedAt, FinishedAt: run.FinishedAt,
 	}
 	for _, m := range run.Models {
@@ -73,6 +74,7 @@ func (h *DatasetHandler) recordTrainingRun(w nethttp.ResponseWriter, r *nethttp.
 		Params     map[string]string  `json:"params"`
 		Metrics    map[string]float64 `json:"metrics"`
 		VersionIDs []string           `json:"dataset_version_ids"`
+		Roles      map[string]string  `json:"roles"`
 		Model      *modelBody         `json:"model"`
 	}
 	if !decodeJSON(w, r, &body) {
@@ -81,7 +83,7 @@ func (h *DatasetHandler) recordTrainingRun(w nethttp.ResponseWriter, r *nethttp.
 	run, created, err := h.service.RecordTrainingRun(r.Context(), principalOf(r), dataset.TrainingRunInput{
 		Name: body.Name, Source: model.TrainingSource(strings.ToUpper(body.Source)), ExternalID: body.ExternalID, URL: body.URL,
 		Status: model.TrainingStatus(strings.ToUpper(body.Status)), Params: body.Params, Metrics: body.Metrics,
-		VersionIDs: body.VersionIDs, Model: body.Model.input(),
+		VersionIDs: body.VersionIDs, Roles: body.Roles, Model: body.Model.input(),
 	})
 	if err != nil {
 		h.fail(w, err)

@@ -201,6 +201,19 @@ type Processing struct {
 	ArchiveMaxExpanded int64
 	ArchiveMaxRatio    int64
 	MetricsAddr        string
+
+	// Content checks (active content, model files, secrets, formats) are
+	// on unless CONTENT_CHECKS_ENABLED=false.
+	ContentChecks     bool
+	ContentMaxBytes   int64
+	SecretScanBytes   int64
+	ContentHookURL    string
+	ContentHookToken  string
+	ContentHookBytes  int64
+	ContentHookTimeout time.Duration
+	// RescanBatch published assets are re-scanned a cycle when the
+	// scanner's signatures change; 0 turns re-scans off.
+	RescanBatch int
 }
 
 // LoadProcessing reads the processing worker settings.
@@ -215,6 +228,9 @@ func LoadProcessing() (Processing, error) {
 
 		ArchiveInspection: strings.EqualFold(getEnv("ARCHIVE_INSPECTION_ENABLED", "false"), "true"),
 		MetricsAddr:       getEnv("METRICS_ADDR", ""),
+		ContentChecks:     !strings.EqualFold(getEnv("CONTENT_CHECKS_ENABLED", "true"), "false"),
+		ContentHookURL:    getEnv("CONTENT_HOOK_URL", ""),
+		ContentHookToken:  getEnv("CONTENT_HOOK_TOKEN", ""),
 	}
 
 	var err error
@@ -229,6 +245,7 @@ func LoadProcessing() (Processing, error) {
 		{"PROCESSING_BACKOFF_MAX", "30m", &cfg.BackoffMax},
 		{"CLAMAV_TIMEOUT", "2m", &cfg.ClamAVTimeout},
 		{"QUARANTINE_RETENTION", "720h", &cfg.QuarantineRetention},
+		{"CONTENT_HOOK_TIMEOUT", "5m", &cfg.ContentHookTimeout},
 	}
 	for _, d := range durations {
 		if *d.target, err = time.ParseDuration(getEnv(d.key, d.fallback)); err != nil || *d.target <= 0 {
@@ -262,11 +279,21 @@ func LoadProcessing() (Processing, error) {
 		{"ARCHIVE_MAX_BYTES", "536870912", &cfg.ArchiveMaxBytes},
 		{"ARCHIVE_MAX_UNCOMPRESSED_BYTES", "2147483648", &cfg.ArchiveMaxExpanded},
 		{"ARCHIVE_MAX_RATIO", "100", &cfg.ArchiveMaxRatio},
+		{"CONTENT_CHECK_MAX_BYTES", "10737418240", &cfg.ContentMaxBytes},
+		{"SECRET_SCAN_MAX_BYTES", "67108864", &cfg.SecretScanBytes},
+		{"CONTENT_HOOK_MAX_BYTES", "1073741824", &cfg.ContentHookBytes},
 	}
 	for _, n := range int64s {
 		if *n.target, err = strconv.ParseInt(getEnv(n.key, n.fallback), 10, 64); err != nil || *n.target <= 0 {
 			return Processing{}, fmt.Errorf("%s must be a positive integer", n.key)
 		}
+	}
+
+	if cfg.RescanBatch, err = strconv.Atoi(getEnv("RESCAN_BATCH_SIZE", "20")); err != nil || cfg.RescanBatch < 0 {
+		return Processing{}, fmt.Errorf("RESCAN_BATCH_SIZE must be 0 or a positive integer")
+	}
+	if cfg.ContentHookURL != "" && !strings.HasPrefix(cfg.ContentHookURL, "https://") && !strings.HasPrefix(cfg.ContentHookURL, "http://") {
+		return Processing{}, fmt.Errorf("CONTENT_HOOK_URL must be an http or https URL")
 	}
 
 	cfg.AllowedTypes = splitList(getEnv("PROCESSING_ALLOWED_CONTENT_TYPES", ""))

@@ -126,7 +126,7 @@ describe("RetentionScreen", () => {
   it("flags day units after the field is left and keeps submit disabled with a reason", async () => {
     renderWithProviders(<RetentionScreen />);
 
-    const button = screen.getByRole("button", { name: "Review and set policy" });
+    const button = screen.getByRole("button", { name: "Review the change" });
     expect(button).toBeDisabled();
     await userEvent.type(screen.getByLabelText("Minimum retention"), "30d");
     await userEvent.tab();
@@ -142,34 +142,67 @@ describe("RetentionScreen", () => {
     await userEvent.type(screen.getByLabelText("Minimum retention"), "1h 30m");
     await userEvent.type(screen.getAllByLabelText(/Reason/)[0], "audit");
     expect(screen.getAllByText("5 / 500").length).toBe(1);
-    expect(screen.getByRole("button", { name: "Review and set policy" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Review the change" })).toBeEnabled();
   });
 
-  it("confirms, then sends a valid policy", async () => {
-    let body: unknown;
+  it("previews the impact, confirms, then sends a valid policy", async () => {
+    const bodies: Record<string, unknown>[] = [];
     server.use(
+      http.get(`${API}/retention/templates`, () => HttpResponse.json({ templates: [] })),
       http.put(`${API}/retention/policies`, async ({ request }) => {
-        body = await request.json();
-        return HttpResponse.json({
-          id: "pol-1",
-          scope: "TENANT",
-          scope_key: "",
-          version: 3,
-          effective_from: "2026-10-22T10:00:00Z",
-        });
+        const body = (await request.json()) as Record<string, unknown>;
+        bodies.push(body);
+        if (body.dry_run) {
+          return HttpResponse.json({
+            dry_run: true,
+            impact: { assets: 12, bytes: 2048, lock_mode: "GOVERNANCE", loosens: true, needs_approval: false, notes: null },
+          });
+        }
+        return HttpResponse.json({ id: "pol-1", scope: "TENANT", scope_key: "", version: 3, effective_from: "2026-10-22T10:00:00Z" });
       }),
     );
     renderWithProviders(<RetentionScreen />);
 
     await userEvent.type(screen.getByLabelText("Minimum retention"), "720h");
     await userEvent.type(screen.getAllByLabelText(/Reason/)[0], "policy review");
-    await userEvent.click(screen.getByRole("button", { name: "Review and set policy" }));
+    await userEvent.click(screen.getByRole("button", { name: "Review the change" }));
     const dialog = await screen.findByRole("alertdialog");
-    expect(body).toBeUndefined();
+    // The dry run's answer is what the confirmation says.
+    expect(within(dialog).getByText(/covers 12 available assets/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/less time, or less firmly/)).toBeInTheDocument();
     await userEvent.click(within(dialog).getByRole("button", { name: "Set policy" }));
 
     expect(await screen.findByText("Policy saved")).toBeInTheDocument();
-    expect(body).toEqual({ scope: "TENANT", min_retention: "720h", reason: "policy review" });
+    expect(bodies).toEqual([
+      { scope: "TENANT", min_retention: "720h", reason: "policy review", lock_mode: "GOVERNANCE", dry_run: true },
+      { scope: "TENANT", min_retention: "720h", reason: "policy review", lock_mode: "GOVERNANCE" },
+    ]);
+  });
+
+  it("makes a COMPLIANCE policy only after the word is typed", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    server.use(
+      http.get(`${API}/retention/templates`, () => HttpResponse.json({ templates: [] })),
+      http.put(`${API}/retention/policies`, async ({ request }) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        bodies.push(body);
+        return body.dry_run
+          ? HttpResponse.json({ dry_run: true, impact: { assets: 1, bytes: 1, lock_mode: "COMPLIANCE", loosens: false, needs_approval: false, notes: [] } })
+          : HttpResponse.json({ id: "pol-2", scope: "TENANT", scope_key: "", version: 1, effective_from: "2026-10-22T10:00:00Z", lock_mode: "COMPLIANCE" });
+      }),
+    );
+    renderWithProviders(<RetentionScreen />);
+    await userEvent.type(screen.getByLabelText("Minimum retention"), "52560h");
+    await userEvent.selectOptions(screen.getByLabelText("Object Lock mode"), "COMPLIANCE");
+    await userEvent.type(screen.getAllByLabelText(/Reason/)[0], "17a-4");
+    await userEvent.click(screen.getByRole("button", { name: "Review the change" }));
+    const dialog = await screen.findByRole("alertdialog");
+    const confirm = within(dialog).getByRole("button", { name: "Set policy" });
+    expect(confirm).toBeDisabled();
+    await userEvent.type(within(dialog).getByRole("textbox"), "COMPLIANCE");
+    await userEvent.click(confirm);
+    expect(await screen.findByText("Policy saved")).toBeInTheDocument();
+    expect(bodies[1]).toMatchObject({ lock_mode: "COMPLIANCE", confirm_compliance: true });
   });
 
   it("lists a placed legal hold and releases it from the list", async () => {

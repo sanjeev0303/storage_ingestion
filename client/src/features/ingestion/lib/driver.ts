@@ -14,7 +14,7 @@ const DEFAULT_WAIT_SECONDS = 5;
 
 export type DriverApi = {
   claim: (max: number, signal: AbortSignal) => Promise<ClaimResponse>;
-  uploadUrl: (position: number) => Promise<{ upload_url?: string }>;
+  uploadUrl: (position: number) => Promise<{ upload_url?: string; upload_headers?: Record<string, string> }>;
   partUrls: (position: number, numbers: number[]) => Promise<{ parts: PartUrl[] }>;
   confirmParts: (position: number, parts: PartRecord[]) => Promise<unknown>;
   heartbeat: (position: number) => Promise<unknown>;
@@ -79,12 +79,17 @@ export async function runDriver(options: DriverOptions): Promise<DriverEnd> {
   async function uploadSingle(grant: Grant, file: Blob) {
     const { entry } = grant;
     let url = grant.upload_url;
-    if (!url) url = (await api.uploadUrl(entry.position)).upload_url;
+    let extra = grant.upload_headers ?? {};
+    if (!url) {
+      const fresh = await api.uploadUrl(entry.position);
+      url = fresh.upload_url;
+      extra = fresh.upload_headers ?? extra;
+    }
     if (!url) throw new Error("The API gave no upload URL for this entry.");
 
     await withRetry(
       async () => {
-        const headers: Record<string, string> = { "Content-Type": entry.content_type ?? "application/octet-stream" };
+        const headers: Record<string, string> = { ...extra, "Content-Type": entry.content_type ?? "application/octet-stream" };
         if (needsBlobType) headers["x-ms-blob-type"] = "BlockBlob";
         try {
           await put(url as string, file, {
@@ -99,7 +104,9 @@ export async function runDriver(options: DriverOptions): Promise<DriverEnd> {
               needsBlobType = true;
             }
             if (error.urlExpired) {
-              url = (await api.uploadUrl(entry.position)).upload_url ?? url;
+              const fresh = await api.uploadUrl(entry.position);
+              url = fresh.upload_url ?? url;
+              extra = fresh.upload_headers ?? extra;
             }
           }
           throw error;

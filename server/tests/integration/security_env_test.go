@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"crypto/ed25519"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -32,6 +33,8 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/server"
 	"github.com/sanjeev0303/object-storage-platform/internal/server/middleware"
 	assetservice "github.com/sanjeev0303/object-storage-platform/internal/service/asset"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/access"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/adoption"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/audit"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/catalog"
 	datasetservice "github.com/sanjeev0303/object-storage-platform/internal/service/dataset"
@@ -41,6 +44,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/service/ingestion"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/processing"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/quota"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/streaming"
 	uploadservice "github.com/sanjeev0303/object-storage-platform/internal/service/upload"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/webhook"
 )
@@ -281,8 +285,11 @@ func (e *securityEnv) orgIDs(ctx context.Context) []string {
 // tenantTables hold tenant data, children before the tables they
 // reference.
 var tenantTables = []string{
-	"webhook_deliveries", "webhook_endpoints",
-	"lock_sync_requests", "training_run_inputs", "models", "training_runs", "dataset_merges", "validation_findings", "validation_reports", "validation_jobs", "lineage_edges", "lineage_nodes",
+	"asset_replicas", "replica_failures", "scrub_results", "copy_items", "copy_jobs", "tenant_export_schedule", "repack_requests", "tenant_packing",
+	"connection_drift_scans", "storage_drift_findings", "connection_posture",
+	"security_alerts", "egress_usage", "tenant_access_policy", "api_tokens",
+	"adoption_entries", "adoption_jobs", "asset_digests", "webhook_deliveries", "webhook_endpoints", "governance_approvals", "tenant_governance", "disposition_certificates", "content_findings",
+	"lock_sync_requests", "audit_reviews", "evidence_settings", "erasure_items", "erasure_requests", "leakage_checks", "version_profiles", "dataset_quality", "archive_restores", "tier_moves", "tier_rules", "cost_budgets", "training_run_inputs", "run_verifications", "run_checkpoints", "models", "training_runs", "dataset_merges", "validation_findings", "validation_reports", "validation_jobs", "lineage_edges", "lineage_nodes",
 	"dataset_manifest_imports", "dataset_version_members", "dataset_versions", "dataset_members", "validation_profiles",
 	"download_tokens", "delivery_audit_events", "deletion_operations", "lifecycle_events", "legal_holds",
 	"retention_policies", "orphan_candidates", "quarantine_records", "processing_events", "processing_jobs",
@@ -310,6 +317,9 @@ func cleanTenantData(ctx context.Context, db *postgres.DB, tenants []string) err
 		if err != nil {
 			return fmt.Errorf("clean %s: %w", table, err)
 		}
+	}
+	if _, err := db.Pool.Exec(ctx, `DELETE FROM audit_anchors WHERE chain = ANY($1)`, tenants); err != nil {
+		return fmt.Errorf("clean audit_anchors: %w", err)
 	}
 	if _, err := db.Pool.Exec(ctx, `DELETE FROM catalog_objects WHERE tenant_id = ANY($1)`, tenants); err != nil {
 		return fmt.Errorf("clean catalog_objects: %w", err)
@@ -400,6 +410,11 @@ type securityStack struct {
 	// test's own receivers on 127.0.0.1.
 	hookKeys   *secretbox.Keyring
 	hookPolicy netguard.Policy
+	access     *access.Service
+	// placement guards the dataset service's regulated data, and
+	// protection its replica settings; nil off BYOS.
+	placement  interfaces.PlacementGuard
+	protection interfaces.ProtectionGuard
 }
 
 // datasetConfig is the dataset limits tests run with: the defaults, with
@@ -426,7 +441,8 @@ func (s *securityStack) newDatasetService(t *testing.T, change func(*config.Data
 	svc, err := datasetservice.NewService(datasetservice.Dependencies{
 		Repo: s.datasetDB, Manifests: s.ie.storage, ManifestBucket: s.ie.bucket,
 		Content: s.ie.storage, ContentBucket: s.ie.bucket, Quotas: s.quotas, Audit: s.audit, Log: s.log,
-		Packs: postgres.NewPackRepository(s.db),
+		Packs: postgres.NewPackRepository(s.db), Placement: s.placement, Protection: s.protection,
+		Quality: postgres.NewQualityRepository(s.db),
 	}, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -480,9 +496,10 @@ func openSecurityStack(t *testing.T, settings map[string]string) *securityStack 
 		Quarantine: postgres.NewQuarantineRepository(e.db), Policies: postgres.NewRetentionPolicyRepository(e.db),
 		Holds: postgres.NewLegalHoldRepository(e.db), Deletions: postgres.NewDeletionRepository(e.db),
 		Events: postgres.NewLifecycleEventRepository(e.db), Cursors: postgres.NewCursorRepository(e.db), Storage: ie.storage,
-		Packs: packs, Shared: ie.assets,
+		Packs: packs, Shared: ie.assets, Governance: postgres.NewGovernanceRepository(e.db), Escrow: postgres.NewCopyRepository(e.db),
 	}, assetservice.Config{
-		Owner: "it-lifecycle", QuarantineBucket: ie.bucket, DeliveryBucket: ie.bucket, DeliveryPrefix: "published",
+		Signer: assetservice.Signer{KeyID: "it-1", Key: ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))},
+		Owner:  "it-lifecycle", QuarantineBucket: ie.bucket, DeliveryBucket: ie.bucket, DeliveryPrefix: "published",
 		Platform:  assetservice.PlatformRetention{DefaultQuarantineRetention: time.Hour, QuarantineRetentionFloor: time.Hour},
 		BatchSize: 50, Concurrency: 2, Lease: time.Minute, RecheckInterval: time.Minute, MaxDeletionsPerRun: 50,
 		Retry: retry.Policy{BaseDelay: time.Millisecond, MaxDelay: 5 * time.Millisecond, MaxAttempts: 3},
@@ -515,6 +532,10 @@ func openSecurityStack(t *testing.T, settings map[string]string) *securityStack 
 	s.hookPolicy = netguard.DefaultPolicy()
 	s.hookPolicy.AllowPrivate = true
 	e.identity.EnableSSO(postgres.NewSSORepository(e.db), s.hookKeys, s.hookPolicy)
+	accessRepo := postgres.NewAccessRepository(e.db)
+	e.identity.WithTokens(accessRepo)
+	s.access = access.NewService(accessRepo, e.audit, e.log)
+	deliverer.Govern(s.access)
 	s.api = httptest.NewServer(server.NewRouter(server.Routes{
 		Resolver: middleware.BearerResolver[identity.Identity](e.identity),
 		Identity: e.identity, Quotas: e.quotas, Audit: e.audit,
@@ -525,10 +546,17 @@ func openSecurityStack(t *testing.T, settings map[string]string) *securityStack 
 			return ie.storage.Capabilities(r.Context(), ie.bucket)
 		},
 		Quarantine: processing.NewQuarantine(ie.assets, ie.processingEnv.jobs, postgres.NewQuarantineRepository(e.db),
-			postgres.NewProcessingEventRepository(e.db), e.audit),
+			postgres.NewProcessingEventRepository(e.db), e.audit).WithChecks(postgres.NewContentCheckRepository(e.db)),
 		ProxyEnabled: true, Limiter: e.limiter, Rates: rates, Log: e.log,
 		Operations: e.db.OperationsStatus,
 		Webhooks:   webhook.NewService(postgres.NewWebhookRepository(e.db), s.hookKeys, s.hookPolicy, e.audit),
+		Adoptions: adoption.NewService(adoption.Dependencies{Store: postgres.NewAdoptionRepository(e.db), Net: s.hookPolicy, Audit: e.audit},
+			adoption.Config{}, e.log),
+		Access: s.access,
+		Streaming: streaming.New(streaming.Deps{Datasets: s.datasets, Delivery: deliverer, Store: postgres.NewStreamingRepository(e.db),
+			Packs: packs, Audit: e.audit, Signer: streaming.Signer{KeyID: "it-1", Key: ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))}}),
+		Exports: adoption.Exporter{Versions: postgres.NewDatasetRepository(e.db), Digests: postgres.NewAdoptionRepository(e.db),
+			Assets: ie.assets, Packs: packs, Platform: ie.storage, Bucket: ie.bucket, Audit: e.audit},
 	}))
 	t.Cleanup(s.api.Close)
 	return s

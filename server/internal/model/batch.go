@@ -93,6 +93,22 @@ type Dataset struct {
 	// StorageConnectionID is the storage connection new uploads into the
 	// dataset go to ("" for the organization's default).
 	StorageConnectionID string
+	// DataClass is PHI, PCI or PII when the dataset holds regulated data;
+	// it limits which connections may store it (docs/storage-posture.md).
+	DataClass string
+	// Residency lists where the dataset's data may be stored; with
+	// RequireCustomerKey only connections encrypting every write with a
+	// customer-managed key take it (docs/residency.md).
+	Residency          []string
+	RequireCustomerKey bool
+	// Protection: a replica at a second connection, escrow before
+	// deletion, a locked vault, scrubs, and the clean point
+	// (docs/copy-engine.md).
+	ReplicaConnectionID string
+	Escrow              bool
+	VaultRetentionDays  int
+	ScrubDays           int
+	CleanVersionID      string
 
 	// A branch (docs/datasets.md, "Branches"): its parent dataset, its
 	// name there, the version it was branched from, and the common

@@ -56,6 +56,9 @@ type ObjectVersionResponse struct {
 	Metadata          map[string]string `json:"metadata,omitempty"`
 	PublishedAt       *time.Time        `json:"published_at,omitempty"`
 	CreatedAt         time.Time         `json:"created_at"`
+	// StorageTier and ReadableUntil: docs/tiering.md.
+	StorageTier   string     `json:"storage_tier"`
+	ReadableUntil *time.Time `json:"readable_until,omitempty"`
 }
 
 type VersionPageResponse struct {

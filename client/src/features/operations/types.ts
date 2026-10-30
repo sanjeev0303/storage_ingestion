@@ -1,5 +1,7 @@
 // Mirrors docs/api/identity-admin-audit.md sections 6.1, 7 and 8, and storage connections.
 
+export type Classification = "PUBLIC" | "INTERNAL" | "CONFIDENTIAL" | "RESTRICTED";
+
 export type AssetStatus = "QUARANTINED" | "PROCESSING" | "AVAILABLE" | "REJECTED" | "SOFT_DELETED";
 
 export type Asset = {
@@ -11,6 +13,10 @@ export type Asset = {
   dataset?: string;
   status: AssetStatus;
   rejection_reason?: string;
+  // Set when a re-scan with newer signatures found the published bytes unsafe.
+  blocked_reason?: string;
+  // Set by a member, or raised by content findings (docs/access.md).
+  classification?: Classification;
   deliverable: boolean;
   etag?: string;
   published_at?: string;
@@ -78,6 +84,8 @@ export type ProcessingRecord = {
 export type ReleaseQuarantineResponse = { asset_id: string; job_state: string; stage: string };
 
 export type RetentionScope = "TENANT" | "DATASET" | "ASSET";
+export type HoldScope = RetentionScope | "QUERY";
+export type LockMode = "GOVERNANCE" | "COMPLIANCE";
 
 export type RetentionPolicyRequest = {
   scope: RetentionScope;
@@ -87,6 +95,20 @@ export type RetentionPolicyRequest = {
   deletion_grace?: string;
   quarantine_retention?: string;
   reason: string;
+  lock_mode?: LockMode;
+  retain_from_key?: string;
+  template?: string;
+  confirm_compliance?: boolean;
+  dry_run?: boolean;
+};
+
+export type PolicyImpact = {
+  assets: number;
+  bytes: number;
+  lock_mode: LockMode;
+  loosens: boolean;
+  needs_approval: boolean;
+  notes: string[] | null;
 };
 
 export type RetentionPolicyResponse = {
@@ -95,9 +117,40 @@ export type RetentionPolicyResponse = {
   scope_key: string;
   version: number;
   effective_from: string;
+  lock_mode?: string;
+  impact?: PolicyImpact;
 };
 
-export type LegalHoldRequest = { scope: RetentionScope; scope_key?: string; reason: string };
+// A change that waits for a second member answers 202 with this.
+export type PendingApproval = { status: "PENDING_APPROVAL"; approval_id: string; message: string };
+
+export type RetentionTemplate = {
+  id: string;
+  name: string;
+  citation: string;
+  min_retention: string;
+  retain_from_key?: string;
+  lock_mode: LockMode;
+  note: string;
+};
+
+export type HoldQuery = {
+  dataset?: string;
+  path_prefix?: string;
+  content_type_prefix?: string;
+  metadata?: Record<string, string>;
+  created_after?: string;
+  created_before?: string;
+};
+
+export type LegalHoldRequest = {
+  scope: HoldScope;
+  scope_key?: string;
+  reason: string;
+  query?: HoldQuery;
+  matter?: string;
+  custodians?: string[];
+};
 export type LegalHold = { id: string; scope: string; scope_key: string; placed_at: string };
 
 export type DeadLetterStatus = "OPEN" | "RETRIED" | "REPLAYED" | "RESOLVED" | "DISCARDED";
@@ -142,6 +195,9 @@ export type QuotaReconcileResponse = {
 
 export type PolicyInEffect = {
   id: string;
+  lock_mode?: string;
+  retain_from_key?: string;
+  template?: string;
   scope: RetentionScope;
   scope_key: string;
   version: number;
@@ -157,7 +213,10 @@ export type PolicyInEffect = {
 
 export type HeldHold = {
   id: string;
-  scope: RetentionScope;
+  query?: HoldQuery | null;
+  matter?: string;
+  custodians?: string[];
+  scope: HoldScope;
   scope_key: string;
   reason: string;
   placed_by: string;

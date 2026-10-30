@@ -102,6 +102,9 @@ type Derivation struct {
 	Splits           []string        `json:"splits,omitempty"`
 	Labels           []string        `json:"labels,omitempty"`
 	Transformation   *Transformation `json:"transformation,omitempty"`
+	// Empty: the dataset starts with no members; the sources are only its
+	// lineage (a transformation's output written back).
+	Empty bool `json:"empty,omitempty"`
 }
 
 // Transformation names a process that turned inputs into a dataset. Its
@@ -218,6 +221,11 @@ type DatasetVersion struct {
 	IdempotencyKey   string
 	CreatedBy        string
 	CreatedAt        time.Time
+	ExpiredAt        *time.Time
+	// SupersededBy is the successor an erasure made without some of this
+	// version's members; a superseded version is not read for training.
+	SupersededBy     string
+	SupersededReason string
 }
 
 // ManifestFormatV1 names the canonical manifest a version's hash covers.
@@ -589,6 +597,21 @@ type MemberEvidence struct {
 	VerificationStatus string
 	ChecksumSource     string
 	ScanResult         string
+	// ContentChecks is FULL, PARTIAL or "" (not run on the upload), and
+	// ContentFindings the findings recorded, as "action:code".
+	ContentChecks   string
+	ContentFindings []string
+	// StorageDrift is the kinds of open drift findings on the member's
+	// stored object; ConnectionPosture its connection's worst posture
+	// outcome ("" when never checked). See docs/storage-posture.md.
+	StorageDrift      []string
+	ConnectionPosture string
+	// ConnectionLocation is where the member's connection stores it, as
+	// the provider reported (LocationVerified) or as configured; and
+	// DatasetResidency the locations its dataset allows (docs/residency.md).
+	ConnectionLocation string
+	LocationVerified   bool
+	DatasetResidency   []string
 }
 
 // Count is one value of a distribution.
@@ -614,12 +637,15 @@ type VersionAggregates struct {
 	TotalBytes     int64
 	MinSize        int64
 	MaxSize        int64
-	Splits         []Count
-	Labels         []Count
-	LabelCount     int64
-	Unlabeled      int64
-	ContentTypes   []Count
-	Extensions     []Count
+	MedianSize     int64
+	// PackedMembers counts members served from a pack.
+	PackedMembers int64
+	Splits        []Count
+	Labels        []Count
+	LabelCount    int64
+	Unlabeled     int64
+	ContentTypes  []Count
+	Extensions    []Count
 	// VerifiedChecksums counts members whose recorded checksum processing
 	// verified against the stored bytes; only those take part in
 	// duplicate and leakage groups.

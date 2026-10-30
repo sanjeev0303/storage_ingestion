@@ -15,6 +15,20 @@ type UpdateDatasetRequest struct {
 	// StorageConnectionID sends the dataset's new uploads to a storage
 	// connection; "" returns them to the organization's default.
 	StorageConnectionID *string `json:"storage_connection_id,omitempty"`
+	// DataClass marks regulated data: PHI, PCI or PII; "" clears it.
+	DataClass *string `json:"data_class,omitempty"`
+	// Residency lists where the data may be stored (provider location
+	// codes, "eu-*" for a prefix); RequireCustomerKey refuses connections
+	// without a customer-managed key.
+	Residency          *[]string `json:"residency,omitempty"`
+	RequireCustomerKey *bool     `json:"require_customer_key,omitempty"`
+	// Protection (docs/copy-engine.md): a replica connection ("" removes
+	// it), escrow before deletion, a locked vault's retention in days, and
+	// a scrub of every member each N days.
+	ReplicaConnectionID *string `json:"replica_connection_id,omitempty"`
+	Escrow              *bool   `json:"escrow,omitempty"`
+	VaultRetentionDays  *int    `json:"vault_retention_days,omitempty"`
+	ScrubDays           *int    `json:"scrub_days,omitempty"`
 }
 
 // MemberRequest names a catalog object by ID, or by namespace and path,

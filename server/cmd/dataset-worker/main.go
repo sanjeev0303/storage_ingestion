@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -29,6 +30,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/metrics"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/retry"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/audit"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/copyengine"
 	datasetservice "github.com/sanjeev0303/object-storage-platform/internal/service/dataset"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/events"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/quota"
@@ -112,7 +114,7 @@ func run() error {
 		Repo: postgres.NewDatasetRepository(db), Manifests: storage, ManifestBucket: bucket,
 		Content: storage, ContentBucket: contentBucket, Router: router, Packs: postgres.NewPackRepository(db),
 		Quotas: quota.NewService(postgres.NewQuotaRepository(db), sec.Quotas, auditService, log),
-		Audit:  auditService, Metrics: registry, Log: log,
+		Audit:  auditService, Metrics: registry, Log: log, Quality: postgres.NewQualityRepository(db),
 	}, dc)
 	if err != nil {
 		return fmt.Errorf("create dataset service: %w", err)
@@ -150,11 +152,97 @@ func run() error {
 		log.Info("dataset consumer started", "queue", event.QueueDatasets)
 	}
 
+	// The copy engine: jobs, replicas, scrubs and schedules.
+	massDeletions := 100
+	if v, err := strconv.Atoi(os.Getenv("COPY_MASS_DELETION_ALERT")); err == nil && v >= 0 {
+		massDeletions = v
+	}
+	copies := copyengine.NewService(copyengine.Dependencies{
+		Store: postgres.NewCopyRepository(db), Router: router, Packs: postgres.NewPackRepository(db),
+		Locks: postgres.NewObjectLockRepository(db), Posture: postgres.NewStorageConnectionRepository(db),
+		Alerts: postgres.NewAccessRepository(db), Audit: auditService,
+	}, copyengine.Config{Owner: owner, MassDeletions: massDeletions}, log)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runCopies(ctx, copies, log)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runQuality(ctx, svc, owner, log)
+	}()
+
 	log.Info("dataset worker started", "owner", owner, "poll_interval", dc.PollInterval, "slots", dc.WorkerSlots)
 	datasetworker.Run(ctx, svc, owner, dc.WorkerSlots, dc.PollInterval, log)
 	wg.Wait()
 	log.Info("dataset worker stopped")
 	return nil
+}
+
+// runCopies advances copy jobs, then makes replicas, scrubs and runs the
+// schedules, every 30 seconds until ctx ends.
+func runCopies(ctx context.Context, copies *copyengine.Service, log *slog.Logger) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		for i := 0; i < 20 && ctx.Err() == nil; i++ {
+			found, err := copies.RunOnce(ctx)
+			if err != nil {
+				log.Warn("copy job pass failed", "error", err)
+			}
+			if !found || err != nil {
+				break
+			}
+		}
+		if stats, err := copies.Replicate(ctx); err != nil {
+			log.Warn("replication pass failed", "error", err)
+		} else if stats.Copied+stats.Failed > 0 {
+			log.Info("replicated", "copied", stats.Copied, "failed", stats.Failed, "bytes", stats.Bytes)
+		}
+		if stats, err := copies.Scrub(ctx); err != nil {
+			log.Warn("scrub pass failed", "error", err)
+		} else if stats.Damaged > 0 {
+			log.Warn("scrub found damage", "checked", stats.Checked, "damaged", stats.Damaged, "repaired", stats.Repaired)
+		}
+		if err := copies.RunSchedules(ctx); err != nil {
+			log.Warn("copy schedules failed", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// runQuality profiles queued versions one after another, and compares
+// runs' evaluation inputs with their training inputs, until ctx ends.
+func runQuality(ctx context.Context, svc *datasetservice.Service, owner string, log *slog.Logger) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		for ctx.Err() == nil {
+			found, err := svc.ProfileOnce(ctx, owner)
+			if err != nil {
+				log.Warn("profiling failed", "error", err)
+			}
+			if !found || err != nil {
+				break
+			}
+		}
+		if n, err := svc.CheckRunsOnce(ctx); err != nil {
+			log.Warn("leakage checks failed", "error", err)
+		} else if n > 0 {
+			log.Info("runs checked for leakage", "runs", n)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // datasetConsumer connects to the queue and builds the datasets queue's

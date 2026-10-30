@@ -62,6 +62,20 @@ type Quotas interface {
 }
 
 // Dependencies are the collaborators of the dataset service.
+// ProvenanceGate is the publish gate (docs/evidence.md): with it, a
+// snapshot needs its dataset's lawful basis first, and a run may only read
+// snapshots taken after it.
+type ProvenanceGate interface {
+	BeforeSnapshot(ctx context.Context, tenantID, datasetID string) error
+	BeforeRun(ctx context.Context, tenantID string, versionIDs []string) error
+}
+
+// GateProvenance sets the publish gate.
+func (s *Service) GateProvenance(g ProvenanceGate) *Service {
+	s.gate = g
+	return s
+}
+
 type Dependencies struct {
 	Repo interfaces.DatasetRepository
 	// Manifests and ManifestBucket hold staged manifests.
@@ -78,7 +92,14 @@ type Dependencies struct {
 	Packs interfaces.PackLocator
 	// Quotas, when set, lowers the manifest limits for tenants with
 	// smaller quotas.
-	Quotas  Quotas
+	Quotas Quotas
+	// Placement refuses regulated data on connections not safe for it.
+	Placement interfaces.PlacementGuard
+	// Protection checks replica, vault and escrow settings.
+	Protection interfaces.ProtectionGuard
+	// Quality keeps column profiles, leakage checks and releases; without
+	// it those calls answer that data quality is not configured.
+	Quality QualityStore
 	Audit   interfaces.AuditRecorder
 	Metrics *metrics.Registry
 	Log     *slog.Logger
@@ -91,6 +112,7 @@ type Service struct {
 	content *concurrency.Limiter
 	retry   retry.Policy
 	now     func() time.Time
+	gate    ProvenanceGate
 }
 
 func NewService(deps Dependencies, cfg config.Datasets) (*Service, error) {
@@ -165,6 +187,8 @@ type CreateInput struct {
 	Splits           []string
 	Labels           []string
 	Transformation   *TransformationInput
+	// Empty records the sources as lineage without copying their members.
+	Empty bool
 }
 
 // TransformationInput names the process that made a derived dataset. Its
@@ -249,7 +273,7 @@ func (s *Service) derivation(ctx context.Context, p model.Principal, in CreateIn
 			return nil, fmt.Errorf("%w: split %q is not train, validation or test", ErrInvalidRequest, split)
 		}
 	}
-	d := &model.Derivation{SourceVersionIDs: in.SourceVersionIDs, Splits: in.Splits, Labels: in.Labels}
+	d := &model.Derivation{SourceVersionIDs: in.SourceVersionIDs, Splits: in.Splits, Labels: in.Labels, Empty: in.Empty}
 	if t := in.Transformation; t != nil {
 		if t.Name == "" || len(t.Name) > 128 || len(t.Version) > 64 || hasControl(t.Name+t.Version) {
 			return nil, fmt.Errorf("%w: a transformation needs a name (1-128 characters) and a version of at most 64", ErrInvalidRequest)
@@ -337,6 +361,20 @@ type UpdateInput struct {
 	// StorageConnectionID sends the dataset's new uploads to a storage
 	// connection ("" returns them to the default). Needs storage.use.
 	StorageConnectionID *string
+	// DataClass marks regulated data: PHI, PCI or PII ("" clears it).
+	// Needs datasets.manage.
+	DataClass *string
+	// Residency replaces where the dataset's data may be stored, and
+	// RequireCustomerKey whether a customer-managed key is required. Both
+	// need datasets.manage (docs/residency.md).
+	Residency          *[]string
+	RequireCustomerKey *bool
+	// Protection (docs/copy-engine.md); all need datasets.manage, and a
+	// replica connection storage.use.
+	ReplicaConnectionID *string
+	Escrow              *bool
+	VaultRetentionDays  *int
+	ScrubDays           *int
 }
 
 // Update changes a dataset if it is still at revision.
@@ -356,8 +394,94 @@ func (s *Service) Update(ctx context.Context, p model.Principal, datasetID strin
 			return model.Dataset{}, err
 		}
 	}
+	if in.DataClass != nil {
+		if err := s.authorize(ctx, p, model.PermDatasetsManage, "dataset.update", "dataset", datasetID); err != nil {
+			return model.Dataset{}, err
+		}
+		class := strings.ToUpper(strings.TrimSpace(*in.DataClass))
+		if !model.ValidDataClass(class) {
+			return model.Dataset{}, fmt.Errorf("%w: data_class is PHI, PCI, PII or empty", ErrInvalidRequest)
+		}
+		in.DataClass = &class
+	}
+	if in.Residency != nil || in.RequireCustomerKey != nil {
+		if err := s.authorize(ctx, p, model.PermDatasetsManage, "dataset.update", "dataset", datasetID); err != nil {
+			return model.Dataset{}, err
+		}
+	}
+	if in.Residency != nil {
+		locations, ok := model.NormalizeLocations(*in.Residency)
+		if !ok {
+			return model.Dataset{}, fmt.Errorf("%w: residency lists at most 20 locations such as ap-south-1, asia-south1 or eu-*", ErrInvalidRequest)
+		}
+		in.Residency = &locations
+	}
+	// The data stays on connections its rules allow, whichever changes:
+	// the rules or the connection.
+	if (in.DataClass != nil || in.StorageConnectionID != nil || in.Residency != nil || in.RequireCustomerKey != nil) && s.deps.Placement != nil {
+		rules := model.PlacementRules{DataClass: current.DataClass, Residency: current.Residency, RequireCustomerKey: current.RequireCustomerKey}
+		if in.DataClass != nil {
+			rules.DataClass = *in.DataClass
+		}
+		if in.Residency != nil {
+			rules.Residency = *in.Residency
+		}
+		if in.RequireCustomerKey != nil {
+			rules.RequireCustomerKey = *in.RequireCustomerKey
+		}
+		connection := current.StorageConnectionID
+		if in.StorageConnectionID != nil {
+			connection = *in.StorageConnectionID
+		}
+		if err := s.deps.Placement.CheckPlacement(ctx, p, rules, connection); err != nil {
+			return model.Dataset{}, err
+		}
+	}
+	if in.ReplicaConnectionID != nil || in.Escrow != nil || in.VaultRetentionDays != nil || in.ScrubDays != nil {
+		if err := s.authorize(ctx, p, model.PermDatasetsManage, "dataset.update", "dataset", datasetID); err != nil {
+			return model.Dataset{}, err
+		}
+		if in.ReplicaConnectionID != nil && *in.ReplicaConnectionID != "" {
+			if err := s.authorize(ctx, p, model.PermStorageUse, "dataset.update", "dataset", datasetID); err != nil {
+				return model.Dataset{}, err
+			}
+		}
+		prot := model.Protection{ReplicaConnectionID: current.ReplicaConnectionID, Escrow: current.Escrow,
+			VaultRetentionDays: current.VaultRetentionDays, ScrubDays: current.ScrubDays}
+		if in.ReplicaConnectionID != nil {
+			prot.ReplicaConnectionID = *in.ReplicaConnectionID
+		}
+		if in.Escrow != nil {
+			prot.Escrow = *in.Escrow
+		}
+		if in.VaultRetentionDays != nil {
+			prot.VaultRetentionDays = *in.VaultRetentionDays
+		}
+		if in.ScrubDays != nil {
+			prot.ScrubDays = *in.ScrubDays
+		}
+		if prot.VaultRetentionDays < 0 || prot.VaultRetentionDays > 36500 || prot.ScrubDays < 0 || prot.ScrubDays > 3650 {
+			return model.Dataset{}, fmt.Errorf("%w: vault_retention_days is 0 to 36500 and scrub_days 0 to 3650", ErrInvalidRequest)
+		}
+		// A vault's retention can only grow: shortening it would weaken
+		// copies already locked.
+		if in.VaultRetentionDays != nil && current.VaultRetentionDays > 0 && *in.VaultRetentionDays < current.VaultRetentionDays {
+			return model.Dataset{}, fmt.Errorf("%w: a locked vault's retention cannot be shortened", ErrInvalidRequest)
+		}
+		connection := current.StorageConnectionID
+		if in.StorageConnectionID != nil {
+			connection = *in.StorageConnectionID
+		}
+		if s.deps.Protection != nil {
+			if err := s.deps.Protection.CheckProtection(ctx, p, prot, connection); err != nil {
+				return model.Dataset{}, err
+			}
+		}
+	}
 	patch := interfaces.DatasetPatch{Description: in.Description, Tags: in.Tags, ProfileID: in.ProfileID, ProfileVersion: in.ProfileVersion,
-		StorageConnectionID: in.StorageConnectionID}
+		StorageConnectionID: in.StorageConnectionID, DataClass: in.DataClass, Residency: in.Residency,
+		RequireCustomerKey: in.RequireCustomerKey, ReplicaConnectionID: in.ReplicaConnectionID, Escrow: in.Escrow,
+		VaultRetentionDays: in.VaultRetentionDays, ScrubDays: in.ScrubDays}
 	description, tags := current.Description, current.Tags
 	if in.Description != nil {
 		description = *in.Description
@@ -704,6 +828,11 @@ func (s *Service) Snapshot(ctx context.Context, p model.Principal, datasetID, id
 	}
 	if len(idempotencyKey) > 128 || hasControl(idempotencyKey) {
 		return model.DatasetVersion{}, false, fmt.Errorf("%w: the idempotency key is at most 128 characters", ErrInvalidRequest)
+	}
+	if s.gate != nil {
+		if err := s.gate.BeforeSnapshot(ctx, p.TenantID, datasetID); err != nil {
+			return model.DatasetVersion{}, false, err
+		}
 	}
 	started := time.Now()
 	v, created, err := s.deps.Repo.CreateSnapshot(ctx, interfaces.SnapshotInput{

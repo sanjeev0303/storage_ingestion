@@ -12,6 +12,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/retry"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/events"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/identity"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/processing"
 )
 
 // problem is the error body of the security endpoints: a message for
@@ -32,8 +33,18 @@ type problem struct {
 // errors with no client meaning (a 500).
 func securityStatus(err error) (int, string, bool) {
 	switch {
+	case errors.Is(err, model.ErrPlacementRefused):
+		return nethttp.StatusConflict, "placement_refused", true
+	case errors.Is(err, model.ErrVaultRequirements):
+		return nethttp.StatusConflict, "vault_requirements", true
+	case errors.Is(err, model.ErrEscrowRequired):
+		return nethttp.StatusConflict, "escrow_required", true
 	case errors.Is(err, model.ErrInvalidCredentials):
 		return nethttp.StatusUnauthorized, "invalid_credentials", true
+	case errors.Is(err, processing.ErrInvalidContentPolicy):
+		return nethttp.StatusBadRequest, "invalid_content_policy", true
+	case errors.Is(err, processing.ErrChecksNotConfigured):
+		return nethttp.StatusNotImplemented, "content_checks_not_configured", true
 	case errors.Is(err, model.ErrRefreshReplayed):
 		return nethttp.StatusUnauthorized, "refresh_reused", true
 	case errors.Is(err, model.ErrSessionInvalid), errors.Is(err, model.ErrUnauthenticated):
@@ -158,5 +169,5 @@ func writeQuotaError(w nethttp.ResponseWriter, e *model.QuotaError) {
 func storageConnectionError(err error) bool {
 	return errors.Is(err, model.ErrConnectionNotFound) || errors.Is(err, model.ErrConnectionNotActive) ||
 		errors.Is(err, model.ErrUnsupportedProvider) || errors.Is(err, model.ErrStorageNotConfigured) ||
-		errors.Is(err, model.ErrCredentialMissing)
+		errors.Is(err, model.ErrCredentialMissing) || errors.Is(err, model.ErrPlacementRefused)
 }

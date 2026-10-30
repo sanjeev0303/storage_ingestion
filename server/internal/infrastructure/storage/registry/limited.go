@@ -248,13 +248,56 @@ func (l *limited) ObjectLockEnabled(ctx context.Context, bucket string) (bool, e
 	return call(l, ctx, "object_lock", func(ctx context.Context) (bool, error) { return locker.ObjectLockEnabled(ctx, bucket) })
 }
 
-func (l *limited) LockObjectVersion(ctx context.Context, bucket, key, versionID string, until time.Time, legalHold bool) error {
+func (l *limited) LockObjectVersion(ctx context.Context, bucket, key, versionID string, lock interfaces.VersionLock) error {
 	locker, ok := l.inner.(interfaces.ObjectLocker)
 	if !ok {
 		return model.ErrUnsupportedProvider
 	}
 	_, err := call(l, ctx, "object_lock", func(ctx context.Context) (struct{}, error) {
-		return struct{}{}, locker.LockObjectVersion(ctx, bucket, key, versionID, until, legalHold)
+		return struct{}{}, locker.LockObjectVersion(ctx, bucket, key, versionID, lock)
+	})
+	return err
+}
+
+func (l *limited) ObjectLockStatus(ctx context.Context, bucket, key, versionID string) (interfaces.VersionLock, error) {
+	locker, ok := l.inner.(interfaces.ObjectLocker)
+	if !ok {
+		return interfaces.VersionLock{}, model.ErrUnsupportedProvider
+	}
+	return call(l, ctx, "object_lock", func(ctx context.Context) (interfaces.VersionLock, error) {
+		return locker.ObjectLockStatus(ctx, bucket, key, versionID)
+	})
+}
+
+// Tiering goes through to providers that have it (docs/tiering.md).
+
+func (l *limited) SetTier(ctx context.Context, bucket, key, etag string, size int64, tier model.StorageTier) (interfaces.ObjectMetadata, error) {
+	t, ok := l.inner.(interfaces.TierStorage)
+	if !ok {
+		return interfaces.ObjectMetadata{}, model.ErrTierUnsupported
+	}
+	return call(l, ctx, "set_tier", func(ctx context.Context) (interfaces.ObjectMetadata, error) {
+		return t.SetTier(ctx, bucket, key, etag, size, tier)
+	})
+}
+
+func (l *limited) TierState(ctx context.Context, bucket, key, versionID string) (interfaces.TierState, error) {
+	t, ok := l.inner.(interfaces.TierStorage)
+	if !ok {
+		return interfaces.TierState{}, model.ErrTierUnsupported
+	}
+	return call(l, ctx, "tier_state", func(ctx context.Context) (interfaces.TierState, error) {
+		return t.TierState(ctx, bucket, key, versionID)
+	})
+}
+
+func (l *limited) Restore(ctx context.Context, bucket, key, versionID string, days int, speed model.RestoreSpeed) error {
+	t, ok := l.inner.(interfaces.TierStorage)
+	if !ok {
+		return model.ErrTierUnsupported
+	}
+	_, err := call(l, ctx, "restore", func(ctx context.Context) (struct{}, error) {
+		return struct{}{}, t.Restore(ctx, bucket, key, versionID, days, speed)
 	})
 	return err
 }

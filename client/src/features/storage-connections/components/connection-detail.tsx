@@ -26,6 +26,7 @@ import { AUTH_LABELS, PROVIDER_LABELS } from "../schema";
 import type { StorageConnection, TestResponse } from "../types";
 import { CAPABILITY_ROWS } from "./capability-rows";
 import { EditDialog, RotateDialog } from "./connection-dialogs";
+import { DriftPanel, IntegritySettings, PosturePanel, SecondCredential } from "./health-panels";
 import { CATEGORY_MESSAGES, TestResult } from "./test-result";
 
 export function describeInUse(error: ApiError) {
@@ -228,6 +229,9 @@ function Loaded({ connection }: { connection: StorageConnection }) {
               </div>
             )}
           </Panel>
+
+          {!isPlatform && connection.status !== "PENDING" && <PosturePanel connection={connection} />}
+          {!isPlatform && connection.status !== "PENDING" && <DriftPanel connection={connection} />}
         </div>
 
         <aside className="flex min-w-0 flex-col gap-6">
@@ -250,6 +254,8 @@ function Loaded({ connection }: { connection: StorageConnection }) {
             />
             <p className="mt-3 text-sm text-muted">Secrets are never shown after they are saved.</p>
           </Panel>
+          {canRotate && <SecondCredential connection={connection} />}
+          {manage && !isPlatform && <IntegritySettings key={connection.revision} connection={connection} />}
           <Panel title="Revision" tone="in">
             <p className="mono-data" aria-label={`Revision ${connection.revision}`}>
               {connection.revision}

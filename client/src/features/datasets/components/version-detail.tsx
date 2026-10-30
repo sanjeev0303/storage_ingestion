@@ -12,10 +12,16 @@ import { Time } from "@/components/ui/time";
 import { formatBytes, formatNumber } from "@/lib/utils/format";
 import { validationLabels, validationTone } from "../helpers";
 import { useVersion, useVersionMembers } from "../hooks";
+import { IntegrityNotice } from "./integrity-notice";
+import { ResidencyPanel } from "./residency-panel";
 import type { VersionMember } from "../types";
 import { ImmutableBadge } from "./draft-notice";
 import { SqlPanel } from "./sql-panel";
 import { StorageAuditButton } from "./storage-audit-button";
+import { ReadForTraining } from "@/features/streaming/components/read-for-training";
+import { VersionCosts } from "@/features/tiering/components/version-costs";
+import { VersionEvidence } from "@/features/evidence/components/version-evidence";
+import { VersionQuality } from "@/features/quality/components/version-quality";
 import { TrainingRuns } from "./training-runs";
 import { VersionDiff } from "./version-diff";
 
@@ -45,6 +51,15 @@ export function VersionDetail({ id, versionId }: { id: string; versionId: string
               All versions
             </Link>
           </p>
+          {v.superseded_by && (
+            <p role="status" className="neo-in-sm mt-3 max-w-prose p-3 text-base">
+              Superseded by an erasure: training reads its{" "}
+              <Link href={`${base}/versions/${v.superseded_by}`} className="underline underline-offset-2">
+                successor
+              </Link>{" "}
+              instead. Erased members show as erased below.
+            </p>
+          )}
         </div>
         <div className="flex flex-wrap gap-2">
           <ButtonLink href={`${base}/validation?version=${v.id}`} variant="primary">
@@ -54,6 +69,9 @@ export function VersionDetail({ id, versionId }: { id: string; versionId: string
           <ButtonLink href={`${base}/lineage?version=${v.id}`}>Lineage</ButtonLink>
         </div>
       </header>
+
+      <IntegrityNotice id={id} versionId={v.id} />
+      <ResidencyPanel id={id} versionId={v.id} />
 
       <Panel title="Version facts">
         <DefList
@@ -148,6 +166,10 @@ export function VersionDetail({ id, versionId }: { id: string; versionId: string
 
       <SqlPanel datasetId={id} versionId={v.id} />
 
+      <ReadForTraining id={id} versionId={v.id} />
+      <VersionCosts id={id} versionId={v.id} />
+      <VersionEvidence id={id} versionId={v.id} version={v.version} />
+      <VersionQuality id={id} versionId={v.id} />
       <TrainingRuns datasetId={id} versionId={v.id} />
 
       <Panel

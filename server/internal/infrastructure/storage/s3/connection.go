@@ -59,6 +59,9 @@ type ConnectionConfig struct {
 	// compatible services that do not support them get them only when an
 	// operation requires one.
 	StrictChecksums bool
+	// ExpectedOwner, when set, is sent as the bucket owner on every request
+	// but presigned ones.
+	ExpectedOwner string
 }
 
 // NewConnectionClient builds the S3 client of one connection.
@@ -100,6 +103,9 @@ func NewConnectionClient(ctx context.Context, cfg ConnectionConfig) (*s3.Client,
 			o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
 			o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
 		}
+		if cfg.ExpectedOwner != "" {
+			o.APIOptions = append(o.APIOptions, expectedOwner(cfg.ExpectedOwner))
+		}
 	}), nil
 }
 
@@ -133,10 +139,14 @@ func (s *ObjectStorage) WriteObject(ctx context.Context, bucket, objectKey strin
 		if _, err := io.ReadFull(body, buf); err != nil {
 			return interfaces.ObjectMetadata{}, fmt.Errorf("read source: %w", err)
 		}
-		_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+		input := &s3.PutObjectInput{
 			Bucket: aws.String(bucket), Key: aws.String(objectKey), Body: bytes.NewReader(buf),
 			ContentLength: aws.Int64(size), ContentType: aws.String(contentType),
-		})
+		}
+		if s.kmsKey != "" {
+			input.ServerSideEncryption, input.SSEKMSKeyId = types.ServerSideEncryptionAwsKms, aws.String(s.kmsKey)
+		}
+		_, err := s.client.PutObject(ctx, input)
 		if err != nil {
 			return interfaces.ObjectMetadata{}, classify("put object", err)
 		}

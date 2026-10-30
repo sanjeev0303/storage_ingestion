@@ -62,7 +62,7 @@ type Service struct {
 	// costs a rescan and nothing else.
 	mu            sync.Mutex
 	tenantCursor  string
-	assetCursors  map[string]string
+	assetCursors  map[string]interfaces.PackCursor
 	objectCursors map[string]string
 }
 
@@ -77,7 +77,7 @@ func NewService(deps Dependencies, cfg Config) (*Service, error) {
 		return nil, err
 	}
 	return &Service{deps: deps, cfg: cfg, now: func() time.Time { return time.Now().UTC() },
-		assetCursors: map[string]string{}, objectCursors: map[string]string{}}, nil
+		assetCursors: map[string]interfaces.PackCursor{}, objectCursors: map[string]string{}}, nil
 }
 
 // CycleStats is what one cycle did.
@@ -90,6 +90,7 @@ type CycleStats struct {
 	SourcesRetired  int
 	PacksRetired    int
 	Rewrites        int
+	Repacked        int
 	PacksRemoved    int
 	OrphansReported int
 }
@@ -100,6 +101,9 @@ func (s *Service) RunOnce(ctx context.Context) (CycleStats, error) {
 	var stats CycleStats
 	var errs []error
 	errs = append(errs, s.Plan(ctx, &stats))
+	if ctx.Err() == nil {
+		errs = append(errs, s.Repack(ctx, &stats))
+	}
 	if ctx.Err() == nil {
 		errs = append(errs, s.BuildDue(ctx, &stats))
 	}
@@ -188,11 +192,12 @@ func (s *Service) nextTenants(ctx context.Context) ([]string, error) {
 }
 
 // planTenant reserves one pack's worth of the tenant's eligible assets on
-// one connection: the first connection in the batch, in asset order, that
-// fills a pack. A pack is planned when it reaches its target size or entry
-// count, or when the tenant's candidates run out and at least two remain
-// to pack together. A connection that cannot be packed is passed over, so
-// it never holds up the tenant's others.
+// one connection: the first connection in the batch, in path order, that
+// fills a pack. A pack is planned when it reaches its target size (the
+// organization's own, if it set one) or entry count, or when the tenant's
+// candidates run out and at least two remain to pack together. A full
+// pack ends between samples, never inside one. A connection that cannot
+// be packed is passed over, so it never holds up the tenant's others.
 func (s *Service) planTenant(ctx context.Context, tenantID string) (bool, error) {
 	building, err := s.deps.Packs.BuildingPacks(ctx, tenantID)
 	if err != nil || building >= s.cfg.TenantActivePacks {
@@ -208,9 +213,9 @@ func (s *Service) planTenant(ctx context.Context, tenantID string) (bool, error)
 		return false, err
 	}
 	exhausted := len(batch) < s.cfg.MaxEntries
-	next := ""
+	next := interfaces.PackCursor{}
 	if !exhausted {
-		next = batch[len(batch)-1].ID
+		next = cursorOf(batch[len(batch)-1])
 	}
 	defer func() {
 		s.mu.Lock()
@@ -220,6 +225,7 @@ func (s *Service) planTenant(ctx context.Context, tenantID string) (bool, error)
 	if len(batch) == 0 {
 		return false, nil
 	}
+	target := s.targetFor(ctx, tenantID)
 
 	tried := map[string]bool{}
 	var errs []error
@@ -239,26 +245,37 @@ func (s *Service) planTenant(ctx context.Context, tenantID string) (bool, error)
 			continue
 		}
 
-		var chosen []model.Asset
+		var chosen []interfaces.PackCandidate
 		var total int64
 		full := false
+		nextSample := ""
 		for _, a := range batch {
 			if a.StorageConnectionID != connectionID || a.ObjectKey != loc.ReadyPrefix+"/"+a.TenantID+"/"+a.ID {
 				continue // another connection's, or not at its published key
 			}
-			if total+a.SizeBytes > s.cfg.TargetPackBytes || len(chosen) == s.cfg.MaxEntries {
+			if total+a.SizeBytes > target || len(chosen) == s.cfg.MaxEntries {
 				full = true
+				nextSample = sampleKey(a.Namespace, a.PathKey)
 				break
 			}
 			chosen = append(chosen, a)
 			total += a.SizeBytes
 		}
-		full = full || total >= s.cfg.TargetPackBytes || len(chosen) == s.cfg.MaxEntries
+		full = full || total >= target || len(chosen) == s.cfg.MaxEntries
+		if full && nextSample == "" && !exhausted && len(chosen) > 0 {
+			// The batch ended at the pack's end: the next batch may carry
+			// on the last sample.
+			last := chosen[len(chosen)-1]
+			nextSample = sampleKey(last.Namespace, last.PathKey)
+		}
+		if full {
+			chosen = endBeforeSample(chosen, nextSample)
+		}
 		if len(chosen) < 2 || (!full && !exhausted) {
 			continue
 		}
 		if full && !exhausted {
-			next = chosen[len(chosen)-1].ID // the rest of the batch comes next time
+			next = cursorOf(chosen[len(chosen)-1]) // the rest of the batch comes next time
 		}
 		s.deps.Metrics.Add("packing_candidates_selected", int64(len(chosen)))
 		return true, s.createPackFrom(ctx, tenantID, loc, "", len(chosen), func(i int) model.PackEntry {
@@ -268,6 +285,49 @@ func (s *Service) planTenant(ctx context.Context, tenantID string) (bool, error)
 		})
 	}
 	return false, errors.Join(errs...)
+}
+
+// targetFor is the pack size to fill for the tenant: its own, if it set
+// one, within the platform's largest pack.
+func (s *Service) targetFor(ctx context.Context, tenantID string) int64 {
+	n, err := s.deps.Packs.TargetPackBytes(ctx, tenantID)
+	if err != nil || n <= 0 {
+		return s.cfg.TargetPackBytes
+	}
+	return min(n, s.cfg.MaxPackBytes)
+}
+
+func cursorOf(c interfaces.PackCandidate) interfaces.PackCursor {
+	return interfaces.PackCursor{Namespace: c.Namespace, PathKey: c.PathKey, AssetID: c.ID}
+}
+
+// sampleKey names the sample a file belongs to, as WebDataset does: its
+// path up to the first dot of its name, so "a/0001.jpg" and "a/0001.json"
+// are one sample.
+func sampleKey(namespace, path string) string {
+	dir, name := "", path
+	if i := strings.LastIndex(path, "/"); i >= 0 {
+		dir, name = path[:i+1], path[i+1:]
+	}
+	if j := strings.Index(name, "."); j > 0 {
+		name = name[:j]
+	}
+	return namespace + "\x00" + dir + name
+}
+
+// endBeforeSample drops the trailing files of the sample that carries on
+// past the pack, so it is packed whole next time. A pack that would be
+// left with fewer than two files keeps them all: that sample is bigger
+// than a pack.
+func endBeforeSample(chosen []interfaces.PackCandidate, sample string) []interfaces.PackCandidate {
+	end := len(chosen)
+	for end > 0 && sampleKey(chosen[end-1].Namespace, chosen[end-1].PathKey) == sample {
+		end--
+	}
+	if end < 2 {
+		return chosen
+	}
+	return chosen[:end]
 }
 
 // createPackFrom reserves n entries for a new pack in one transaction, with

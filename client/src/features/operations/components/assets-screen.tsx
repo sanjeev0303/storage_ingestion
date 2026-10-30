@@ -12,7 +12,10 @@ import { StateBadge } from "@/components/ui/status";
 import { SubmitButton } from "@/components/ui/submit-button";
 import { Time } from "@/components/ui/time";
 import { useSession } from "@/lib/auth/session";
+import { ClassificationPanel, CLASS_TEXT } from "@/features/access/components/classification";
+import { BlastRadiusPanel, ContentFindingsPanel } from "@/features/content-checks/components/findings-panel";
 import { formatBytes } from "@/lib/utils/format";
+import { isPending } from "../api";
 import { isNotFound, useAsset, useAssetActions, useLifecycle, useProcessing } from "../hooks";
 import type { Deletion, ProcessingRecord } from "../types";
 
@@ -119,8 +122,10 @@ function AssetDetail({ id }: { id: string }) {
                 ),
               },
               { label: "Deliverable", value: a.deliverable ? "Yes, downloads are served" : "No, downloads are refused" },
+              ...(a.blocked_reason ? [{ label: "Blocked", value: "A re-scan found it unsafe after publication" }] : []),
               { label: "Size", value: formatBytes(a.size_bytes) },
               { label: "Dataset", value: a.dataset ?? "None" },
+              { label: "Classification", value: a.classification ? CLASS_TEXT[a.classification] : "Not classified" },
               {
                 label: "SHA-256",
                 value: a.checksum_sha256 ? <span className="mono-data">{a.checksum_sha256}</span> : "Not recorded",
@@ -173,6 +178,8 @@ function AssetDetail({ id }: { id: string }) {
           )}
         </Panel>
 
+        <ContentFindingsPanel assetId={a.id} blockedReason={a.blocked_reason} />
+
         <ProcessingPanel
           allowed={canReadQuarantine}
           isPending={processing.isPending && canReadQuarantine}
@@ -180,6 +187,8 @@ function AssetDetail({ id }: { id: string }) {
           data={processing.data}
           onRetry={() => processing.refetch()}
         />
+
+        <BlastRadiusPanel assetId={a.id} />
       </div>
 
       <div className="flex min-w-0 flex-col gap-6">
@@ -216,7 +225,12 @@ function AssetDetail({ id }: { id: string }) {
             )}
           </div>
 
-          {actions.remove.data && (
+          {actions.remove.data && isPending(actions.remove.data) && (
+            <ActionResult title="Deletion sent for approval">
+              <span>A second member approves it under Operations, Governance.</span>
+            </ActionResult>
+          )}
+          {actions.remove.data && !isPending(actions.remove.data) && (
             <ActionResult title={actions.remove.data.created ? "Deletion scheduled" : "Already scheduled for deletion"}>
               <DeletionSummary deletion={actions.remove.data.deletion} />
             </ActionResult>
@@ -233,6 +247,8 @@ function AssetDetail({ id }: { id: string }) {
             </ActionResult>
           )}
         </Panel>
+
+        <ClassificationPanel key={a.classification ?? ""} assetId={a.id} current={a.classification} />
       </div>
 
       <ConfirmDialog

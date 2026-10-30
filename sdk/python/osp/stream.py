@@ -6,12 +6,25 @@ members whose bytes were erased left out. It shares them out between
 workers and machines, and reads each file only after checking its bytes
 against the SHA-256 the snapshot pinned.
 
-Three ways to read, by kind:
+Four ways to read, by kind:
   "files"   - one sample per member: its bytes, path, label, split, metadata;
+  "samples" - the files of one sample together (WebDataset style): every
+              group of members sharing a path before the first dot of the
+              name, keyed by the rest ("0001.jpg" and "0001.cls" give one
+              sample with keys "jpg" and "cls");
   "tar"     - WebDataset shards: each member is a tar file, and every group
               of entries sharing a name before the first dot is one sample;
   "records" - tabular members (CSV, TSV, JSON Lines, Parquet): one sample per
               row.
+
+"files" and "samples" are read through shard streams (osp.shards) unless
+read="files" or a cache_dir is given: a shard is a run of files in path
+order served as one response, so small files cost one request per shard,
+not one each. Shards are shared out between workers; with shuffle_seed the
+shard order is shuffled and a buffer of samples within them. verify sets
+the share of files re-hashed as they are read (1.0, every file, by
+default); with on_corrupt="skip" a file that fails is left out and kept in
+stream.verifier, which report() records on a training run.
 
 A file larger than memory is never held whole: it is streamed to local
 disk in 1 MiB blocks while it is hashed, checked, and only then read. With
@@ -28,26 +41,37 @@ import shutil
 import tarfile
 import tempfile
 
-from . import snapshots
+from . import shards, snapshots
 
 BLOCK = 1024 * 1024
-KINDS = ("files", "tar", "records")
+KINDS = ("files", "samples", "tar", "records")
 
 
 class SnapshotStream:
-    def __init__(self, client, dataset_id, version_id, split=None, cache_dir=None, shuffle_seed=None):
+    def __init__(self, client, dataset_id, version_id, split=None, cache_dir=None, shuffle_seed=None,
+                 read="auto", shard_bytes=None, prefetch=2, shuffle_buffer=256, verify=1.0, on_corrupt="raise"):
+        if read not in ("auto", "shards", "files"):
+            raise ValueError('read is "auto", "shards" or "files"')
+        if on_corrupt not in ("raise", "skip"):
+            raise ValueError('on_corrupt is "raise" or "skip"')
         self.client = client
         # Kept so a training run can name the version it read (osp.runs).
         self.dataset_id, self.version_id = dataset_id, version_id
         self.cache_dir = cache_dir
         self.shuffle_seed = shuffle_seed
         self.epoch = 0
+        # A cache is kept per file, so with one files are read one by one.
+        self.read_mode = read if read != "auto" else ("files" if cache_dir else "shards")
+        self.shard_bytes, self.prefetch, self.shuffle_buffer = shard_bytes, prefetch, shuffle_buffer
+        self.verifier = shards.Verifier(verify, strict=on_corrupt == "raise")
+        self._plan = None
         chosen = [m for m in snapshots.members(client, dataset_id, version_id)
                   if split is None or m.get("split") == split]
         # Members whose bytes were erased (a deletion request) are left out;
         # erased says how many, so a training run can record it.
         self.members = [m for m in chosen if m.get("availability", "AVAILABLE") == "AVAILABLE"]
         self.erased = len(chosen) - len(self.members)
+        self.by_ordinal = {m["ordinal"]: m for m in self.members if "ordinal" in m}
 
     def __len__(self):
         return len(self.members)
@@ -65,13 +89,57 @@ class SnapshotStream:
             random.Random(self.shuffle_seed + self.epoch).shuffle(order)
         return [self.members[i] for i in order[shard::shards]]
 
+    def shard_plan(self):
+        """The snapshot's shards (osp.shards.plan), each holding only this
+        stream's members (its split, nothing erased)."""
+        if self._plan is None:
+            self._plan = []
+            for s in shards.plan(self.client, self.dataset_id, self.version_id, self.shard_bytes):
+                ordinals = [o for o in s["ordinals"] if o in self.by_ordinal]
+                if ordinals:
+                    self._plan.append(dict(s, ordinals=ordinals))
+        return self._plan
+
+    def share_shards(self, shard=0, shards=1):
+        """This worker's shards: the same shuffle everywhere, then every
+        shards-th one from shard."""
+        plan = self.shard_plan()
+        order = list(range(len(plan)))
+        if self.shuffle_seed is not None:
+            random.Random(self.shuffle_seed + self.epoch).shuffle(order)
+        return [plan[i] for i in order[shard::shards]]
+
     def samples(self, kind="files", shard=0, shards=1, transform=None):
         """Yields this worker's samples, transform(sample) when given."""
         if kind not in KINDS:
             raise ValueError(f"kind must be one of {KINDS}")
-        for member in self.share(shard, shards):
-            for sample in self.samples_of(member, kind):
-                yield transform(sample) if transform else sample
+        if kind == "samples" or (kind == "files" and self.read_mode == "shards"):
+            source = self.shard_samples(kind, self.share_shards(shard, shards), shard)
+        else:
+            source = (s for member in self.share(shard, shards) for s in self.samples_of(member, kind))
+        for sample in source:
+            yield transform(sample) if transform else sample
+
+    def shard_samples(self, kind, mine, worker=0):
+        """Samples of the given shards, read a shard at a time."""
+        files = shards.read_shards(self.client, self.dataset_id, self.version_id, mine, self.by_ordinal,
+                                   self.verifier, self.prefetch)
+        out = (self._file(path, data, ordinal) for path, data, ordinal in files)
+        if kind == "samples":
+            out = group_samples(out)
+        if self.shuffle_seed is not None and self.shuffle_buffer > 1:
+            out = shards.shuffled(out, self.shuffle_buffer, random.Random((self.shuffle_seed + self.epoch) * 1000 + worker))
+        return out
+
+    def _file(self, path, data, ordinal):
+        member = self.by_ordinal.get(ordinal, {})
+        return {"data": data, "path": path, "label": member.get("label", ""), "split": member.get("split", ""),
+                "metadata": member.get("metadata") or {}}
+
+    def report(self, run_id, host=None):
+        """Records on a training run what this stream re-hashed and what
+        failed, with the host that read it."""
+        return self.verifier.report(self.client, run_id, self.version_id, host)
 
     def samples_of(self, member, kind):
         if kind == "files":
@@ -154,6 +222,26 @@ def sha256_of(path):
             if not block:
                 return h.hexdigest()
             h.update(block)
+
+
+def group_samples(files):
+    """Groups files, in path order, into WebDataset samples: files sharing
+    a path before the first dot of the name are one sample, keyed by the
+    rest of the name."""
+    current, sample = None, None
+    for f in files:
+        folder, _, name = f["path"].rpartition("/")
+        stem, _, ext = name.partition(".")
+        key = f"{folder}/{stem}" if folder else stem
+        if key != current and sample:
+            yield sample
+            sample = None
+        current = key
+        if sample is None:
+            sample = {"__key__": key, "label": f["label"], "split": f["split"]}
+        sample[ext or "data"] = f["data"]
+    if sample:
+        yield sample
 
 
 def tar_samples(path, member):

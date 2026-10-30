@@ -4,6 +4,8 @@ import type {
   CapabilityMatrix,
   ConnectionList,
   CreateConnectionRequest,
+  DriftFinding,
+  PostureReport,
   ProviderCatalog,
   StorageConnection,
   StorageCredentials,
@@ -41,6 +43,25 @@ export const disableConnection = (id: string) =>
 export const enableConnection = (id: string) => api<TestResponse>(`${base}/${id}/enable`, { method: "POST" });
 
 export const deleteConnection = (id: string) => api<void>(`${base}/${id}`, { method: "DELETE" });
+
+export const getPosture = (id: string, signal?: AbortSignal) => api<PostureReport>(`${base}/${id}/posture`, { signal });
+
+export const checkPosture = ({ id, probe }: { id: string; probe: boolean }) =>
+  api<PostureReport>(`${base}/${id}/posture`, { method: "POST", body: { probe } });
+
+export const stageCredentials = (id: string, credentials: StorageCredentials) =>
+  api<TestResponse>(`${base}/${id}/credentials/stage`, { method: "POST", body: { credentials } });
+
+export const promoteCredentials = (id: string) => api<TestResponse>(`${base}/${id}/credentials/promote`, { method: "POST" });
+
+export const rollbackCredentials = (id: string) => api<StorageConnection>(`${base}/${id}/credentials/rollback`, { method: "POST" });
+
+export const discardStaged = (id: string) => api<StorageConnection>(`${base}/${id}/credentials/staged`, { method: "DELETE" });
+
+export const listDrift = (id: string, all: boolean, signal?: AbortSignal) =>
+  api<{ findings: DriftFinding[] }>(`${base}/${id}/drift`, { query: { all: all || undefined }, signal });
+
+export const resolveDrift = (id: string) => api<DriftFinding>(`/storage-drift/${encodeURIComponent(id)}/resolve`, { method: "POST" });
 
 // A refused edit or rotation answers 422 with the test result as the body.
 export function testResultFromError(error: unknown): TestResponse | null {

@@ -32,7 +32,9 @@ const connectionColumns = `id, coalesce(tenant_id, ''), name, provider, status, 
 	account_id, force_path_style, role_arn, external_id, staging_prefix, ready_prefix, staging_mode,
 	credential_version, coalesce(credential_key_version, 0), credential_rotated_at, capabilities,
 	capabilities_checked_at, last_tested_at, last_test_ok_at, coalesce(last_error_category, ''), revision,
-	created_by, coalesce(updated_by, ''), created_at, updated_at, disabled_at, deleted_at`
+	created_by, coalesce(updated_by, ''), created_at, updated_at, disabled_at, deleted_at,
+	checksum_mode, coalesce(expected_owner, ''), coalesce(staged_credential_version, 0), staged_at, coalesce(staged_by, ''),
+	coalesce(previous_credential_version, 0), previous_until, coalesce(encryption_key, '')`
 
 // visible limits a query to the platform connection and the tenant's own
 // connections that are not deleted. $1 is the tenant.
@@ -45,7 +47,9 @@ func scanConnection(row pgx.Row) (model.StorageConnection, error) {
 		&c.AccountID, &c.ForcePathStyle, &c.RoleARN, &c.ExternalID, &c.StagingPrefix, &c.ReadyPrefix, &c.StagingMode,
 		&c.CredentialVersion, &c.CredentialKeyVersion, &c.CredentialRotatedAt, &capabilities,
 		&c.CapabilitiesCheckedAt, &c.LastTestedAt, &c.LastTestOKAt, &c.LastErrorCategory, &c.Revision,
-		&c.CreatedBy, &c.UpdatedBy, &c.CreatedAt, &c.UpdatedAt, &c.DisabledAt, &c.DeletedAt)
+		&c.CreatedBy, &c.UpdatedBy, &c.CreatedAt, &c.UpdatedAt, &c.DisabledAt, &c.DeletedAt,
+		&c.ChecksumMode, &c.ExpectedOwner, &c.StagedCredentialVersion, &c.StagedAt, &c.StagedBy,
+		&c.PreviousCredentialVersion, &c.PreviousUntil, &c.EncryptionKey)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.StorageConnection{}, model.ErrConnectionNotFound
 	}
@@ -155,11 +159,14 @@ func (r *StorageConnectionRepository) UpdateConnection(ctx context.Context, tena
 		    endpoint = coalesce($6, endpoint),
 		    force_path_style = coalesce($7, force_path_style),
 		    staging_mode = coalesce($8, staging_mode),
+		    checksum_mode = coalesce($11, checksum_mode),
+		    expected_owner = CASE WHEN $12::text IS NULL THEN expected_owner ELSE NULLIF($12::text, '') END,
+		    encryption_key = CASE WHEN $13::text IS NULL THEN encryption_key ELSE NULLIF($13::text, '') END,
 		    revision = revision + 1, updated_by = $9, updated_at = $10
 		WHERE tenant_id = $1 AND id = $2 AND revision = $3 AND status <> 'DELETED'
 		RETURNING `+connectionColumns,
 		tenantID, connectionID, revision, change.Name, change.Region, change.Endpoint, change.ForcePathStyle,
-		change.StagingMode, change.Actor, change.At))
+		change.StagingMode, change.Actor, change.At, change.ChecksumMode, change.ExpectedOwner, change.EncryptionKey))
 	if errors.Is(err, model.ErrConnectionNotFound) {
 		return c, r.missed(ctx, tenantID, connectionID)
 	}
@@ -274,12 +281,22 @@ func (r *StorageConnectionRepository) Dependents(ctx context.Context, tenantID, 
 	return dependents(ctx, r.db.Pool, tenantID, connectionID)
 }
 
+// HeldObject finds one object the connection holds. A packed asset's own
+// object is retired once its pack is published, so it is skipped; when
+// every asset is packed, a pack is the object held.
 func (r *StorageConnectionRepository) HeldObject(ctx context.Context, tenantID, connectionID string) (string, error) {
 	var key string
 	err := r.db.Pool.QueryRow(ctx, `
-		SELECT object_key FROM assets
-		WHERE tenant_id = $1 AND storage_connection_id = $2 AND status = 'AVAILABLE'
+		SELECT a.object_key FROM assets AS a
+		WHERE a.tenant_id = $1 AND a.storage_connection_id = $2 AND a.status = 'AVAILABLE'
+		  AND NOT EXISTS (SELECT 1 FROM pack_entries AS e JOIN packs AS p ON p.id = e.pack_id
+		                  WHERE e.tenant_id = a.tenant_id AND e.asset_id = a.id AND e.state = 'PUBLISHED' AND p.state = 'PUBLISHED')
 		LIMIT 1`, tenantID, connectionID).Scan(&key)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = r.db.Pool.QueryRow(ctx, `
+			SELECT object_key FROM packs WHERE tenant_id = $1 AND storage_connection_id = $2 AND state = 'PUBLISHED' LIMIT 1`,
+			tenantID, connectionID).Scan(&key)
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil
 	}
