@@ -200,12 +200,12 @@ class Client:
                 raise
 
     @contextmanager
-    def fetch(self, url, timeout=600):
+    def fetch(self, url, timeout=600, headers=None):
         """GETs url, a download link from the API or storage, over a
         kept-alive connection, and yields the response to read from. A
         response not read to its end closes its connection."""
         key = (urllib.parse.urlsplit(url).scheme, urllib.parse.urlsplit(url).netloc)
-        resp = self._roundtrip("GET", url, None, {}, timeout)
+        resp = self._roundtrip("GET", url, None, headers or {}, timeout)
         try:
             if resp.status >= 300:
                 raise APIError(resp.status, "GET", urllib.parse.urlsplit(url).path, resp.read().decode("utf-8", "replace"))

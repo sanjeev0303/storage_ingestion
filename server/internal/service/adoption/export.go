@@ -11,6 +11,7 @@ import (
 
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
+	"github.com/sanjeev0303/object-storage-platform/internal/platform/chunkread"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/audit"
 )
 
@@ -185,6 +186,7 @@ func (x Exporter) compute(ctx context.Context, tenantID string, m model.VersionM
 	}
 	key, first, last := asset.ObjectKey, int64(0), int64(-1)
 	cond := interfaces.ReadCondition{VersionID: asset.StorageVersionID}
+	var opener chunkread.RangeOpener = reader
 	if x.Packs != nil {
 		loc, packed, err := x.Packs.PackedLocation(ctx, tenantID, asset.ID)
 		if err != nil {
@@ -197,8 +199,15 @@ func (x Exporter) compute(ctx context.Context, tenantID string, m model.VersionM
 			bucket, key = loc.Bucket, loc.ObjectKey
 			cond = interfaces.ReadCondition{IfMatch: loc.StorageETag, VersionID: loc.StorageVersionID}
 		}
+		extents, chunked, err := interfaces.ChunkedExtents(ctx, x.Packs, tenantID, asset.ID)
+		if err != nil {
+			return nil, err
+		}
+		if chunked {
+			opener = chunkread.Reader{Storage: reader, Bucket: bucket, Extents: extents}
+		}
 	}
-	body, err := reader.OpenRange(ctx, bucket, key, first, last, cond)
+	body, err := opener.OpenRange(ctx, bucket, key, first, last, cond)
 	if err != nil {
 		return nil, err
 	}

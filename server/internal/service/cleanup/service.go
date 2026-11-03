@@ -554,6 +554,14 @@ func (s *Service) checkAsset(ctx context.Context, asset model.Asset, stats *Cycl
 			if packed {
 				bucket, key = loc.Bucket, loc.ObjectKey
 			}
+			// Chunks are checked when read and by scrubbing; the object at the
+			// asset's key has gone on purpose.
+			if _, chunked, err := interfaces.ChunkedExtents(ctx, s.deps.Packs, asset.TenantID, asset.ID); err != nil {
+				s.deps.Metrics.Add("missing_check_errors", 1)
+				return nil
+			} else if chunked {
+				return nil
+			}
 		}
 	}
 

@@ -17,9 +17,13 @@ import (
 	assetservice "github.com/sanjeev0303/object-storage-platform/internal/service/asset"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/audit"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/catalog"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/connectors"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/copyengine"
 	datasetservice "github.com/sanjeev0303/object-storage-platform/internal/service/dataset"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/delivery"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/deltaupload"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/domain"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/edge"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/erasure"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/events"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/evidence"
@@ -85,6 +89,17 @@ type Routes struct {
 	// Evidence serves anchors, audit exports and reviews, provenance,
 	// evidence packs and control mappings (docs/evidence.md).
 	Evidence *evidence.Service
+	// DeltaUploads takes files as what they do not share with a snapshot
+	// (docs/chunks.md).
+	DeltaUploads *deltaupload.Service
+	// Domain serves STAC, recordings, segments, embeddings, upstream sources
+	// and publications (docs/domain.md).
+	Domain *domain.Service
+	// Edge serves devices, runs, recordings and heartbeats (docs/edge.md).
+	Edge *edge.Service
+	// Connectors serves chat shares, collections, Git LFS and DICOMweb
+	// (docs/connectors.md).
+	Connectors *connectors.Service
 	// Erasure serves erasure, withdrawal and destroy-by-provenance
 	// (docs/erasure.md).
 	Erasure *erasure.Service
@@ -220,6 +235,9 @@ func NewRouter(rt Routes) http.Handler {
 		for pattern, h := range datasets.QualityRoutes() {
 			mux.Handle(pattern, byTenant(datasetOperation(pattern), h))
 		}
+		for pattern, h := range datasets.ChunkRoutes() {
+			mux.Handle(pattern, byTenant(datasetOperation(pattern), h))
+		}
 	}
 
 	if rt.StorageConnections != nil {
@@ -281,6 +299,60 @@ func NewRouter(rt Routes) http.Handler {
 				op = "listing"
 			}
 			mux.Handle(pattern, byTenant(op, h))
+		}
+	}
+
+	if rt.Edge != nil {
+		ed := httpapi.NewEdgeHandler(rt.Edge, rt.Log)
+		for pattern, h := range ed.Routes() {
+			op := "admin"
+			if strings.HasPrefix(pattern, "GET ") {
+				op = "listing"
+			}
+			mux.Handle(pattern, byTenant(op, h))
+		}
+	}
+
+	if rt.DeltaUploads != nil {
+		delta := httpapi.NewDeltaUploadHandler(rt.DeltaUploads, rt.Log)
+		for pattern, h := range delta.Routes() {
+			op := "upload_finish"
+			switch {
+			case strings.HasPrefix(pattern, "GET "):
+				op = "listing"
+			case pattern == "POST /api/v1/delta-uploads":
+				op = "upload_init"
+			}
+			mux.Handle(pattern, byTenant(op, h))
+		}
+	}
+
+	if rt.Domain != nil {
+		dom := httpapi.NewDomainHandler(rt.Domain, rt.Log)
+		for pattern, h := range dom.Routes() {
+			op := "admin"
+			if strings.HasPrefix(pattern, "GET ") {
+				op = "listing"
+			}
+			mux.Handle(pattern, byTenant(op, h))
+		}
+		mux.Handle("GET /api/v1/public/publications/{slug}", limit("admin", middleware.ByAddress, http.HandlerFunc(dom.Public)))
+	}
+
+	if rt.Connectors != nil {
+		conn := httpapi.NewConnectorsHandler(rt.Connectors, rt.Log)
+		for pattern, h := range conn.Routes() {
+			op := "admin"
+			if strings.HasPrefix(pattern, "GET ") {
+				op = "listing"
+			}
+			mux.Handle(pattern, byTenant(op, h))
+		}
+		for pattern, h := range conn.DICOMwebRoutes() {
+			mux.Handle(pattern, byTenant("listing", h))
+		}
+		for pattern, h := range conn.LFSRoutes() {
+			mux.Handle(pattern, httpapi.LFSCredentials(byTenant("listing", h)))
 		}
 	}
 

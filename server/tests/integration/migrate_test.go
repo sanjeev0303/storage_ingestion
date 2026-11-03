@@ -125,7 +125,7 @@ func TestMigrationsFromScratchAndRollback(t *testing.T) {
 	}
 
 	// The newest release rolls back...
-	want := []string{"000040_erasure.sql", "000039_quality.sql", "000038_evidence.sql", "000037_tiering_costs.sql", "000036_pack_streaming.sql", "000035_copy_engine.sql",
+	want := []string{"000046_chunk_indexes.sql", "000045_chunk_storage.sql", "000044_chunks.sql", "000043_domain.sql", "000042_edge.sql", "000041_connectors.sql", "000040_erasure.sql", "000039_quality.sql", "000038_evidence.sql", "000037_tiering_costs.sql", "000036_pack_streaming.sql", "000035_copy_engine.sql",
 		"000034_residency_keys.sql", "000033_storage_posture.sql", "000032_access_governance.sql", "000031_adoption.sql",
 		"000030_governance.sql", "000029_content_checks.sql", "000028_lock_sync.sql", "000027_training_runs.sql"}
 	undone, err := m.Rollback(ctx, len(want))
@@ -134,7 +134,7 @@ func TestMigrationsFromScratchAndRollback(t *testing.T) {
 	}
 	var tables int
 	if err := conn.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables
-		WHERE table_name IN ('erasure_requests', 'erasure_items', 'dataset_quality', 'version_profiles', 'leakage_checks', 'evidence_settings', 'audit_anchors', 'audit_reviews', 'tier_rules', 'tier_moves', 'archive_restores', 'cost_budgets', 'repack_requests', 'run_checkpoints', 'run_verifications', 'tenant_packing', 'copy_jobs', 'asset_replicas', 'connection_posture', 'storage_drift_findings', 'api_tokens', 'security_alerts', 'adoption_jobs', 'governance_approvals', 'disposition_certificates', 'content_findings', 'lock_sync_requests', 'training_runs', 'models')`).Scan(&tables); err != nil || tables != 0 {
+		WHERE table_name IN ('stored_chunks', 'chunked_assets', 'chunk_refs', 'delta_uploads', 'delta_upload_chunks', 'chunked_files', 'file_chunks', 'chunk_jobs', 'recording_metadata', 'segments', 'embedding_indexes', 'embeddings', 'upstream_sources', 'publications', 'edge_devices', 'edge_recordings', 'edge_chunks', 'chat_integrations', 'chat_shares', 'lfs_locks', 'collection_imports', 'dicom_instances', 'erasure_requests', 'erasure_items', 'dataset_quality', 'version_profiles', 'leakage_checks', 'evidence_settings', 'audit_anchors', 'audit_reviews', 'tier_rules', 'tier_moves', 'archive_restores', 'cost_budgets', 'repack_requests', 'run_checkpoints', 'run_verifications', 'tenant_packing', 'copy_jobs', 'asset_replicas', 'connection_posture', 'storage_drift_findings', 'api_tokens', 'security_alerts', 'adoption_jobs', 'governance_approvals', 'disposition_certificates', 'content_findings', 'lock_sync_requests', 'training_runs', 'models')`).Scan(&tables); err != nil || tables != 0 {
 		t.Fatalf("after rollback, %d of the release's tables remain (%v)", tables, err)
 	}
 	// ...but not past it: 000026 has no rollback file, and nothing changes.

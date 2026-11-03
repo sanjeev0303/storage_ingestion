@@ -484,6 +484,8 @@ type stacDoc struct {
 	Collection string                     `json:"collection"`
 	Properties map[string]any             `json:"properties"`
 	Assets     map[string]stacAsset       `json:"assets"`
+	BBox       []float64                  `json:"bbox"`
+	Geometry   json.RawMessage            `json:"geometry"`
 	Links      []stacLink                 `json:"links"`
 	Features   []json.RawMessage          `json:"features"`
 	Extra      map[string]json.RawMessage `json:"-"`
@@ -551,6 +553,17 @@ func stacItem(base string, item stacDoc, e *emitter) error {
 	meta := map[string]string{"stac.item": item.ID}
 	if item.Collection != "" {
 		meta["stac.collection"] = item.Collection
+	}
+	// Kept so that an export can give the item its place back.
+	if len(item.BBox) > 0 {
+		parts := make([]string, 0, len(item.BBox))
+		for _, v := range item.BBox {
+			parts = append(parts, strconv.FormatFloat(v, 'f', -1, 64))
+		}
+		meta["stac.bbox"] = strings.Join(parts, ",")
+	}
+	if len(item.Geometry) > 0 && len(item.Geometry) <= 500 && string(item.Geometry) != "null" {
+		meta["stac.geometry"] = string(item.Geometry)
 	}
 	for k, v := range item.Properties {
 		if len(meta) >= 30 {

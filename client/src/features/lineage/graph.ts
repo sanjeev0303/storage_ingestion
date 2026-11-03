@@ -17,6 +17,7 @@ export const KIND_LABELS: Record<NodeKind, string> = {
   OBJECT_VERSION: "Object version",
   TRAINING_RUN: "Training run",
   MODEL: "Model",
+  UPSTREAM_SOURCE: "Upstream source",
 };
 
 export const RELATION_LABELS: Record<Relation, string> = {

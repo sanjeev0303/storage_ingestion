@@ -100,9 +100,17 @@ type Dependencies struct {
 	// Quality keeps column profiles, leakage checks and releases; without
 	// it those calls answer that data quality is not configured.
 	Quality QualityStore
-	Audit   interfaces.AuditRecorder
-	Metrics *metrics.Registry
-	Log     *slog.Logger
+	// Dicom, with Quality, indexes DICOM members when a version is profiled.
+	Dicom DicomIndex
+	// Recordings is told what MCAP files and rosbag2 folders hold.
+	Recordings RecordingIndex
+	// Chunks keeps the chunk index (docs/chunks.md).
+	Chunks ChunkStore
+	// ChunkStorage turns storing chunks once on and off.
+	ChunkStorage ChunkStorage
+	Audit        interfaces.AuditRecorder
+	Metrics      *metrics.Registry
+	Log          *slog.Logger
 }
 
 // Service runs managed datasets.

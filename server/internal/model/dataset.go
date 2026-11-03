@@ -703,6 +703,7 @@ const (
 	NodeTransformation   LineageKind = "TRANSFORMATION"
 	NodeTrainingRun      LineageKind = "TRAINING_RUN"
 	NodeModel            LineageKind = "MODEL"
+	NodeUpstreamSource   LineageKind = "UPSTREAM_SOURCE"
 )
 
 // LineageRelation is an edge's meaning, read "from <relation> to".
@@ -723,7 +724,7 @@ const (
 var lineageRules = map[LineageRelation][2][]LineageKind{
 	RelContains:            {{NodeDataset, NodeDatasetVersion}, {NodeDatasetVersion, NodeObjectVersion}},
 	RelDerivedFrom:         {{NodeDatasetVersion}, {NodeDatasetVersion}},
-	RelImportedFrom:        {{NodeDataset}, {NodeManifestImport}},
+	RelImportedFrom:        {{NodeDataset, NodeDatasetVersion}, {NodeManifestImport, NodeUpstreamSource}},
 	RelValidatedBy:         {{NodeDatasetVersion}, {NodeValidationReport}},
 	RelCreatedFromSnapshot: {{NodeDataset}, {NodeDatasetVersion}},
 	RelTransformedBy:       {{NodeDataset, NodeDatasetVersion}, {NodeTransformation}},

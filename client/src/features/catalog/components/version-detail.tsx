@@ -17,6 +17,7 @@ import { formatBytes } from "@/lib/utils/format";
 import { useConnectionNames, useDeleteVersion, useLifecycle, usePromote, useVersion } from "../hooks";
 import { isTombstone } from "../preview";
 import type { CatalogObject, ObjectVersion } from "../types";
+import { ShareToChat } from "@/features/connectors/components/share-to-chat";
 import { DownloadControl } from "./download-control";
 import { Preview } from "./preview";
 
@@ -174,6 +175,7 @@ export function VersionDetail({
               canDownload={can("assets.download")}
               canRevoke={can("assets.delete")}
             />
+            {can("assets.download") && <ShareToChat assetId={version.asset_id} />}
             {can("assets.download") && (
               <Preview
                 assetId={version.asset_id}

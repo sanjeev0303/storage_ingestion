@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/netip"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -63,14 +64,16 @@ type APIToken struct {
 	Hint        string     `json:"hint"`
 	Permissions Permission `json:"-"`
 	Datasets    []string   `json:"datasets"`
-	Networks    []string   `json:"networks"`
-	AllowLinks  bool       `json:"allow_links"`
-	ExpiresAt   time.Time  `json:"expires_at"`
-	CreatedAt   time.Time  `json:"created_at"`
-	LastUsedAt  *time.Time `json:"last_used_at,omitempty"`
-	LastUsedIP  string     `json:"last_used_ip,omitempty"`
-	RevokedAt   *time.Time `json:"revoked_at,omitempty"`
-	RevokedBy   string     `json:"revoked_by,omitempty"`
+	// PathPrefix confines uploads to paths under it (a device's token).
+	PathPrefix string     `json:"path_prefix,omitempty"`
+	Networks   []string   `json:"networks"`
+	AllowLinks bool       `json:"allow_links"`
+	ExpiresAt  time.Time  `json:"expires_at"`
+	CreatedAt  time.Time  `json:"created_at"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	LastUsedIP string     `json:"last_used_ip,omitempty"`
+	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+	RevokedBy  string     `json:"revoked_by,omitempty"`
 }
 
 // Usable reports whether the token may be used at now from ip ("" when
@@ -102,6 +105,20 @@ type Scope struct {
 	Datasets   []string
 	NoLinks    bool
 	Restricted bool // confined to some datasets
+	// PathPrefix confines uploads to paths under it.
+	PathPrefix string
+}
+
+// AllowsUpload reports whether the scope may write this path of dataset. An
+// upload that names no dataset is outside any confined scope.
+func (s Scope) AllowsUpload(dataset, path string) bool {
+	if !s.Allows(dataset) {
+		return false
+	}
+	if s.PathPrefix == "" {
+		return true
+	}
+	return strings.HasPrefix(path, s.PathPrefix) && !strings.Contains(path, "..")
 }
 
 // Allows reports whether an asset in dataset is inside the scope.

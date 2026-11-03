@@ -347,6 +347,14 @@ func (r *CopyRepository) SwitchConnection(ctx context.Context, tenantID, dataset
 			WHERE tenant_id = $1 AND asset_id = ANY($2) AND state = 'PUBLISHED'`, tenantID, ids, now); err != nil {
 			return 0, fmt.Errorf("release migrated pack entries: %w", err)
 		}
+		// So do chunked ones; the chunk store deletes what nothing else needs.
+		if _, err := tx.Exec(ctx, `UPDATE chunked_assets SET state = 'RELEASED', released_at = $3
+			WHERE tenant_id = $1 AND asset_id = ANY($2) AND state <> 'RELEASED'`, tenantID, ids, now); err != nil {
+			return 0, fmt.Errorf("release migrated chunked assets: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM chunk_refs WHERE tenant_id = $1 AND asset_id = ANY($2)`, tenantID, ids); err != nil {
+			return 0, fmt.Errorf("release migrated chunks: %w", err)
+		}
 	}
 	if _, err := tx.Exec(ctx, `UPDATE datasets SET storage_connection_id = $3, updated_at = $4 WHERE tenant_id = $1 AND id = $2`,
 		tenantID, datasetID, targetID, now); err != nil {

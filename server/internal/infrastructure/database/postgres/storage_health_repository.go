@@ -291,6 +291,7 @@ func (r *StorageConnectionRepository) StoredObjects(ctx context.Context, tenantI
 		    WHERE a.tenant_id = $1 AND a.storage_connection_id = $2 AND a.status = 'AVAILABLE'
 		      AND NOT EXISTS (SELECT 1 FROM pack_entries AS e JOIN packs AS p ON p.id = e.pack_id
 		                      WHERE e.tenant_id = a.tenant_id AND e.asset_id = a.id AND e.state = 'PUBLISHED' AND p.state = 'PUBLISHED')
+		      AND NOT EXISTS (SELECT 1 FROM chunked_assets AS c WHERE c.asset_id = a.id AND c.state IN ('PUBLISHED', 'REHYDRATING'))
 		    UNION ALL
 		    SELECT '', p.id, p.object_key, coalesce(p.storage_etag, ''), coalesce(p.storage_version_id, ''), p.total_bytes
 		    FROM packs AS p WHERE p.tenant_id = $1 AND p.storage_connection_id = $2 AND p.state = 'PUBLISHED'
@@ -313,6 +314,7 @@ func (r *StorageConnectionRepository) KnownKeys(ctx context.Context, tenantID, c
 	rows, err := r.db.Pool.Query(ctx, `
 		SELECT object_key FROM assets WHERE tenant_id = $1 AND storage_connection_id = $2 AND object_key = ANY($3)
 		UNION SELECT object_key FROM packs WHERE tenant_id = $1 AND storage_connection_id = $2 AND object_key = ANY($3)
+		UNION SELECT object_key FROM stored_chunks WHERE tenant_id = $1 AND connection_id = COALESCE($2, 'platform') AND object_key = ANY($3)
 		UNION SELECT manifest_key FROM packs WHERE tenant_id = $1 AND storage_connection_id = $2 AND manifest_key = ANY($3)`,
 		tenantID, connectionID, keys)
 	if err != nil {

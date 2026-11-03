@@ -9,7 +9,7 @@ import (
 // Customer webhooks (docs/webhooks.md).
 
 var (
-	ErrWebhookNotFound = errors.New("webhook endpoint not found")
+	ErrWebhookNotFound  = errors.New("webhook endpoint not found")
 	ErrDeliveryNotFound = errors.New("webhook delivery not found")
 )
 
@@ -37,6 +37,11 @@ var WebhookEventTypes = []string{
 	"dataset.drift_detected",
 	"training_run.leakage_detected",
 	"erasure.completed",
+	"edge.run_complete",
+	"edge.run_incomplete",
+	"edge.backfill_closed",
+	"upstream.changed",
+	"upstream.gone",
 	"webhook.test",
 }
 

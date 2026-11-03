@@ -28,6 +28,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/logger"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/metrics"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/retry"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/chunkstore"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/events"
 	packingservice "github.com/sanjeev0303/object-storage-platform/internal/service/packing"
 	packingworker "github.com/sanjeev0303/object-storage-platform/internal/worker/packing"
@@ -122,6 +123,36 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// The chunk store: its objects live beside packs, under the same rules
+	// (docs/chunks.md).
+	retireAfter, err := time.ParseDuration(envOr("CHUNK_SOURCE_RETIRE_AFTER", "24h"))
+	if err != nil {
+		return fmt.Errorf("CHUNK_SOURCE_RETIRE_AFTER: %w", err)
+	}
+	unusedAfter, err := time.ParseDuration(envOr("CHUNK_UNUSED_AFTER", "1h"))
+	if err != nil {
+		return fmt.Errorf("CHUNK_UNUSED_AFTER: %w", err)
+	}
+	chunks := chunkstore.New(chunkstore.Deps{Store: postgres.NewChunkStorageRepository(db), Packs: postgres.NewPackRepository(db), Router: router, Log: log,
+		SourceRetireAfter: retireAfter, UnusedAfter: unusedAfter})
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			if stats, err := chunks.RunOnce(ctx); err != nil {
+				log.Warn("chunk store pass failed", "error", err)
+			} else if stats != (chunkstore.Stats{}) {
+				log.Info("chunk store pass", "converted", stats.Converted, "left_whole", stats.Skipped, "failed", stats.Failed,
+					"originals_retired", stats.Retired, "rehydrated", stats.Rehydrated, "chunks_deleted", stats.Deleted)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+
 	if pc.MetricsAddr != "" {
 		registry.Publish("packing")
 		stopMetrics := metrics.Serve(pc.MetricsAddr, db.Pool.Ping, log)
@@ -189,4 +220,11 @@ func workerID() (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("%s-%d-%s", host, os.Getpid(), hex.EncodeToString(suffix[:])), nil
+}
+
+func envOr(name, fallback string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return fallback
 }

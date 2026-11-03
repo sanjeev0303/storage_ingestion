@@ -16,6 +16,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/dto/event"
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
+	"github.com/sanjeev0303/object-storage-platform/internal/platform/chunkread"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/correlation"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/retry"
 )
@@ -649,6 +650,13 @@ func (s *Service) memberSource(ctx context.Context, tenantID string, m model.Mem
 			b.bucket, b.key = loc.Bucket, loc.ObjectKey
 			b.cond = interfaces.ReadCondition{IfMatch: loc.StorageETag, VersionID: loc.StorageVersionID}
 		}
+		extents, chunked, err := interfaces.ChunkedExtents(ctx, s.deps.Packs, tenantID, m.AssetID)
+		if err != nil {
+			return b, err
+		}
+		if chunked {
+			b.reader = chunkread.Reader{Storage: b.reader, Bucket: b.bucket, Extents: extents}
+		}
 	}
 	return b, nil
 }
@@ -764,8 +772,8 @@ type reportBody struct {
 		ContentTypes []model.Count `json:"content_types"`
 		Extensions   []model.Count `json:"extensions"`
 		Sizes        struct {
-			Total int64 `json:"total_bytes"`
-			Min   int64 `json:"min_bytes"`
+			Total  int64 `json:"total_bytes"`
+			Min    int64 `json:"min_bytes"`
 			Max    int64 `json:"max_bytes"`
 			Median int64 `json:"median_bytes"`
 			Packed int64 `json:"packed_members"`

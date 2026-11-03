@@ -1,9 +1,9 @@
 package integration
 
 import (
-	"crypto/ed25519"
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -32,9 +32,9 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/secretbox"
 	"github.com/sanjeev0303/object-storage-platform/internal/server"
 	"github.com/sanjeev0303/object-storage-platform/internal/server/middleware"
-	assetservice "github.com/sanjeev0303/object-storage-platform/internal/service/asset"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/access"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/adoption"
+	assetservice "github.com/sanjeev0303/object-storage-platform/internal/service/asset"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/audit"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/catalog"
 	datasetservice "github.com/sanjeev0303/object-storage-platform/internal/service/dataset"
@@ -289,7 +289,7 @@ var tenantTables = []string{
 	"connection_drift_scans", "storage_drift_findings", "connection_posture",
 	"security_alerts", "egress_usage", "tenant_access_policy", "api_tokens",
 	"adoption_entries", "adoption_jobs", "asset_digests", "webhook_deliveries", "webhook_endpoints", "governance_approvals", "tenant_governance", "disposition_certificates", "content_findings",
-	"lock_sync_requests", "audit_reviews", "evidence_settings", "erasure_items", "erasure_requests", "leakage_checks", "version_profiles", "dataset_quality", "archive_restores", "tier_moves", "tier_rules", "cost_budgets", "training_run_inputs", "run_verifications", "run_checkpoints", "models", "training_runs", "dataset_merges", "validation_findings", "validation_reports", "validation_jobs", "lineage_edges", "lineage_nodes",
+	"lock_sync_requests", "audit_reviews", "evidence_settings", "delta_uploads", "chunk_refs", "chunked_assets", "stored_chunks", "chunk_jobs", "file_chunks", "chunked_files", "publications", "upstream_sources", "embeddings", "embedding_indexes", "segments", "recording_metadata", "edge_chunks", "edge_recordings", "edge_devices", "dicom_instances", "collection_imports", "lfs_locks", "chat_shares", "chat_integrations", "erasure_items", "erasure_requests", "leakage_checks", "version_profiles", "dataset_quality", "archive_restores", "tier_moves", "tier_rules", "cost_budgets", "training_run_inputs", "run_verifications", "run_checkpoints", "models", "training_runs", "dataset_merges", "validation_findings", "validation_reports", "validation_jobs", "lineage_edges", "lineage_nodes",
 	"dataset_manifest_imports", "dataset_version_members", "dataset_versions", "dataset_members", "validation_profiles",
 	"download_tokens", "delivery_audit_events", "deletion_operations", "lifecycle_events", "legal_holds",
 	"retention_policies", "orphan_candidates", "quarantine_records", "processing_events", "processing_jobs",
@@ -442,7 +442,7 @@ func (s *securityStack) newDatasetService(t *testing.T, change func(*config.Data
 		Repo: s.datasetDB, Manifests: s.ie.storage, ManifestBucket: s.ie.bucket,
 		Content: s.ie.storage, ContentBucket: s.ie.bucket, Quotas: s.quotas, Audit: s.audit, Log: s.log,
 		Packs: postgres.NewPackRepository(s.db), Placement: s.placement, Protection: s.protection,
-		Quality: postgres.NewQualityRepository(s.db),
+		Quality: postgres.NewQualityRepository(s.db), Dicom: postgres.NewConnectorsRepository(s.db), Recordings: postgres.NewDomainRepository(s.db), Chunks: postgres.NewChunkRepository(s.db), ChunkStorage: postgres.NewChunkStorageRepository(s.db),
 	}, cfg)
 	if err != nil {
 		t.Fatal(err)

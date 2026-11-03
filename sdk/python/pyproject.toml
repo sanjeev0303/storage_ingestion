@@ -11,6 +11,7 @@ dependencies = []
 
 [project.optional-dependencies]
 torch = ["torch>=2.0"]
+fast = ["numpy>=1.24"]
 
 [project.scripts]
 osp = "osp.cli:main"

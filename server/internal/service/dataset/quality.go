@@ -11,6 +11,8 @@ import (
 
 	"github.com/sanjeev0303/object-storage-platform/internal/dto/event"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
+	"github.com/sanjeev0303/object-storage-platform/internal/platform/dicom"
+	"github.com/sanjeev0303/object-storage-platform/internal/platform/recording"
 )
 
 // Data quality (docs/quality.md): column profiles per version, drift
@@ -36,6 +38,16 @@ type QualityStore interface {
 	RunsToCheck(ctx context.Context, limit int) ([][2]string, error)
 	SetRelease(ctx context.Context, tenantID, versionID, label, notes, actor string, at time.Time) error
 	Releases(ctx context.Context, tenantID, datasetID string) ([]model.Release, error)
+}
+
+// DicomIndex records DICOM instances for the DICOMweb gateway.
+type DicomIndex interface {
+	PutDicom(ctx context.Context, tenantID, versionID, assetID, path string, in model.DicomInstance) error
+}
+
+// RecordingIndex records what MCAP files and rosbag2 folders hold.
+type RecordingIndex interface {
+	PutRecording(ctx context.Context, m model.RecordingMeta) error
 }
 
 // Profiling limits. A file or version past them is listed as skipped,
@@ -320,6 +332,16 @@ func (s *Service) profileVersion(ctx context.Context, job model.VersionProfile) 
 			format, gz := tableFormat(m.Path, m.ContentType)
 			if format == "" {
 				out.OtherFiles++
+				if isDicom(m.Path, m.ContentType) {
+					if err := s.indexDicom(ctx, job, m); err != nil {
+						skip(m.Path, "DICOM header not indexed: "+err.Error())
+					}
+				}
+				if kind := recordingKind(m.Path); kind != "" {
+					if err := s.indexRecording(ctx, job, m, kind); err != nil {
+						skip(m.Path, "recording not indexed: "+err.Error())
+					}
+				}
 				continue
 			}
 			switch {
@@ -386,6 +408,116 @@ func (s *Service) profileVersion(ctx context.Context, job model.VersionProfile) 
 		}
 	}
 	return out, nil
+}
+
+func isDicom(path, contentType string) bool {
+	name := strings.ToLower(path)
+	return strings.HasSuffix(name, ".dcm") || strings.HasSuffix(name, ".dicom") || strings.EqualFold(contentType, "application/dicom")
+}
+
+// dicomHeaderBytes is how much of a file its header is looked for in.
+const dicomHeaderBytes = 4 << 20
+
+// indexDicom records an instance for the DICOMweb gateway from its header.
+func (s *Service) indexDicom(ctx context.Context, job model.VersionProfile, m model.MemberEvidence) error {
+	if s.deps.Dicom == nil || m.AssetStatus != model.AssetStatusAvailable || m.ObjectKey == "" {
+		return nil
+	}
+	src, err := s.memberSource(ctx, job.TenantID, m)
+	if err != nil {
+		return err
+	}
+	body, err := src.open(ctx)
+	if err != nil {
+		return err
+	}
+	defer body.Close()
+	data, err := io.ReadAll(io.LimitReader(body, dicomHeaderBytes))
+	if err != nil {
+		return err
+	}
+	h, err := dicom.Parse(data)
+	if err != nil {
+		return err
+	}
+	return s.deps.Dicom.PutDicom(ctx, job.TenantID, job.VersionID, m.AssetID, m.Path, model.DicomInstance{SOPUID: h.SOPInstance, StudyUID: h.Study,
+		SeriesUID: h.Series, Modality: h.Modality, PatientID: h.PatientID, StudyDate: h.StudyDate, Tags: h.Tags})
+}
+
+func recordingKind(p string) string {
+	name := strings.ToLower(p)
+	switch {
+	case strings.HasSuffix(name, ".mcap"):
+		return recording.KindMCAP
+	case name == "metadata.yaml" || strings.HasSuffix(name, "/metadata.yaml"):
+		return recording.KindRosbag2
+	}
+	return ""
+}
+
+// readRange reads part of a member, counted from its first byte.
+func readRange(ctx context.Context, src memberBytes, off, n int64) ([]byte, error) {
+	src.first, src.last = src.first+off, src.first+off+n-1
+	body, err := src.open(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+	return io.ReadAll(io.LimitReader(body, n))
+}
+
+// indexRecording reads only what a recording says about itself: for MCAP its
+// footer and summary, a few ranged reads however large the file. A
+// metadata.yaml that is not a rosbag2's is simply some other file.
+func (s *Service) indexRecording(ctx context.Context, job model.VersionProfile, m model.MemberEvidence, kind string) error {
+	if s.deps.Recordings == nil || m.AssetStatus != model.AssetStatusAvailable || m.ObjectKey == "" {
+		return nil
+	}
+	src, err := s.memberSource(ctx, job.TenantID, m)
+	if err != nil {
+		return err
+	}
+	var sum recording.Summary
+	if kind == recording.KindMCAP {
+		if m.SizeBytes < int64(recording.MCAPTailBytes) {
+			return errors.New("too short to be an MCAP file")
+		}
+		tail, err := readRange(ctx, src, m.SizeBytes-int64(recording.MCAPTailBytes), int64(recording.MCAPTailBytes))
+		if err != nil {
+			return err
+		}
+		off, length, err := recording.MCAPSummaryRange(tail, m.SizeBytes)
+		if err != nil {
+			return err
+		}
+		section, err := readRange(ctx, src, off, length)
+		if err != nil {
+			return err
+		}
+		if sum, err = recording.ParseMCAPSummary(section); err != nil {
+			return err
+		}
+	} else {
+		if m.SizeBytes > 4<<20 {
+			return nil
+		}
+		text, err := readRange(ctx, src, 0, m.SizeBytes)
+		if err != nil {
+			return err
+		}
+		if !strings.Contains(string(text), "rosbag2_bagfile_information") {
+			return nil
+		}
+		if sum, err = recording.ParseRosbag2(string(text)); err != nil {
+			return err
+		}
+	}
+	topics := make([]model.RecordingTopic, 0, len(sum.Topics))
+	for _, t := range sum.Topics {
+		topics = append(topics, model.RecordingTopic{Topic: t.Topic, Schema: t.Schema, Encoding: t.Encoding, MessageCount: t.MessageCount})
+	}
+	return s.deps.Recordings.PutRecording(ctx, model.RecordingMeta{VersionID: job.VersionID, TenantID: job.TenantID, AssetID: m.AssetID, Path: m.Path,
+		Kind: sum.Kind, StartNS: sum.StartNS, EndNS: sum.EndNS, MessageCount: sum.MessageCount, Topics: topics})
 }
 
 // ─── Leakage ──────────────────────────────────────────────────────────

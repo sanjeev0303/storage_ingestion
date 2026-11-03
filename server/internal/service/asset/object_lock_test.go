@@ -25,7 +25,9 @@ type lockingStorage struct {
 	mode    map[string]string
 }
 
-func (l *lockingStorage) ObjectLockEnabled(context.Context, string) (bool, error) { return l.enabled, nil }
+func (l *lockingStorage) ObjectLockEnabled(context.Context, string) (bool, error) {
+	return l.enabled, nil
+}
 
 func (l *lockingStorage) LockObjectVersion(_ context.Context, _, _, versionID string, lock interfaces.VersionLock) error {
 	l.calls++
@@ -184,6 +186,58 @@ func TestObjectLockFollowsRetentionAndHolds(t *testing.T) {
 	e.clock = e.clock.Add(2 * day)
 	if stats := e.run(svc); stats.Completed != 1 || locker.hold["v2"] {
 		t.Fatalf("a2's deletion: %+v hold %v reason %q", stats, locker.hold["v2"], e.op("a2").ProtectedReason)
+	}
+}
+
+// chunkedPacks answers that an asset is kept as chunks, until told otherwise.
+type chunkedPacks struct {
+	chunked bool
+	asked   int
+}
+
+func (c *chunkedPacks) PackedLocation(context.Context, string, string) (model.PackedLocation, bool, error) {
+	return model.PackedLocation{}, false, nil
+}
+
+func (c *chunkedPacks) ReleaseAsset(context.Context, string, string, time.Time) (bool, error) {
+	return false, nil
+}
+
+func (c *chunkedPacks) RequestRehydrate(context.Context, string, string) (bool, error) {
+	c.asked++
+	return c.chunked, nil
+}
+
+// One object is what a provider locks: a file kept as chunks is made one again
+// first, and the lock follows on a later pass rather than going astray.
+func TestALockOnAChunkedFileWaitsForItsObject(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	locker := &lockingStorage{ObjectStorage: e.storage, enabled: true, clock: &e.clock, until: map[string]time.Time{}, hold: map[string]bool{}}
+	e.storageAPI = locker
+	e.versioned("a1", "v1")
+	svc := e.service("worker-a")
+	svc.deps.Locks = memLocks{}
+	packs := &chunkedPacks{chunked: true}
+	svc.deps.Packs = packs
+	asset, err := e.assets.GetByID(ctx, "tenant-1", "a1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := EffectivePolicy{MinRetention: 30 * day, LockMode: model.LockGovernance}
+
+	if err := svc.syncLock(ctx, *asset, policy); err == nil || !strings.Contains(err.Error(), "chunks") {
+		t.Fatalf("while chunked: %v", err)
+	}
+	if packs.asked != 1 || locker.calls != 0 {
+		t.Fatalf("asked %d, locked %d times", packs.asked, locker.calls)
+	}
+	packs.chunked = false
+	if err := svc.syncLock(ctx, *asset, policy); err != nil {
+		t.Fatal(err)
+	}
+	if locker.calls == 0 {
+		t.Fatal("the lock did not follow once the file was one object")
 	}
 }
 

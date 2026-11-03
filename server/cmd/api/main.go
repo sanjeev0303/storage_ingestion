@@ -31,9 +31,13 @@ import (
 	assetservice "github.com/sanjeev0303/object-storage-platform/internal/service/asset"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/audit"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/catalog"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/connectors"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/copyengine"
 	datasetservice "github.com/sanjeev0303/object-storage-platform/internal/service/dataset"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/delivery"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/deltaupload"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/domain"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/edge"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/erasure"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/events"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/evidence"
@@ -282,7 +286,9 @@ func run() error {
 	routes.Datasets, err = datasetservice.NewService(datasetservice.Dependencies{
 		Repo: datasetRepo, Manifests: objectStorage, ManifestBucket: bucket, Quotas: quotaService,
 		Audit: auditService, Metrics: datasetMetrics, Log: log, Placement: routes.StorageConnections, Protection: routes.Copies,
-		Quality: postgres.NewQualityRepository(db),
+		Quality:      postgres.NewQualityRepository(db),
+		Chunks:       postgres.NewChunkRepository(db),
+		ChunkStorage: postgres.NewChunkStorageRepository(db),
 	}, datasetConfig)
 	if err != nil {
 		return fmt.Errorf("configure datasets: %w", err)
@@ -306,6 +312,7 @@ func run() error {
 		Access: routes.Access, Holds: lifecycle, Alerts: accessRepo, TSA: os.Getenv("AUDIT_TSA_URL"), Log: log,
 		Signer: evidence.Signer{KeyID: signing.CertificateKeyID, Key: signing.CertificateKey}})
 	routes.Datasets.GateProvenance(routes.Evidence)
+	routes.Edge = edge.New(edge.Deps{Store: postgres.NewEdgeRepository(db), Access: routes.Access, Datasets: routes.Datasets, Audit: auditService, Log: log})
 	routes.Erasure = erasure.New(erasure.Deps{Store: postgres.NewErasureRepository(db), Lifecycle: lifecycle, Catalog: routes.Catalog,
 		Audit: auditService, Log: log, Signer: erasure.Signer{KeyID: signing.CertificateKeyID, Key: signing.CertificateKey}})
 
@@ -325,6 +332,20 @@ func run() error {
 	routes.Identity, routes.Quotas, routes.Audit = identityService, quotaService, auditService
 	routes.DeadLetters = events.NewGuardedAdmin(eventAdmin, dead, auditService)
 	routes.Uploads, routes.Multipart = uploadService, multipartService
+	routes.Connectors = connectors.New(connectors.Deps{Store: postgres.NewConnectorsRepository(db), Uploads: routes.Uploads, Delivery: routes.Delivery,
+		Datasets: routes.Datasets, Sealer: sealer, Audit: auditService, Client: storageregistry.Policy(storageCfg).Client(),
+		ConsoleURL: os.Getenv("CONSOLE_PUBLIC_URL"), Log: log})
+	routes.DeltaUploads = deltaupload.New(deltaupload.Deps{Store: postgres.NewDeltaUploadRepository(db), Datasets: routes.Datasets, Uploads: routes.Uploads,
+		Assets: postgres.NewAssetRepository(db), Packs: postgres.NewPackRepository(db), Router: storageRegistry, Audit: auditService, Log: log})
+	consoleURL := os.Getenv("CONSOLE_PUBLIC_URL")
+	if consoleURL == "" {
+		log.Warn("CONSOLE_PUBLIC_URL is not set: publishing and chat shares are refused until it is")
+	} else if err := domain.CheckPublicURL(consoleURL); err != nil {
+		return fmt.Errorf("CONSOLE_PUBLIC_URL: %w", err)
+	}
+	routes.Domain = domain.New(domain.Deps{Store: postgres.NewDomainRepository(db), Datasets: routes.Datasets, Lineage: postgres.NewDatasetRepository(db),
+		Audit: auditService, Client: storageregistry.Policy(storageCfg).Client(), PublicURL: os.Getenv("CONSOLE_PUBLIC_URL"), Log: log,
+		DataCite: domain.DataCite{API: os.Getenv("DATACITE_API"), Repository: os.Getenv("DATACITE_REPOSITORY"), Password: os.Getenv("DATACITE_PASSWORD"), Prefix: os.Getenv("DATACITE_PREFIX")}})
 	routes.Quarantine = processing.NewQuarantine(postgres.NewAssetRepository(db), postgres.NewProcessingJobRepository(db),
 		postgres.NewQuarantineRepository(db), postgres.NewProcessingEventRepository(db), auditService).
 		WithChecks(postgres.NewContentCheckRepository(db))

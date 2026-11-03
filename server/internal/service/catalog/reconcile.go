@@ -316,6 +316,15 @@ func (r *Reconciler) published(ctx context.Context, tenant string, opts Reconcil
 					}
 					bucket, key, versionID, wantSize = loc.Bucket, loc.ObjectKey, loc.StorageVersionID, loc.PackBytes
 				}
+				// Chunks are looked up with their sizes checked; there is no one
+				// object to find here.
+				if _, chunked, err := interfaces.ChunkedExtents(ctx, r.packs, tenant, v.ID); err != nil {
+					report.StorageErrors++
+					r.log.Warn("catalog chunk lookup failed", "tenant_id", tenant, "asset_id", v.ID, "error", err)
+					continue
+				} else if chunked {
+					continue
+				}
 			}
 			var meta interfaces.ObjectMetadata
 			if versionID != "" {
@@ -388,7 +397,7 @@ func (r *Reconciler) unreferenced(ctx context.Context, tenant string, opts Recon
 		ids := make([]string, 0, len(page.Objects))
 		for _, o := range page.Objects {
 			id := strings.TrimPrefix(o.ObjectKey, prefix)
-			if strings.HasPrefix(id, "packs/") {
+			if strings.HasPrefix(id, "packs/") || strings.HasPrefix(id, "chunks/") {
 				continue
 			}
 			objects = append(objects, o)

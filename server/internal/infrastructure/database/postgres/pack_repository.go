@@ -15,7 +15,8 @@ import (
 
 // PackRepository stores packs, their entries and the jobs that build them.
 type PackRepository struct {
-	db *DB
+	db      *DB
+	extents extentCache
 }
 
 var _ interfaces.PackRepository = (*PackRepository)(nil)
@@ -141,7 +142,11 @@ func (r *PackRepository) ReleaseAsset(ctx context.Context, tenantID, assetID str
 	if err != nil {
 		return false, fmt.Errorf("find packs holding an asset: %w", err)
 	}
-	return holding, nil
+	waiting, err := r.releaseChunks(ctx, tenantID, assetID, now)
+	if err != nil {
+		return false, err
+	}
+	return holding || waiting, nil
 }
 
 func (r *PackRepository) GetPack(ctx context.Context, tenantID, packID string) (model.Pack, error) {
@@ -202,6 +207,7 @@ func (r *PackRepository) PackCandidates(ctx context.Context, tenantID string, af
 			  AND COALESCE(a.storage_etag, '') <> '' AND COALESCE(a.checksum_sha256, '') <> ''
 			  AND NOT EXISTS (SELECT 1 FROM pack_entries e
 			                  WHERE e.asset_id = a.id AND e.state IN ('RESERVED', 'PUBLISHED', 'EXCLUDED'))
+			  AND NOT EXISTS (SELECT 1 FROM chunked_assets c WHERE c.asset_id = a.id AND c.state IN ('WRITING', 'PUBLISHED', 'REHYDRATING'))
 			  AND NOT EXISTS (SELECT 1 FROM legal_holds h
 			                  WHERE h.tenant_id = a.tenant_id AND h.released_at IS NULL
 			                    AND (h.scope = 'TENANT'

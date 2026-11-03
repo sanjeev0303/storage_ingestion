@@ -30,6 +30,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/service/audit"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/catalog"
 	cleanupservice "github.com/sanjeev0303/object-storage-platform/internal/service/cleanup"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/domain"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/erasure"
 	eventservice "github.com/sanjeev0303/object-storage-platform/internal/service/events"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/evidence"
@@ -400,6 +401,26 @@ func run() error {
 				log.Warn("erasure progress failed", "error", err)
 			} else if n > 0 {
 				log.Info("erasures completed", "erasures", n)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	// Upstream copies: asks each once a day whether it still is what was
+	// imported (docs/domain.md).
+	watcher := domain.New(domain.Deps{Store: postgres.NewDomainRepository(db), Lineage: postgres.NewDatasetRepository(db),
+		Client: storageregistry.Policy(storageCfg).Client(), Log: log})
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			if n, err := watcher.CheckUpstream(ctx); err != nil {
+				log.Warn("upstream check failed", "error", err)
+			} else if n > 0 {
+				log.Info("upstream sources checked", "sources", n)
 			}
 			select {
 			case <-ctx.Done():

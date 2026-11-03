@@ -1,13 +1,17 @@
 package copyengine
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"strings"
 
 	"github.com/sanjeev0303/object-storage-platform/internal/infrastructure/database/postgres"
+	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/audit"
 )
@@ -42,7 +46,7 @@ func (s *Service) Scrub(ctx context.Context) (ScrubStats, error) {
 			if repairErr := s.repair(ctx, a); repairErr == nil {
 				stats.Repaired++
 				result.Repaired = true
-				result.Detail += "; rewritten from a verified replica"
+				result.Detail += "; rewritten from a verified copy"
 			} else {
 				result.Detail += "; not repaired: " + truncate(repairErr.Error(), 200)
 			}
@@ -70,6 +74,13 @@ func (s *Service) repair(ctx context.Context, a postgres.StoredAsset) error {
 		if _, packed, err := s.deps.Packs.PackedLocation(ctx, a.TenantID, a.AssetID); err != nil || packed {
 			return errors.New("the object is packed; the pack rewrite repairs it")
 		}
+		extents, chunked, err := interfaces.ChunkedExtents(ctx, s.deps.Packs, a.TenantID, a.AssetID)
+		if err != nil {
+			return err
+		}
+		if chunked {
+			return s.repairChunks(ctx, a, extents)
+		}
 	}
 	rep, ok, err := s.deps.Store.VerifiedReplica(ctx, a.TenantID, a.AssetID)
 	if err != nil {
@@ -87,6 +98,65 @@ func (s *Service) repair(ctx context.Context, a postgres.StoredAsset) error {
 		return err
 	}
 	return s.deps.Store.Repaired(ctx, a.TenantID, a.AssetID, meta.VersionID, meta.ETag, s.now())
+}
+
+// repairChunks writes back the chunks of a file that are damaged or missing, from
+// a verified replica, or from the original while it is still there. Every chunk
+// is checked against its hash before it is written, and only bad ones are
+// written: most of a damaged file's chunks, and other files sharing them, are fine.
+func (s *Service) repairChunks(ctx context.Context, a postgres.StoredAsset, extents []model.ChunkExtent) error {
+	dst, err := s.deps.Router.Locate(ctx, a.TenantID, a.ConnectionID)
+	if err != nil {
+		return err
+	}
+	rep, hasReplica, err := s.deps.Store.VerifiedReplica(ctx, a.TenantID, a.AssetID)
+	if err != nil {
+		return err
+	}
+	var source io.ReadCloser
+	if hasReplica {
+		source, err = s.openReplica(ctx, rep)
+	} else {
+		source, err = dst.Storage.OpenRange(ctx, dst.ReadyBucket, a.ObjectKey, 0, -1, interfaces.ReadCondition{VersionID: a.VersionID})
+		if errors.Is(err, interfaces.ErrObjectNotFound) {
+			return errors.New("no verified replica, and the original has gone")
+		}
+	}
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+	buf := make([]byte, 0, 8<<20)
+	for _, e := range extents {
+		if cap(buf) < e.Length {
+			buf = make([]byte, e.Length)
+		}
+		buf = buf[:e.Length]
+		if _, err := io.ReadFull(source, buf); err != nil {
+			return fmt.Errorf("read the source at byte %d: %w", e.Offset, err)
+		}
+		sum := sha256.Sum256(buf)
+		if hex.EncodeToString(sum[:]) != e.SHA256 {
+			return fmt.Errorf("the source differs from the file at byte %d", e.Offset)
+		}
+		if s.chunkIsGood(ctx, dst, e) {
+			continue
+		}
+		if _, err := dst.Storage.WriteObject(ctx, dst.ReadyBucket, e.Key, bytes.NewReader(buf), int64(e.Length), "application/octet-stream"); err != nil {
+			return fmt.Errorf("write chunk back: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Service) chunkIsGood(ctx context.Context, dst interfaces.StorageLocation, e model.ChunkExtent) bool {
+	body, err := dst.Storage.OpenRange(ctx, dst.ReadyBucket, e.Key, 0, -1, interfaces.ReadCondition{})
+	if err != nil {
+		return false
+	}
+	defer body.Close()
+	sum, n, err := hashOf(body)
+	return err == nil && n == int64(e.Length) && sum == e.SHA256
 }
 
 // ScrubFailuresFor lists a dataset's members whose last scrub failed or

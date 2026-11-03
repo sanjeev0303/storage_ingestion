@@ -59,9 +59,54 @@ func publishImport(t *testing.T, q *memory.Queue, id string) {
 	}
 }
 
+// recordingInbox notes whether the outcome could still be written.
+type recordingInbox struct {
+	acceptingInbox
+	expired bool
+}
+
+func (i *recordingInbox) Complete(ctx context.Context, consumer, eventID, owner string, now time.Time, note string) error {
+	i.mu.Lock()
+	i.expired = ctx.Err() != nil
+	i.mu.Unlock()
+	return i.acceptingInbox.Complete(ctx, consumer, eventID, owner, now, note)
+}
+
+// A scan can take far longer than recording its outcome may. The event's success
+// must still be recorded: losing it runs the whole event again.
+func TestASlowHandlerStillRecordsItsOutcome(t *testing.T) {
+	old := recordTimeout
+	recordTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { recordTimeout = old })
+	q := memory.New()
+	publishImport(t, q, "slow")
+	inbox := &recordingInbox{}
+	c, err := NewConsumer(q, inbox, struct {
+		interfaces.DeadLetterRepository
+	}{}, map[string]Handler{event.TypeImportQueued: func(context.Context, event.Envelope) (string, error) {
+		time.Sleep(4 * recordTimeout)
+		return "done", nil
+	}}, ConsumerConfig{Name: "test", Owner: "test", BatchSize: 10, Concurrency: 2, Visibility: 30 * time.Second, Wait: 50 * time.Millisecond, HandlerTimeout: 10 * time.Second,
+		Retry: retry.Policy{BaseDelay: time.Second, MaxDelay: time.Second, MaxAttempts: 3}}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, err := c.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbox.mu.Lock()
+	defer inbox.mu.Unlock()
+	if len(inbox.done) != 1 || inbox.expired || stats.Unrecorded != 0 {
+		t.Fatalf("recorded %v, expired %v, stats %+v", inbox.done, inbox.expired, stats)
+	}
+}
+
 func newTestConsumer(t *testing.T, q *memory.Queue, inbox *acceptingInbox, handler Handler) *Consumer {
 	t.Helper()
-	c, err := NewConsumer(q, inbox, struct{ interfaces.DeadLetterRepository }{}, map[string]Handler{event.TypeImportQueued: handler},
+	c, err := NewConsumer(q, inbox, struct {
+		interfaces.DeadLetterRepository
+	}{}, map[string]Handler{event.TypeImportQueued: handler},
 		ConsumerConfig{
 			Name: "test", Owner: "test", BatchSize: 10, Concurrency: 2,
 			Visibility: 30 * time.Second, Wait: 50 * time.Millisecond, HandlerTimeout: 10 * time.Second,

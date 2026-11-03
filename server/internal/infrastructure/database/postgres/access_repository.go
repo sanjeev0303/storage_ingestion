@@ -24,13 +24,13 @@ func NewAccessRepository(db *DB) *AccessRepository {
 
 // ─── API tokens ──────────────────────────────────────────────────────
 
-const tokenColumns = `id, tenant_id, user_id, name, token_hash, hint, permissions, datasets, networks, allow_links,
+const tokenColumns = `id, tenant_id, user_id, name, token_hash, hint, permissions, datasets, path_prefix, networks, allow_links,
 	expires_at, created_at, last_used_at, COALESCE(last_used_ip, ''), revoked_at, COALESCE(revoked_by, '')`
 
 func scanToken(row pgx.Row) (model.APIToken, error) {
 	var t model.APIToken
 	var perms int64
-	err := row.Scan(&t.ID, &t.TenantID, &t.UserID, &t.Name, &t.TokenHash, &t.Hint, &perms, &t.Datasets, &t.Networks,
+	err := row.Scan(&t.ID, &t.TenantID, &t.UserID, &t.Name, &t.TokenHash, &t.Hint, &perms, &t.Datasets, &t.PathPrefix, &t.Networks,
 		&t.AllowLinks, &t.ExpiresAt, &t.CreatedAt, &t.LastUsedAt, &t.LastUsedIP, &t.RevokedAt, &t.RevokedBy)
 	t.Permissions = model.Permission(perms)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -42,10 +42,10 @@ func scanToken(row pgx.Row) (model.APIToken, error) {
 func (r *AccessRepository) CreateToken(ctx context.Context, t model.APIToken) error {
 	_, err := r.db.Pool.Exec(ctx, `
 		INSERT INTO api_tokens (id, tenant_id, user_id, name, token_hash, hint, permissions, datasets, networks, allow_links,
-			expires_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+			expires_at, created_at, path_prefix)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
 		t.ID, t.TenantID, t.UserID, t.Name, t.TokenHash, t.Hint, int64(t.Permissions), nonNil(t.Datasets), nonNil(t.Networks),
-		t.AllowLinks, t.ExpiresAt, t.CreatedAt)
+		t.AllowLinks, t.ExpiresAt, t.CreatedAt, t.PathPrefix)
 	if err != nil {
 		return fmt.Errorf("create API token: %w", err)
 	}

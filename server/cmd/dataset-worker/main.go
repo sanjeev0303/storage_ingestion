@@ -115,6 +115,7 @@ func run() error {
 		Content: storage, ContentBucket: contentBucket, Router: router, Packs: postgres.NewPackRepository(db),
 		Quotas: quota.NewService(postgres.NewQuotaRepository(db), sec.Quotas, auditService, log),
 		Audit:  auditService, Metrics: registry, Log: log, Quality: postgres.NewQualityRepository(db),
+		Dicom: postgres.NewConnectorsRepository(db), Recordings: postgres.NewDomainRepository(db), Chunks: postgres.NewChunkRepository(db),
 	}, dc)
 	if err != nil {
 		return fmt.Errorf("create dataset service: %w", err)
@@ -173,6 +174,11 @@ func run() error {
 		defer wg.Done()
 		runQuality(ctx, svc, owner, log)
 	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runChunks(ctx, svc, owner, log)
+	}()
 
 	log.Info("dataset worker started", "owner", owner, "poll_interval", dc.PollInterval, "slots", dc.WorkerSlots)
 	datasetworker.Run(ctx, svc, owner, dc.WorkerSlots, dc.PollInterval, log)
@@ -219,6 +225,38 @@ func runCopies(ctx context.Context, copies *copyengine.Service, log *slog.Logger
 
 // runQuality profiles queued versions one after another, and compares
 // runs' evaluation inputs with their training inputs, until ctx ends.
+// runChunks indexes the versions of datasets that ask for it, and once an hour
+// forgets the chunks of files that are gone.
+func runChunks(ctx context.Context, svc *datasetservice.Service, owner string, log *slog.Logger) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	pruned := time.Now()
+	for {
+		for ctx.Err() == nil {
+			found, err := svc.ChunkOnce(ctx, owner)
+			if err != nil {
+				log.Warn("chunk indexing failed", "error", err)
+			}
+			if !found || err != nil {
+				break
+			}
+		}
+		if time.Since(pruned) > time.Hour {
+			pruned = time.Now()
+			if n, err := svc.PruneChunks(ctx); err != nil {
+				log.Warn("chunk pruning failed", "error", err)
+			} else if n > 0 {
+				log.Info("chunks forgotten", "files", n)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
 func runQuality(ctx context.Context, svc *datasetservice.Service, owner string, log *slog.Logger) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()

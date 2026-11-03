@@ -20,8 +20,9 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/infrastructure/compaction"
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
-	"github.com/sanjeev0303/object-storage-platform/internal/platform/metrics"
+	"github.com/sanjeev0303/object-storage-platform/internal/platform/chunkread"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/correlation"
+	"github.com/sanjeev0303/object-storage-platform/internal/platform/metrics"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/retry"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/audit"
 )
@@ -108,6 +109,8 @@ type Service struct {
 	// router reaches assets published on tenants' storage connections;
 	// nil serves only the platform's bucket.
 	router interfaces.StorageRouter
+	// chunkCache keeps chunks recently read, for small reads of chunked files.
+	chunkCache *chunkread.Cache
 	// packs finds assets whose bytes were packed; nil when nothing is.
 	packs interfaces.PackLocator
 	// governance applies link, egress and classification rules; optional.
@@ -167,6 +170,7 @@ func (s *Service) Route(router interfaces.StorageRouter) *Service {
 
 // Packed lets delivery serve assets whose bytes were packed (Phase 13).
 func (s *Service) Packed(packs interfaces.PackLocator) *Service {
+	s.chunkCache = chunkread.NewCache(chunkCacheBytes, chunkCacheAge)
 	s.packs = packs
 	return s
 }
@@ -182,6 +186,8 @@ type readyStorage struct {
 	presign bool
 	// packed, when set, is the pack entry the bytes are read from.
 	packed *model.PackedLocation
+	// chunks, when set, are the chunks the bytes are read from.
+	chunks []model.ChunkExtent
 	// replica, when set, is the verified copy read because the primary
 	// did not answer (docs/copy-engine.md).
 	replica *model.AssetReplica
@@ -705,9 +711,12 @@ func (s *Service) open(ctx context.Context, principal model.Principal, asset mod
 	}
 
 	var body io.ReadCloser
-	if r.packed != nil {
+	switch {
+	case r.chunks != nil:
+		body, err = s.openChunked(ctx, asset, r, first, last, partial)
+	case r.packed != nil:
 		body, err = s.openPacked(ctx, asset, r, first, last, partial, cond)
-	} else {
+	default:
 		body, err = s.openReady(ctx, asset, r, first, last, partial, cond)
 	}
 	// The primary failed: a verified replica, if there is one, serves.
@@ -769,12 +778,43 @@ func (s *Service) openPacked(ctx context.Context, asset model.Asset, r readyStor
 	return compaction.VerifiedEntry(body, asset.SizeBytes, asset.ChecksumSHA256), nil
 }
 
+// openChunked reads bytes first to last of a chunked asset. Each chunk is
+// checked as it is read, and a whole read against the asset's SHA-256 too.
+func (s *Service) openChunked(ctx context.Context, asset model.Asset, r readyStorage, first, last int64, partial bool) (io.ReadCloser, error) {
+	if !partial {
+		first, last = 0, -1
+	}
+	// Only small reads use the cache: a whole file would push everything out of it.
+	var cache *chunkread.Cache
+	if partial {
+		cache = s.chunkCache
+	}
+	body, err := chunkread.OpenCached(ctx, cache, r.storage, r.bucket, r.chunks, first, last)
+	if err != nil {
+		return nil, err
+	}
+	s.cfg.Metrics.Add("downloads_chunked", 1)
+	if partial {
+		return body, nil
+	}
+	return compaction.VerifiedEntry(body, asset.SizeBytes, asset.ChecksumSHA256), nil
+}
+
+const (
+	chunkCacheBytes = 128 << 20
+	chunkCacheAge   = 5 * time.Minute
+)
+
 // readCondition pins reads to the stored object the asset was published
 // as. Assets published before validators were recorded are checked
 // against a fresh HEAD (size must match), and that ETag is used for the
 // read, so one response never mixes versions. A HEAD request also checks
 // the stored object, so it answers like the GET would.
 func (s *Service) readCondition(ctx context.Context, principal model.Principal, asset model.Asset, r readyStorage, operation string, req DownloadRequest) (interfaces.ReadCondition, error) {
+	if r.chunks != nil {
+		// Chunks are named by their hash and checked when read.
+		return interfaces.ReadCondition{}, nil
+	}
 	if r.packed != nil {
 		// A packed asset is read from its pack, pinned to the pack as written.
 		cond := interfaces.ReadCondition{IfMatch: r.packed.StorageETag, VersionID: r.packed.StorageVersionID}
@@ -934,6 +974,15 @@ func (s *Service) deliverable(ctx context.Context, principal model.Principal, as
 			// A signed URL or the CDN could read the pack's other entries:
 			// a packed asset is only ever streamed, its own bytes only.
 			r.packed, r.presign, r.platform = &loc, false, false
+		}
+		extents, chunked, err := interfaces.ChunkedExtents(ctx, s.packs, asset.TenantID, asset.ID)
+		switch {
+		case err != nil:
+			s.fail(ctx, principal, assetID, operation, requestID, "chunk_lookup", err)
+			return model.Asset{}, readyStorage{}, ErrStorageUnavailable
+		case chunked:
+			// One object does not hold the file: it can only be streamed.
+			r.chunks, r.presign, r.platform = extents, false, false
 		}
 	}
 	if s.tiers != nil {

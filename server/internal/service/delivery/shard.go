@@ -212,9 +212,12 @@ func (s *Service) openWhole(ctx context.Context, principal model.Principal, asse
 	// Ranged reads of the whole file: the caller checks the bytes.
 	last := asset.SizeBytes - 1
 	var body io.ReadCloser
-	if r.packed != nil {
+	switch {
+	case r.chunks != nil:
+		body, err = s.openChunked(ctx, asset, r, 0, last, true)
+	case r.packed != nil:
 		body, err = s.openPacked(ctx, asset, r, 0, last, true, cond)
-	} else {
+	default:
 		body, err = s.openReady(ctx, asset, r, 0, last, true, cond)
 	}
 	if err != nil && r.replica == nil && ctx.Err() == nil {
