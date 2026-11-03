@@ -24,6 +24,7 @@ const (
 	DefaultPartSize   = 8 << 20
 	SingleUploadLimit = 64 << 20
 	maxParts          = 10000
+	partsAtOnce       = 4
 )
 
 // Progress is what is needed to continue an upload.
@@ -248,23 +249,38 @@ func (c *Client) uploadParts(ctx context.Context, file string, size int64, sum s
 		if err := c.Do(ctx, http.MethodPost, base+"/parts/urls", map[string]any{"part_numbers": batch}, &urls); err != nil {
 			return progress.UploadID, fmt.Errorf("part links: %w", err)
 		}
+		// One connection to a far bucket is slow; several parts at once fill the link.
+		send, cancel := context.WithCancel(ctx)
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		var once sync.Once
+		var sendErr error
+		slots := make(chan struct{}, partsAtOnce)
 		for _, part := range urls.Parts {
-			offset := int64(part.PartNumber-1) * wanted
-			length := min(wanted, size-offset)
-			etag, err := c.put(ctx, part.URL, file, offset, length, nil, opts)
-			if err != nil {
-				return progress.UploadID, fmt.Errorf("part %d: %w", part.PartNumber, err)
+			select {
+			case slots <- struct{}{}:
+			case <-send.Done():
 			}
-			if err := c.Do(ctx, http.MethodPost, base+"/parts/confirm", map[string]any{
-				"parts": []map[string]any{{"part_number": part.PartNumber, "etag": etag, "size_bytes": length}}}, nil); err != nil {
-				return progress.UploadID, err
+			if send.Err() != nil {
+				break
 			}
-			progress.Parts[part.PartNumber] = etag
-			if opts.Store != nil {
-				if err := opts.Store.SavePart(part.PartNumber, etag); err != nil {
-					return progress.UploadID, err
+			wg.Add(1)
+			go func(number int, url string) {
+				defer wg.Done()
+				defer func() { <-slots }()
+				err := c.sendPart(send, base, file, url, number, wanted, size, opts, &mu, progress)
+				if err != nil {
+					once.Do(func() { sendErr = err; cancel() })
 				}
-			}
+			}(part.PartNumber, part.URL)
+		}
+		wg.Wait()
+		cancel()
+		if sendErr != nil {
+			return progress.UploadID, sendErr
+		}
+		if err := ctx.Err(); err != nil {
+			return progress.UploadID, err
 		}
 	}
 	numbers := make([]int, 0, len(progress.Parts))
@@ -277,6 +293,27 @@ func (c *Client) uploadParts(ctx context.Context, file string, size int64, sum s
 		completed[i] = map[string]any{"part_number": n, "etag": progress.Parts[n]}
 	}
 	return progress.UploadID, c.Do(ctx, http.MethodPost, base+"/complete", map[string]any{"parts": completed, "checksum_sha256": sum}, nil)
+}
+
+// sendPart puts one part, confirms it and records it in progress.
+func (c *Client) sendPart(ctx context.Context, base, file, url string, number int, wanted, size int64, opts UploadOptions, mu *sync.Mutex, progress *Progress) error {
+	offset := int64(number-1) * wanted
+	length := min(wanted, size-offset)
+	etag, err := c.put(ctx, url, file, offset, length, nil, opts)
+	if err != nil {
+		return fmt.Errorf("part %d: %w", number, err)
+	}
+	if err := c.Do(ctx, http.MethodPost, base+"/parts/confirm", map[string]any{
+		"parts": []map[string]any{{"part_number": number, "etag": etag, "size_bytes": length}}}, nil); err != nil {
+		return err
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	progress.Parts[number] = etag
+	if opts.Store != nil {
+		return opts.Store.SavePart(number, etag)
+	}
+	return nil
 }
 
 var errStorage = errors.New("storage refused the upload")

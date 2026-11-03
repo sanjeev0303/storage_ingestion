@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 import unittest
 
 from osp import ingest, snapshots
@@ -66,6 +67,46 @@ class IngestTest(unittest.TestCase):
             self.assertEqual(line["checksum"], "sha256:" + sha(b"id\n1\n"))
             self.assertEqual(line["size"], 5)
             self.assertEqual(line["content_type"], "text/csv")
+
+    def test_parts_go_side_by_side_and_complete_in_order(self):
+        data = os.urandom(ingest.PART_SIZE * 3 + 100)
+        state = {"in_flight": 0, "most": 0, "parts": {}, "completed": None}
+        lock = threading.Lock()
+
+        def api(method, path, body, headers):
+            if path.endswith("/parts/urls"):
+                numbers = json.loads(body)["part_numbers"]
+                return 200, {"parts": [{"part_number": n, "url": f"{server.url}/put/{n}"} for n in numbers]}, None
+            if method == "PUT":
+                with lock:
+                    state["in_flight"] += 1
+                    state["most"] = max(state["most"], state["in_flight"])
+                time.sleep(0.05)
+                n = int(path.rsplit("/", 1)[1])
+                with lock:
+                    state["in_flight"] -= 1
+                    state["parts"][n] = body
+                return 200, b"", {"ETag": f'"e{n}"'}
+            if path.endswith("/complete"):
+                state["completed"] = json.loads(body)["parts"]
+            return 200, {}, None
+
+        server = Server(api)
+        with tempfile.TemporaryDirectory() as d:
+            disk = os.path.join(d, "big.bin")
+            with open(disk, "wb") as f:
+                f.write(data)
+            try:
+                local = ingest.LocalFile("big.bin", disk, len(data), "application/octet-stream")
+                ingest._send_parts(Client(server.url, access_token="t"), "/api/v1/uploads/u1", local, {})
+            finally:
+                server.close()
+        completed = state["completed"]
+        self.assertEqual([p["part_number"] for p in completed], [1, 2, 3, 4])
+        self.assertEqual([p["etag"] for p in completed], ['"e1"', '"e2"', '"e3"', '"e4"'])
+        self.assertEqual(b"".join(state["parts"][n] for n in (1, 2, 3, 4)), data)
+        self.assertGreater(state["most"], 1, "parts of one file go at once")
+        self.assertLessEqual(state["most"], ingest.PARTS_AT_ONCE)
 
 
 class SnapshotTest(unittest.TestCase):

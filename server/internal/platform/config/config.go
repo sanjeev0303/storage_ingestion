@@ -207,12 +207,12 @@ type Processing struct {
 
 	// Content checks (active content, model files, secrets, formats) are
 	// on unless CONTENT_CHECKS_ENABLED=false.
-	ContentChecks     bool
-	ContentMaxBytes   int64
-	SecretScanBytes   int64
-	ContentHookURL    string
-	ContentHookToken  string
-	ContentHookBytes  int64
+	ContentChecks      bool
+	ContentMaxBytes    int64
+	SecretScanBytes    int64
+	ContentHookURL     string
+	ContentHookToken   string
+	ContentHookBytes   int64
 	ContentHookTimeout time.Duration
 	// RescanBatch published assets are re-scanned a cycle when the
 	// scanner's signatures change; 0 turns re-scans off.
