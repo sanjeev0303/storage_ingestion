@@ -102,6 +102,9 @@ type Config struct {
 	// overlapping segments, ScanParallelism (default 4) at a time.
 	ScanSegmentBytes int64
 	ScanParallelism  int
+	// ScanSpoolBytes: a segmented object up to this size is read once into a
+	// temporary file and scanned from there (default 2 GiB; negative: never).
+	ScanSpoolBytes int64
 	// MinThroughput, in bytes a second, gives a large object's job more
 	// time than MaxJobDuration: its size at this rate is added. Zero adds
 	// nothing.
@@ -144,6 +147,9 @@ func NewService(deps Dependencies, cfg Config, log *slog.Logger) (*Service, erro
 	}
 	if cfg.ScanParallelism == 0 {
 		cfg.ScanParallelism = 4
+	}
+	if cfg.ScanSpoolBytes == 0 {
+		cfg.ScanSpoolBytes = 2 << 30
 	}
 	if cfg.ScanSegmentBytes <= scanOverlap || cfg.ScanParallelism < 0 || cfg.MinThroughput < 0 {
 		return nil, errors.New("processing scan segments must be larger than their overlap, and parallelism and throughput not negative")

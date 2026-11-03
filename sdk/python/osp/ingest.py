@@ -15,6 +15,8 @@ import time
 from .client import put_bytes
 
 PART_SIZE = 8 * 1024 * 1024
+# Parts of one file sent at once: one connection to a far bucket is slow.
+PARTS_AT_ONCE = 4
 # Manifests up to this size go in the request body; larger ones are staged.
 INLINE_MANIFEST_LIMIT = 16 * 1024 * 1024
 FINISHED_STATES = {"COMPLETED", "PARTIALLY_COMPLETED", "FAILED", "CANCELLED"}
@@ -340,16 +342,21 @@ def _send_parts(client, base, local, complete_body):
     for start in range(0, count, 100):
         answer = client.post(base + "/parts/urls", {"part_numbers": numbers[start:start + 100]})
         urls.extend(answer["parts"])
-    recorded, completed = [], []
-    with open(local.disk_path, "rb") as f:
-        for i, part in enumerate(urls):
-            offset = i * PART_SIZE
-            length = min(PART_SIZE, local.size - offset)
+
+    def send(i):
+        offset = i * PART_SIZE
+        length = min(PART_SIZE, local.size - offset)
+        with open(local.disk_path, "rb") as f:
             f.seek(offset)
             data = f.read(length)
-            etag = put_bytes(part["url"], data, length)
-            recorded.append({"part_number": part["part_number"], "etag": etag, "size_bytes": length})
-            completed.append({"part_number": part["part_number"], "etag": etag})
+        return put_bytes(urls[i]["url"], data, length), length
+
+    with concurrent.futures.ThreadPoolExecutor(PARTS_AT_ONCE) as pool:
+        sent = list(pool.map(send, range(len(urls))))
+    recorded, completed = [], []
+    for part, (etag, length) in zip(urls, sent):
+        recorded.append({"part_number": part["part_number"], "etag": etag, "size_bytes": length})
+        completed.append({"part_number": part["part_number"], "etag": etag})
     for start in range(0, len(recorded), 100):
         client.post(base + "/parts/confirm", {"parts": recorded[start:start + 100]})
     client.post(base + "/complete", {"parts": completed, **complete_body})

@@ -58,6 +58,9 @@ export type Publication = {
 
 export type PublishedResponse = { publication: Publication; landing_url: string };
 
+// A snapshot not published yet answers publication: null.
+export type PublicationResponse = { publication: Publication | null; landing_url: string };
+
 export type RetentionEstimate = {
   total_bytes: number;
   years: number;
@@ -116,7 +119,7 @@ export const listUpstream = (datasetId: string, signal?: AbortSignal) =>
   api<{ sources: UpstreamSource[] }>(`/upstream-sources?dataset_id=${encodeURIComponent(datasetId)}`, { signal });
 
 export const getPublication = (id: string, versionId: string, signal?: AbortSignal) =>
-  api<PublishedResponse>(`${versionPath(id, versionId)}/publication`, { signal });
+  api<PublicationResponse>(`${versionPath(id, versionId)}/publication`, { signal });
 
 export const publish = (
   id: string,

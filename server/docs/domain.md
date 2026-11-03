@@ -55,6 +55,8 @@ Each snapshot holding imported bytes is linked in the lineage to an `UPSTREAM_SO
 
 The landing page is public at `<CONSOLE_PUBLIC_URL>/published/<slug>`, from `GET /api/v1/public/publications/{slug}`, which needs no credential and is limited by address. It shows the metadata, the file count and size, the manifest's SHA-256, a citation, BibTeX, RIS, the DataCite metadata, and schema.org JSON-LD for dataset search engines. **File names and data stay private**; readers ask for access. A published version is kept by tiering's expiry (docs/tiering.md).
 
+`GET .../versions/{versionID}/publication` answers `{"publication", "landing_url"}`, with `publication` null for a snapshot not published yet.
+
 `CONSOLE_PUBLIC_URL` must be set: without it a citation would point nowhere, and publishing answers **409** `publishing_not_configured`.
 
 **DOIs.** Set `DATACITE_API` (`https://api.datacite.org`, or `https://api.test.datacite.org` to try it), `DATACITE_REPOSITORY`, `DATACITE_PASSWORD`, `DATACITE_PREFIX` and `CONSOLE_PUBLIC_URL`. Without them `mint_doi` answers **409** `doi_not_configured`. The DOI is `<prefix>/osp.<slug>`, registered with a `PUT`, so trying again cannot make a second one. A failure leaves the publication standing with the error in `doi_error`, and `POST .../publication/doi` tries again.
