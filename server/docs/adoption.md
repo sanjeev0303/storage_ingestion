@@ -14,13 +14,17 @@ Data an organization already has in its own bucket can be brought under the plat
 | Source | `source_ref` | What it reads |
 | --- | --- | --- |
 | `MANIFEST` | an object key, or `inline` | JSON Lines: `key`, optional `path`, `size`, `content_type`, `metadata`, and expected digests (`md5`, `sha1`, `sha256`, `sha512`, `crc32c`, `xxh64`, `xxh3`, `xxh128`, `c4`, top-level or under `digests`) |
-| `S3_INVENTORY` | the report's `manifest.json` | An S3 Inventory report in CSV: each data file is checked against its MD5, keys are URL-decoded, delete markers and older versions skipped. A single-part object's ETag becomes its expected MD5; a multipart ETag is not a digest and is not used |
-| `MHL` | the `.mhl` file | ASC MHL v2 (paths relative to the folder holding `ascmhl/`) or legacy v1 (relative to the list); `md5`, `sha1`, `xxh64`, `xxh3`, `xxh128`, `c4`, and v1's little-endian `xxhash64` |
+| `S3_INVENTORY` | the report's `manifest.json` | An S3 Inventory report in CSV or Parquet: each data file is checked against its MD5, CSV keys are URL-decoded (Parquet's are not encoded), delete markers and older versions skipped. A single-part object's ETag becomes its expected MD5; a multipart ETag is not a digest and is not used |
+| `MHL` | the `.mhl` file, or the `ascmhl` folder (or its `ascmhl_chain.xml`) | ASC MHL v2 (paths relative to the folder holding `ascmhl/`) or legacy v1 (relative to the list); `md5`, `sha1`, `xxh64`, `xxh3`, `xxh128`, `c4`, and v1's little-endian `xxhash64`. Given the folder, every generation the chain lists is read, oldest first, and must hash to the C4 id the chain records, or the job fails: a list edited afterwards vouches for nothing. A file in several generations takes its newest hashes |
 | `BAGIT` | the bag's folder | RFC 8493: `bagit.txt`, every `manifest-<alg>.txt` present, `bag-info.txt` fields as `bag.<field>` metadata; a file count that disagrees with Payload-Oxum fails the job |
 | `URL_LIST` | an object key, or `inline` | JSON Lines with `url` (and `path`, digests...), or bare `URL [path]` lines |
 | `STAC` | a URL | A STAC Item, ItemCollection, Collection or Catalog (child links one level deep, up to 10,000 items): each asset under `collection/item/asset.ext`, item properties as `stac.*` metadata, `file:checksum` (SHA-256, SHA-512 or MD5 multihash) as the expected digest |
 
 Inline sources are limited to 16 MiB; larger ones are read from the bucket. Entries a source describes badly (invalid JSON, digests or paths) are kept as `SKIPPED` with a code, so they show in the results.
+
+## Quota
+
+Once a source is read, and before anything is adopted, the job reserves the organization's quota for its entries, as an upload reserves its bytes (migration 000047): an entry larger than the per-object limit is refused (`quota_exceeded`), and if the rest would pass the storage or object-count limit the job fails at once, adopting nothing. Each adopted object turns its share into stored usage; what is left is given back when the job ends, fails or is cancelled. An entry whose size the source did not give reserves nothing, so its bytes are checked when it is adopted, and refused (`quota_exceeded`) if they no longer fit. Imports reserve through their own uploads.
 
 ## Adopting in place
 
@@ -61,6 +65,4 @@ A URL entry is fetched through the network guard (no private, loopback or metada
 
 ## Not covered
 
-- S3 Inventory reports in ORC or Parquet: configure the report as CSV.
-- MHL v2 chains (`ascmhl_chain.xml`) are not walked: point the job at the generation to adopt.
-- Adoption does not reserve quota up front: usage counts adopted bytes as they are published.
+- S3 Inventory reports in ORC: configure the report as CSV or Parquet. No ORC reader ships with the platform's dependencies, and S3 offers the other two for the same report.

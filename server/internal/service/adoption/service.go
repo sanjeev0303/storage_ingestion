@@ -41,6 +41,12 @@ type Store interface {
 	Count(ctx context.Context, jobID string, now time.Time) (model.AdoptionJob, error)
 	AdoptObject(ctx context.Context, o postgres.AdoptedObject) (string, error)
 	AdoptedKey(ctx context.Context, tenantID, connectionID, key string) (string, error)
+	ReserveQuota(ctx context.Context, id, owner string, limits model.TenantQuota, now time.Time) error
+}
+
+// Quota gives an organization's limits (quota.Service).
+type Quota interface {
+	Effective(ctx context.Context, tenantID string) (model.TenantQuota, error)
 }
 
 // Uploads creates and completes the upload sessions imports go through
@@ -66,6 +72,9 @@ type Dependencies struct {
 	// Net fetches URLs, refusing private and metadata addresses.
 	Net   netguard.Policy
 	Audit interfaces.AuditRecorder
+	// Quota, when set, reserves an adoption's bytes before it starts.
+	// Imports go through uploads, which reserve their own.
+	Quota Quota
 }
 
 type Config struct {
@@ -319,6 +328,19 @@ func (s *Service) read(ctx context.Context, job model.AdoptionJob) error {
 	if err := flush(); err != nil {
 		return err
 	}
+	if !model.AdoptionImports(job.Source) && s.deps.Quota != nil {
+		limits, err := s.deps.Quota.Effective(ctx, job.TenantID)
+		if err != nil {
+			return err
+		}
+		if err := s.deps.Store.ReserveQuota(ctx, job.ID, s.cfg.Owner, limits, s.now()); err != nil {
+			var q *model.QuotaError
+			if errors.As(err, &q) {
+				return fmt.Errorf("the organization's quota cannot hold this adoption: %s (%d used of %d, %d more needed)", q.Limit, q.Used, q.Max, q.Requested)
+			}
+			return err
+		}
+	}
 	if _, err := s.deps.Store.Count(ctx, job.ID, s.now()); err != nil {
 		return err
 	}
@@ -383,6 +405,12 @@ func (s *Service) process(ctx context.Context, job model.AdoptionJob, stats *Run
 	if err != nil {
 		return err
 	}
+	var limits model.TenantQuota
+	if s.deps.Quota != nil {
+		if limits, err = s.deps.Quota.Effective(ctx, job.TenantID); err != nil {
+			return err
+		}
+	}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	slots := make(chan struct{}, s.cfg.Concurrency)
@@ -396,7 +424,7 @@ func (s *Service) process(ctx context.Context, job model.AdoptionJob, stats *Run
 			if model.AdoptionImports(job.Source) {
 				done = s.importURL(ctx, job, loc, entry)
 			} else {
-				done = s.adopt(ctx, job, loc, policy, entry)
+				done = s.adopt(ctx, job, loc, policy, limits.MaxStorageBytes, entry)
 			}
 			if done.State == model.AdoptFailed && done.Attempts < s.cfg.MaxAttempts {
 				done.State = model.AdoptPending // tried again next cycle
@@ -439,7 +467,7 @@ func fail(e model.AdoptionEntry, detail string) model.AdoptionEntry {
 // adopt checks one object where it is and publishes it in place: its
 // size, every expected digest, the content checks and the malware scan,
 // on the exact version read.
-func (s *Service) adopt(ctx context.Context, job model.AdoptionJob, loc interfaces.StorageLocation, policy model.ContentPolicy, e model.AdoptionEntry) model.AdoptionEntry {
+func (s *Service) adopt(ctx context.Context, job model.AdoptionJob, loc interfaces.StorageLocation, policy model.ContentPolicy, maxStorage int64, e model.AdoptionEntry) model.AdoptionEntry {
 	key := e.ObjectKey
 	switch {
 	case key == "" || strings.HasPrefix(key, "/"):
@@ -530,6 +558,7 @@ func (s *Service) adopt(ctx context.Context, job model.AdoptionJob, loc interfac
 		version, _ = versioned.Version(ctx)
 	}
 	assetID, err := s.deps.Store.AdoptObject(ctx, postgres.AdoptedObject{
+		JobID: job.ID, MaxStorageBytes: maxStorage,
 		TenantID: job.TenantID, OwnerID: job.CreatedBy, ConnectionID: job.ConnectionID, Dataset: job.Dataset,
 		Path: e.Path, ObjectKey: key, FileName: fileName, ContentType: contentType, SizeBytes: meta.SizeBytes,
 		SHA256: e.SHA256, ETag: meta.ETag, VersionID: meta.VersionID, Metadata: e.Metadata, Mode: job.Mode,
@@ -538,6 +567,9 @@ func (s *Service) adopt(ctx context.Context, job model.AdoptionJob, loc interfac
 	})
 	if errors.Is(err, model.ErrPathExists) || errors.Is(err, model.ErrPathBusy) {
 		return reject(e, "path_conflict", err.Error())
+	}
+	if errors.Is(err, model.ErrQuotaExceeded) {
+		return reject(e, "quota_exceeded", "the object does not fit under the organization's storage quota")
 	}
 	if err != nil {
 		return fail(e, err.Error())

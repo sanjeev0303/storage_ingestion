@@ -74,6 +74,8 @@ func (v ContentInspector) inspectGzip(r io.Reader, sample interfaces.ContentSamp
 		err = v.inspectTar(br, 0, in)
 	case path.Ext(inner) == ".fastq" || path.Ext(inner) == ".fq":
 		err = inspectFASTQ(br, "fastq", in)
+	case textName(inner) && !hasBinaryBytes(head):
+		err = v.scanArchived(br, path.Base(inner), in)
 	}
 	if err == nil {
 		// Read what the inner check left, so every member's CRC is checked.
@@ -143,6 +145,10 @@ func (v ContentInspector) inspectTar(r io.Reader, _ int64, in *inspection) error
 			in.find("tar", "format.unsafe_archive_entry", "link "+h.Name+" points outside the archive")
 		case h.Typeflag == tar.TypeChar || h.Typeflag == tar.TypeBlock || h.Typeflag == tar.TypeFifo:
 			in.find("tar", "format.unsafe_archive_entry", "entry "+h.Name+" is a device file")
+		case h.Typeflag == tar.TypeReg && textName(h.Name):
+			if err := v.scanArchived(tr, h.Name, in); err != nil {
+				return err
+			}
 		}
 	}
 }

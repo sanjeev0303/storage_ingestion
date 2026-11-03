@@ -26,11 +26,49 @@ var secretPatterns = []struct {
 	{"secret.jwt", "a signed JSON web token", regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{20,}`)},
 }
 
+// scanArchived scans a text file inside an archive or a gzip stream, out of
+// one budget for the whole upload, so an archive of many files costs no more
+// than one large text file.
+func (v ContentInspector) scanArchived(r io.Reader, where string, in *inspection) error {
+	budget := v.SecretScanBytes
+	if budget <= 0 {
+		budget = 64 << 20
+	}
+	left := budget - in.secretBytes
+	if left <= 0 {
+		if !in.secretBudgetSpent {
+			in.secretBudgetSpent = true
+			in.note("secret scan stopped after %d bytes of archived text; later files were not scanned", budget)
+		}
+		return nil
+	}
+	counted := &countingReader{r: r}
+	err := scanSecrets(counted, left, in, where)
+	in.secretBytes += counted.n
+	return err
+}
+
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
 // scanSecrets reads up to limit bytes in chunks that overlap by more than
 // the longest match, so a secret split between two reads is still found.
-func scanSecrets(r io.Reader, limit int64, in *inspection) error {
+// where names the file inside an archive, or is empty.
+func scanSecrets(r io.Reader, limit int64, in *inspection, where string) error {
 	if limit <= 0 {
 		limit = 64 << 20
+	}
+	inside := ""
+	if where != "" {
+		inside = " in " + where
 	}
 	const chunk, overlap = 1 << 20, 512
 	type hit struct {
@@ -71,7 +109,7 @@ func scanSecrets(r io.Reader, limit int64, in *inspection) error {
 			return err
 		}
 		if total >= limit {
-			in.note("secret scan read the first %d bytes; the rest were not scanned", limit)
+			in.note("secret scan read the first %d bytes%s; the rest were not scanned", limit, inside)
 			break
 		}
 		keep := min(overlap, len(buf))
@@ -80,7 +118,7 @@ func scanSecrets(r io.Reader, limit int64, in *inspection) error {
 	}
 	for _, p := range secretPatterns {
 		if h := hits[p.code]; h != nil {
-			in.find("secrets", p.code, fmt.Sprintf("%s at byte %d (%d found)", p.what, h.at, h.count))
+			in.find("secrets", p.code, fmt.Sprintf("%s%s at byte %d (%d found)", p.what, inside, h.at, h.count))
 		}
 	}
 	return nil

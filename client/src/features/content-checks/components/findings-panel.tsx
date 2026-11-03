@@ -25,11 +25,17 @@ export const FAMILY_TEXT: Record<string, { title: string; detail: string }> = {
   secret: {
     title: "Credentials in text",
     detail:
-      "AWS, GitHub, Slack, Stripe, Google, Azure and AI provider keys, private keys and signed tokens. A finding names the kind and where it is, never the value.",
+      "AWS, GitHub, Slack, Stripe, Google, Azure and AI provider keys, private keys and signed tokens, in text files and in text inside zip, tar and gzip archives. A finding names the kind and where it is, never the value.",
   },
   format: {
     title: "Broken formats",
-    detail: "Damaged gzip, cut-short BGZF and BAM files, malformed FASTQ records, MCAP recordings without a footer and tar entries that escape their folder.",
+    detail:
+      "Damaged gzip, cut-short BGZF and BAM files, malformed FASTQ records, MCAP recordings without a footer, tar entries that escape their folder, and broken PNG and JPEG files.",
+  },
+  image: {
+    title: "Image metadata",
+    detail:
+      "PNG text chunks ImageMagick reads as a file to embed, chunks outside the PNG specification, JPEG files cut short, and bytes after an image's end that make it a second file.",
   },
   external: {
     title: "External engine",

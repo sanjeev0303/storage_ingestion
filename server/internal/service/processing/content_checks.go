@@ -36,6 +36,9 @@ func (ContentInspector) Name() string { return "content" }
 type inspection struct {
 	findings []model.ContentFinding
 	notes    []string
+	// Bytes of archived text the secret scan has read, out of its budget.
+	secretBytes       int64
+	secretBudgetSpent bool
 }
 
 func (in *inspection) find(source, code, detail string) {
@@ -89,6 +92,10 @@ func contentFormat(sample interfaces.ContentSample) string {
 	switch {
 	case bytes.HasPrefix(head, []byte("%PDF-")):
 		return "pdf"
+	case bytes.HasPrefix(head, pngMagic):
+		return "png"
+	case bytes.HasPrefix(head, []byte{0xFF, 0xD8, 0xFF}):
+		return "jpeg"
 	case bytes.HasPrefix(head, []byte("PK\x03\x04")):
 		return "zip"
 	case bytes.HasPrefix(head, oleMagic):
@@ -126,9 +133,19 @@ func isText(sample interfaces.ContentSample) bool {
 	case "text/plain", "text/csv", "application/json":
 		return true
 	}
-	switch strings.ToLower(path.Ext(sample.FileName)) {
+	return textName(sample.FileName) && !hasBinaryBytes(sample.Head)
+}
+
+// textName: configuration, code, notebook and data files people commit
+// credentials to, whether alone or inside an archive.
+func textName(name string) bool {
+	base := strings.ToLower(path.Base(name))
+	if base == ".env" || strings.HasPrefix(base, ".env.") {
+		return true
+	}
+	switch path.Ext(base) {
 	case ".env", ".yaml", ".yml", ".ini", ".cfg", ".conf", ".toml", ".properties", ".ipynb", ".tf", ".tfvars", ".py", ".r", ".sql", ".log", ".txt", ".csv", ".tsv", ".json", ".jsonl", ".md":
-		return !hasBinaryBytes(sample.Head)
+		return true
 	}
 	return false
 }
@@ -142,6 +159,10 @@ func (v ContentInspector) streamed(ctx context.Context, sample interfaces.Conten
 	defer body.Close()
 	r := &ctxReader{ctx: ctx, r: body}
 	switch format {
+	case "png":
+		return inspectPNG(r, in)
+	case "jpeg":
+		return inspectJPEG(r, in)
 	case "ole":
 		return inspectOLE(r, in)
 	case "mcap":
@@ -159,7 +180,7 @@ func (v ContentInspector) streamed(ctx context.Context, sample interfaces.Conten
 	case "fastq":
 		return inspectFASTQ(r, "fastq", in)
 	case "text":
-		return scanSecrets(r, v.SecretScanBytes, in)
+		return scanSecrets(r, v.SecretScanBytes, in, "")
 	}
 	return nil
 }
@@ -217,6 +238,10 @@ func (v ContentInspector) inspectZip(ctx context.Context, f *os.File, size int64
 			}
 		case strings.HasSuffix(name, ".npy"):
 			if err := v.zipEntry(entry, func(r io.Reader) error { return inspectNPY(r, "npz", in) }); err != nil {
+				return err
+			}
+		case !entry.FileInfo().IsDir() && textName(name):
+			if err := v.zipEntry(entry, func(r io.Reader) error { return v.scanArchived(r, entry.Name, in) }); err != nil {
 				return err
 			}
 		}

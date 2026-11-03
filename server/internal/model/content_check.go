@@ -90,12 +90,14 @@ var defaultFindingActions = map[string]string{
 	"model.npy_object_array":    FindingFlag, // its pickle's imports are judged on their own
 	"secret":                    FindingFlag,
 	"format":                    FindingReject,
+	"image":                     FindingFlag,
+	"image.png_profile_text":    FindingReject, // ImageMagick embeds the named file (CVE-2022-44268)
 	"external":                  FindingFlag,
 	"malware":                   FindingReject,
 }
 
 // FindingFamilies are the code families a tenant may set an action for.
-var FindingFamilies = []string{"active_content", "model", "secret", "format", "external", "malware"}
+var FindingFamilies = []string{"active_content", "model", "secret", "format", "image", "external", "malware"}
 
 // FindingAction decides what a finding does: the tenant's override for
 // the code, then for its family, then the default. Malware always rejects.

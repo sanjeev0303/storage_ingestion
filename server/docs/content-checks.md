@@ -8,7 +8,9 @@ The content inspector (`ContentInspector`, validator `content`) opens each objec
 
 | Format (by its bytes, or its name where bytes are ambiguous) | Check | Codes |
 | --- | --- | --- |
-| PDF | JavaScript, launch actions, embedded files, rich media, XFA, including names escaped as `#xx` and inside compressed object streams | `active_content.pdf_javascript`, `pdf_launch`, `pdf_embedded_file`, `pdf_rich_media`, `pdf_xfa` |
+| PDF | JavaScript, launch actions, embedded files, rich media, XFA, including names escaped as `#xx` and inside streams decoded through their `/Filter` chain (Flate, ASCIIHex, ASCII85, LZW with either EarlyChange, RunLength; image filters are left alone). An encrypted PDF is noted: its streams cannot be read | `active_content.pdf_javascript`, `pdf_launch`, `pdf_embedded_file`, `pdf_rich_media`, `pdf_xfa` |
+| PNG | Every chunk's CRC, IHDR first and IEND last; a text chunk named `profile` (ImageMagick embeds the file it names in what it writes, CVE-2022-44268); chunks outside the PNG specification; bytes after IEND | `image.png_profile_text`, `image.png_unknown_chunk`, `image.trailing_data`, `format.corrupt_png` |
+| JPEG | Every segment to the end-of-image marker, through the coded data of each scan; bytes after it (except a multi-picture file's other pictures); a file cut short | `image.trailing_data`, `image.truncated_jpeg`, `format.corrupt_jpeg` |
 | Office (zip) | VBA projects, ActiveX, embedded OLE objects | `active_content.ooxml_macro`, `ooxml_activex`, `ooxml_ole_object` |
 | Office (legacy OLE) | VBA projects, embedded packages | `active_content.ole_macro`, `ole_package` |
 | Pickle, PyTorch (`.pt`, `.pth`, `.ckpt`, zip or legacy), joblib | Opcode walk without executing: every GLOBAL and STACK_GLOBAL import judged against a safe list (tensors, arrays, containers) and a dangerous list (os, subprocess, builtins.eval...) | `model.unsafe_pickle`, `model.pickle_imports`, `model.invalid_pickle` |
@@ -20,6 +22,7 @@ The content inspector (`ContentInspector`, validator `content`) opens each objec
 | MCAP | Magic, every record's length, footer and closing magic | `format.invalid_mcap` |
 | tar (plain or gzipped) | Entry count, paths and links that leave the extraction folder, device files | `format.unsafe_archive_entry`, `format.archive_too_many_entries`, `format.corrupt_tar` |
 | Text (detected text, JSON, CSV, and configuration and notebook files) | Credentials: AWS keys, private keys, GitHub, Slack, Stripe, Google, Azure and AI provider keys, signed JWTs. A finding names the kind, the byte offset and the count, never the value. | `secret.*` |
+| Text inside a zip, a tar or a gzip stream (by the inner file's name: `.env`, `.json`, `.yaml`, `.tfvars`, `.py`...) | The same credentials; the finding names the file inside (`in app/config/.env`). Every archived text file shares one budget of `SECRET_SCAN_MAX_BYTES`, noted when spent | `secret.*` |
 
 A read failure of the object is retried, never taken for a broken file. A check that read only part of an object (larger than `CONTENT_CHECK_MAX_BYTES`, a text file past `SECRET_SCAN_MAX_BYTES`, a gzip past `ARCHIVE_MAX_UNCOMPRESSED_BYTES`) says so in the processing history (`content_checks_partial`), and the job's coverage is recorded as `PARTIAL`.
 
@@ -43,6 +46,7 @@ Defaults, by family and where a code differs:
 | `model` | reject | `pickle_imports` and `npy_object_array` flag |
 | `secret` | flag | |
 | `format` | reject | |
+| `image` | flag | `png_profile_text` rejects |
 | `external` | the engine's action, else flag | |
 | `malware` | reject, always | cannot be changed |
 
@@ -88,8 +92,13 @@ A claim lasts an hour; a re-scan that fails is tried again after it.
 
 Archive limits (`ARCHIVE_MAX_ENTRIES`, `ARCHIVE_MAX_UNCOMPRESSED_BYTES`, `ARCHIVE_MAX_RATIO`) also bound the content inspector's zip, tar and gzip reading.
 
+## Disarming images before upload
+
+The platform never changes stored bytes: their SHA-256 is what it vouches for. `osp disarm FILE... --out DIR` (or `osp.disarm.disarm_file`) writes copies of PNG and JPEG files with only what draws the picture: PNG keeps its palette, transparency, colour space, pixel size and animation chunks; JPEG keeps its JFIF header, ICC profile, Adobe marker and coded image. Text, EXIF and XMP (orientation included), comments, private chunks and anything after the image's end go. Upload the copies, and set `image` to `reject` if only clean images may come in.
+
 ## Not covered
 
-- Secrets inside archives and compressed text are not scanned.
-- PDF streams with filters other than Flate are not decompressed.
+- Archives inside archives are not opened for secrets; neither are 7z, rar or bzip2.
+- Encrypted PDFs, and PDF streams behind image or crypt filters, are not decoded.
+- YARA and second antivirus engines run through `CONTENT_HOOK_URL`, not inside the platform.
 - Blocking does not delete the bytes: retention, legal holds and Object Lock still decide that, through the asset's normal deletion.

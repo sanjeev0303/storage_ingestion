@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/md5"
+	"crypto/sha512"
 	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 	"io"
 	"net/url"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -161,11 +163,18 @@ type inventoryManifest struct {
 	} `json:"files"`
 }
 
+// inventoryRow is one object of an S3 Inventory report, in either format.
+type inventoryRow struct {
+	key, size, etag, isLatest, isDeleteMarker string
+	// CSV reports URL-encode keys; Parquet reports do not.
+	escaped bool
+}
+
 // readInventory reads an S3 Inventory report: its manifest.json, then each
-// CSV data file it lists (checked against its MD5). Keys are URL-encoded
-// in the report. Delete markers and older versions are skipped. A
-// single-part object's ETag is its MD5, so it becomes the expected digest;
-// a multipart ETag is not a digest of the bytes and is not used.
+// data file it lists (checked against its MD5), CSV or Parquet. Delete
+// markers and older versions are skipped. A single-part object's ETag is
+// its MD5, so it becomes the expected digest; a multipart ETag is not a
+// digest of the bytes and is not used.
 func readInventory(ctx context.Context, r objectReader, manifestKey, bucket string, e *emitter) error {
 	body, err := r.Open(ctx, manifestKey)
 	if err != nil {
@@ -177,25 +186,34 @@ func readInventory(ctx context.Context, r objectReader, manifestKey, bucket stri
 	if err != nil {
 		return fmt.Errorf("read the inventory manifest: %w", err)
 	}
-	if !strings.EqualFold(m.FileFormat, "CSV") {
-		return fmt.Errorf("inventory reports in %s are not supported; configure the report as CSV", m.FileFormat)
+	format := strings.ToUpper(m.FileFormat)
+	if format != "CSV" && format != "PARQUET" {
+		return fmt.Errorf("inventory reports in %s are not supported; configure the report as CSV or Parquet", m.FileFormat)
 	}
 	if m.SourceBucket != "" && bucket != "" && m.SourceBucket != bucket {
 		return fmt.Errorf("the report lists bucket %s, but the connection's bucket is %s", m.SourceBucket, bucket)
 	}
-	column := map[string]int{}
-	for i, name := range strings.Split(m.FileSchema, ",") {
-		column[strings.TrimSpace(name)] = i
-	}
-	keyCol, ok := column["Key"]
-	if !ok {
-		return errors.New("the inventory schema has no Key column")
-	}
-	field := func(row []string, name string) string {
-		if i, ok := column[name]; ok && i < len(row) {
-			return row[i]
+	emit := func(row inventoryRow) error {
+		if row.key == "" || row.isDeleteMarker == "true" || row.isLatest == "false" {
+			return nil
 		}
-		return ""
+		entry := model.AdoptionEntry{ObjectKey: row.key}
+		if row.escaped {
+			key, err := url.QueryUnescape(row.key)
+			if err != nil {
+				entry.Code = "invalid_key"
+			} else {
+				entry.ObjectKey = key
+			}
+		}
+		entry.SizeBytes, _ = strconv.ParseInt(row.size, 10, 64)
+		if etag := strings.Trim(row.etag, `"`); len(etag) == 32 && !strings.Contains(etag, "-") {
+			entry.Expected = model.Digests{"md5": strings.ToLower(etag)}
+		}
+		if strings.HasSuffix(entry.ObjectKey, "/") && entry.SizeBytes == 0 {
+			return nil // a folder placeholder
+		}
+		return e.add(entry)
 	}
 	for _, f := range m.Files {
 		if err := ctx.Err(); err != nil {
@@ -205,44 +223,54 @@ func readInventory(ctx context.Context, r objectReader, manifestKey, bucket stri
 		if err != nil {
 			return err
 		}
-		zr, err := gzip.NewReader(bytes.NewReader(raw))
+		if format == "PARQUET" {
+			err = inventoryParquet(ctx, raw, emit)
+		} else {
+			err = inventoryCSV(raw, m.FileSchema, emit)
+		}
 		if err != nil {
 			return fmt.Errorf("inventory file %s: %w", f.Key, err)
 		}
-		rows := csv.NewReader(zr)
-		rows.FieldsPerRecord = -1
-		for {
-			row, err := rows.Read()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				return fmt.Errorf("inventory file %s: %w", f.Key, err)
-			}
-			if keyCol >= len(row) {
-				continue
-			}
-			if field(row, "IsDeleteMarker") == "true" || field(row, "IsLatest") == "false" {
-				continue
-			}
-			key, err := url.QueryUnescape(row[keyCol])
-			entry := model.AdoptionEntry{ObjectKey: key}
-			if err != nil {
-				entry.ObjectKey, entry.Code = row[keyCol], "invalid_key"
-			}
-			entry.SizeBytes, _ = strconv.ParseInt(field(row, "Size"), 10, 64)
-			if etag := strings.Trim(field(row, "ETag"), `"`); len(etag) == 32 && !strings.Contains(etag, "-") {
-				entry.Expected = model.Digests{"md5": strings.ToLower(etag)}
-			}
-			if strings.HasSuffix(key, "/") && entry.SizeBytes == 0 {
-				continue // a folder placeholder
-			}
-			if err := e.add(entry); err != nil {
-				return err
-			}
-		}
 	}
 	return nil
+}
+
+// inventoryCSV reads a gzipped CSV data file, whose columns the manifest's
+// fileSchema names.
+func inventoryCSV(raw []byte, schema string, emit func(inventoryRow) error) error {
+	column := map[string]int{}
+	for i, name := range strings.Split(schema, ",") {
+		column[strings.TrimSpace(name)] = i
+	}
+	if _, ok := column["Key"]; !ok {
+		return errors.New("the inventory schema has no Key column")
+	}
+	field := func(row []string, name string) string {
+		if i, ok := column[name]; ok && i < len(row) {
+			return row[i]
+		}
+		return ""
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	rows := csv.NewReader(zr)
+	rows.FieldsPerRecord = -1
+	for {
+		row, err := rows.Read()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		err = emit(inventoryRow{key: field(row, "Key"), size: field(row, "Size"), etag: field(row, "ETag"),
+			isLatest: field(row, "IsLatest"), isDeleteMarker: field(row, "IsDeleteMarker"), escaped: true})
+		if err != nil {
+			return err
+		}
+	}
 }
 
 // readChecked reads a small object whole (an inventory data file) and
@@ -301,8 +329,16 @@ type mhlList struct {
 
 // readMHL reads an ASC MHL list (v2, or legacy v1). Paths are relative to
 // the media root: the folder that holds the ascmhl folder for v2, the
-// list's own folder for v1.
+// list's own folder for v1. A key naming the ascmhl folder or its
+// ascmhl_chain.xml reads the whole history (readMHLChain).
 func readMHL(ctx context.Context, r objectReader, key string, e *emitter) error {
+	trimmed := strings.TrimSuffix(key, "/")
+	switch {
+	case path.Base(trimmed) == "ascmhl":
+		return readMHLChain(ctx, r, trimmed, e)
+	case path.Base(key) == "ascmhl_chain.xml":
+		return readMHLChain(ctx, r, path.Dir(key), e)
+	}
 	body, err := r.Open(ctx, key)
 	if err != nil {
 		return fmt.Errorf("open the MHL: %w", err)
@@ -316,6 +352,101 @@ func readMHL(ctx context.Context, r objectReader, key string, e *emitter) error 
 	if i := strings.Index(key, "ascmhl/"); i >= 0 {
 		root = strings.TrimSuffix(key[:i], "/")
 	}
+	for _, entry := range mhlEntries(list, root) {
+		if err := e.add(entry); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// mhlChain is an ascmhl folder's ascmhl_chain.xml: each generation's list
+// and the C4 id of its bytes.
+type mhlChain struct {
+	Lists []struct {
+		Seq  int    `xml:"sequencenr,attr"`
+		Path string `xml:"path"`
+		C4   string `xml:"c4"`
+	} `xml:"hashlist"`
+}
+
+// readMHLChain reads every generation an ascmhl folder's chain lists, oldest
+// first. Each generation must hash to the C4 id the chain records, so a list
+// edited after the fact fails the job instead of vouching for the files. A
+// file in several generations takes its newest hashes.
+func readMHLChain(ctx context.Context, r objectReader, folder string, e *emitter) error {
+	body, err := r.Open(ctx, folder+"/ascmhl_chain.xml")
+	if err != nil {
+		return fmt.Errorf("open the MHL chain: %w", err)
+	}
+	var chain mhlChain
+	err = xml.NewDecoder(io.LimitReader(body, 16<<20)).Decode(&chain)
+	body.Close()
+	if err != nil {
+		return fmt.Errorf("read the MHL chain: %w", err)
+	}
+	if len(chain.Lists) == 0 {
+		return errors.New("the MHL chain lists no generations")
+	}
+	sort.SliceStable(chain.Lists, func(i, j int) bool { return chain.Lists[i].Seq < chain.Lists[j].Seq })
+	root := path.Dir(folder)
+	var order []string
+	latest := map[string]model.AdoptionEntry{}
+	for _, g := range chain.Lists {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		name := strings.TrimSpace(g.Path)
+		if name == "" || strings.Contains(name, "/") || strings.Contains(name, "\\") {
+			return fmt.Errorf("generation %d has an unusable path %q", g.Seq, name)
+		}
+		raw, err := readSmallObject(ctx, r, folder+"/"+name, 512<<20)
+		if err != nil {
+			return fmt.Errorf("generation %d: %w", g.Seq, err)
+		}
+		sum := sha512.Sum512(raw)
+		if got := c4ID(sum[:]); got != strings.TrimSpace(g.C4) {
+			return fmt.Errorf("generation %d (%s) does not match the chain: its C4 id is %s, the chain records %s", g.Seq, name, got, strings.TrimSpace(g.C4))
+		}
+		var list mhlList
+		if err := xml.Unmarshal(raw, &list); err != nil {
+			return fmt.Errorf("read generation %d: %w", g.Seq, err)
+		}
+		for _, entry := range mhlEntries(list, root) {
+			if _, seen := latest[entry.ObjectKey]; !seen {
+				order = append(order, entry.ObjectKey)
+			}
+			latest[entry.ObjectKey] = entry
+		}
+	}
+	for _, key := range order {
+		if err := e.add(latest[key]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// readSmallObject reads an object whole, refusing one larger than limit.
+func readSmallObject(ctx context.Context, r objectReader, key string, limit int64) ([]byte, error) {
+	body, err := r.Open(ctx, key)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", key, err)
+	}
+	defer body.Close()
+	raw, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", key, err)
+	}
+	if int64(len(raw)) > limit {
+		return nil, fmt.Errorf("%s is larger than %d bytes", key, limit)
+	}
+	return raw, nil
+}
+
+// mhlEntries turns a list's hashed files into entries under root.
+func mhlEntries(list mhlList, root string) []model.AdoptionEntry {
+	var out []model.AdoptionEntry
 	files := list.V2
 	if len(files) == 0 {
 		files = list.V1
@@ -351,11 +482,9 @@ func readMHL(ctx context.Context, r objectReader, key string, e *emitter) error 
 			entry.Code, entry.Detail = "invalid_digest", err.Error()
 		}
 		entry.Expected = expected
-		if err := e.add(entry); err != nil {
-			return err
-		}
+		out = append(out, entry)
 	}
-	return nil
+	return out
 }
 
 func joinKey(root, rel string) string {

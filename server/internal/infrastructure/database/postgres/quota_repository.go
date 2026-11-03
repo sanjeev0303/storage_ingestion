@@ -308,6 +308,10 @@ func (r *QuotaRepository) Reconcile(ctx context.Context, tenantID string, now ti
 		  FROM assets AS a WHERE a.upload_id = s.id AND a.tenant_id = s.tenant_id
 		    AND s.tenant_id = $1 AND s.quota_state = 'RESERVED' AND a.status IN ('REJECTED', 'SOFT_DELETED', 'DELETED')`,
 			[]any{tenantID}},
+		// An adoption job that ended keeps no reservation.
+		{`UPDATE adoption_jobs SET reserved_bytes = 0, reserved_assets = 0
+		  WHERE tenant_id = $1 AND state IN ('COMPLETED', 'FAILED', 'CANCELLED') AND (reserved_bytes > 0 OR reserved_assets > 0)`,
+			[]any{tenantID}},
 		// A single-request upload past its expiry can no longer be sent:
 		// expire it. (Multipart sessions are expired by their own
 		// reconciliation, which aborts the provider upload first.)
@@ -334,8 +338,10 @@ func (r *QuotaRepository) Reconcile(ctx context.Context, tenantID string, now ti
 		after.TenantID = tenantID
 		err = tx.QueryRow(ctx, `
 			SELECT
-			  (SELECT COALESCE(sum(reserved_bytes), 0) FROM upload_sessions WHERE tenant_id = $1 AND quota_state = 'RESERVED'),
-			  (SELECT count(*) FROM upload_sessions WHERE tenant_id = $1 AND quota_state = 'RESERVED'),
+			  (SELECT COALESCE(sum(reserved_bytes), 0) FROM upload_sessions WHERE tenant_id = $1 AND quota_state = 'RESERVED')
+			    + (SELECT COALESCE(sum(reserved_bytes), 0) FROM adoption_jobs WHERE tenant_id = $1 AND state IN ('QUEUED', 'READING', 'RUNNING')),
+			  (SELECT count(*) FROM upload_sessions WHERE tenant_id = $1 AND quota_state = 'RESERVED')
+			    + (SELECT COALESCE(sum(reserved_assets), 0) FROM adoption_jobs WHERE tenant_id = $1 AND state IN ('QUEUED', 'READING', 'RUNNING')),
 			  (SELECT COALESCE(sum(size_bytes), 0) FROM assets WHERE tenant_id = $1 AND status = 'AVAILABLE'),
 			  (SELECT count(*) FROM assets WHERE tenant_id = $1 AND status = 'AVAILABLE'),
 			  (SELECT COALESCE(sum(size_bytes), 0) FROM assets WHERE tenant_id = $1 AND status = 'SOFT_DELETED')

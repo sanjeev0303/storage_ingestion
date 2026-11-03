@@ -18,6 +18,7 @@ const DEFAULTS: Record<string, { action: PolicyAction; except?: string }> = {
   model: { action: "reject", except: "imports of a model's own code and NumPy object arrays only flag" },
   secret: { action: "flag" },
   format: { action: "reject" },
+  image: { action: "flag", except: 'a PNG "profile" text chunk rejects' },
   external: { action: "flag", except: "the engine's own verdict applies when it gives one" },
   malware: { action: "reject" },
 };
