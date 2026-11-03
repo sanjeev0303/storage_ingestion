@@ -114,6 +114,7 @@ def publish(client, dataset_id, version_id, title, creators, publisher, descript
 
 
 def publication(client, dataset_id, version_id):
+    """The snapshot's publication and landing_url; publication is None if it is not published."""
     return client.get(_version(dataset_id, version_id) + "/publication")
 
 

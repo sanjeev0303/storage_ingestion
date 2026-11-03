@@ -14,7 +14,6 @@ import { SubmitButton } from "@/components/ui/submit-button";
 import { Table, Td, Th } from "@/components/ui/table";
 import { Time } from "@/components/ui/time";
 import { notify } from "@/components/ui/toast";
-import { isApiError } from "@/lib/api/errors";
 import { useOrganizationId, useSession } from "@/lib/auth/session";
 import { orgKey } from "@/lib/query/keys";
 import { formatNumber } from "@/lib/utils/format";
@@ -150,7 +149,6 @@ function PublishPanel({ id, versionId }: { id: string; versionId: string }) {
     onError: notify.error,
   });
 
-  const unpublished = current.isError && isApiError(current.error) && current.error.status === 404;
   const p = current.data?.publication;
   const description_ = p
     ? "Its landing page is public. File names and data stay private."
@@ -160,7 +158,7 @@ function PublishPanel({ id, versionId }: { id: string; versionId: string }) {
     <Panel title="Publish" description={description_}>
       {current.isPending ? (
         <SkeletonRows rows={2} />
-      ) : current.isError && !unpublished ? (
+      ) : current.isError ? (
         <ErrorState error={current.error} onRetry={() => current.refetch()} />
       ) : p && current.data ? (
         <div className="flex flex-col gap-4">

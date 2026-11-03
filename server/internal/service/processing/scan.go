@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 
 	"github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/rangeread"
@@ -49,11 +50,16 @@ func (s *Service) scanWhole(ctx context.Context, storage interfaces.MultipartSto
 }
 
 // scanSegments scans an object too big for one scanner stream as
-// overlapping segments, ScanParallelism of them at once, while one more
-// read hashes the whole object. Every read is pinned to the object's ETag,
-// so what was scanned and what was hashed are the same bytes. The first
-// INFECTED segment, or the first one that could not be scanned, stops the
-// rest; INFECTED always wins.
+// overlapping segments, ScanParallelism of them at once. Every read is pinned
+// to the object's ETag, so what was scanned and what was hashed are the same
+// bytes. The first INFECTED segment, or the first one that could not be
+// scanned, stops the rest; INFECTED always wins.
+//
+// An object up to ScanSpoolBytes is read once into a temporary file, hashed on
+// the way, and its segments are scanned from there: from a remote bucket the
+// network is the slow part, and this crosses it once instead of twice. Without
+// room for the file, one read hashes the whole object while the segments are
+// read again.
 func (s *Service) scanSegments(ctx context.Context, storage interfaces.MultipartStorage, bucket, key, detected string) (interfaces.ScanResult, int64, string, error) {
 	if archiveTypes[detected] {
 		return interfaces.ScanResult{Outcome: model.ScanUnsupported, Detail: "an archive larger than one scan segment cannot be scanned"}, 0, "", nil
@@ -67,6 +73,20 @@ func (s *Service) scanSegments(ctx context.Context, storage interfaces.Multipart
 		return interfaces.ScanResult{}, 0, "", fmt.Errorf("inspect object to scan: %w", err)
 	}
 	cond := interfaces.ReadCondition{IfMatch: meta.ETag, VersionID: meta.VersionID}
+
+	if spool, sum, ok := s.spool(ctx, ranger, bucket, key, meta.SizeBytes, cond); ok {
+		defer func() {
+			spool.Close()
+			os.Remove(spool.Name())
+		}()
+		verdict := s.scanParts(ctx, meta.SizeBytes, func(ctx context.Context, first, last int64) (io.ReadCloser, error) {
+			return io.NopCloser(io.NewSectionReader(spool, first, last-first+1)), nil
+		})
+		if verdict.Outcome != model.ScanClean {
+			return verdict, 0, "", nil
+		}
+		return verdict, meta.SizeBytes, sum, nil
+	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -84,6 +104,47 @@ func (s *Service) scanSegments(ctx context.Context, storage interfaces.Multipart
 		n, err := io.Copy(h, body)
 		hashDone <- hashed{read: n, sum: hex.EncodeToString(h.Sum(nil)), err: err}
 	}()
+
+	verdict := s.scanParts(ctx, meta.SizeBytes, func(ctx context.Context, first, last int64) (io.ReadCloser, error) {
+		return ranger.OpenRange(ctx, bucket, key, first, last, cond)
+	})
+	if verdict.Outcome != model.ScanClean {
+		return verdict, 0, "", nil
+	}
+	h := <-hashDone
+	if h.err != nil {
+		return interfaces.ScanResult{Outcome: model.ScanError, Detail: "could not read the whole object to hash it"}, 0, "", nil
+	}
+	return verdict, h.read, h.sum, nil
+}
+
+// spool reads the object once into a temporary file, hashing it. It answers
+// false when the object is too large for that or the file cannot be written, and
+// the caller reads from storage instead.
+func (s *Service) spool(ctx context.Context, ranger rangeread.Ranger, bucket, key string, size int64, cond interfaces.ReadCondition) (*os.File, string, bool) {
+	if size > s.cfg.ScanSpoolBytes {
+		return nil, "", false
+	}
+	f, err := os.CreateTemp("", "osp-scan-*")
+	if err != nil {
+		return nil, "", false
+	}
+	body := rangeread.Open(ctx, ranger, bucket, key, size, cond, rangeread.ChunkBytes, rangeread.Parallel)
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(f, h), body)
+	body.Close()
+	if err != nil || n != size {
+		f.Close()
+		os.Remove(f.Name())
+		return nil, "", false
+	}
+	return f, hex.EncodeToString(h.Sum(nil)), true
+}
+
+// scanParts scans bytes 0 to size as overlapping segments read by open.
+func (s *Service) scanParts(ctx context.Context, size int64, open func(ctx context.Context, first, last int64) (io.ReadCloser, error)) interfaces.ScanResult {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	var mu sync.Mutex
 	verdict := interfaces.ScanResult{Outcome: model.ScanClean}
@@ -103,7 +164,7 @@ func (s *Service) scanSegments(ctx context.Context, storage interfaces.Multipart
 
 	slots := make(chan struct{}, s.cfg.ScanParallelism)
 	var wg sync.WaitGroup
-	for start := int64(0); start < meta.SizeBytes; start += s.cfg.ScanSegmentBytes {
+	for start := int64(0); start < size; start += s.cfg.ScanSegmentBytes {
 		select {
 		case slots <- struct{}{}:
 		case <-ctx.Done():
@@ -112,35 +173,28 @@ func (s *Service) scanSegments(ctx context.Context, storage interfaces.Multipart
 			break
 		}
 		first := max(start-scanOverlap, 0)
-		last := min(start+s.cfg.ScanSegmentBytes, meta.SizeBytes) - 1
+		last := min(start+s.cfg.ScanSegmentBytes, size) - 1
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			defer func() { <-slots }()
-			record(s.scanRange(ctx, ranger, bucket, key, first, last, cond))
+			record(s.scanRange(ctx, open, first, last))
 		}()
 	}
 	wg.Wait()
 
-	if verdict.Outcome != model.ScanClean {
-		return verdict, 0, "", nil
-	}
-	if ctx.Err() != nil {
+	if verdict.Outcome == model.ScanClean && ctx.Err() != nil {
 		// Cancelled from outside (lease lost, shutdown): nothing was decided.
-		return interfaces.ScanResult{Outcome: model.ScanError, Detail: "scan cancelled"}, 0, "", nil
+		return interfaces.ScanResult{Outcome: model.ScanError, Detail: "scan cancelled"}
 	}
-	h := <-hashDone
-	if h.err != nil {
-		return interfaces.ScanResult{Outcome: model.ScanError, Detail: "could not read the whole object to hash it"}, 0, "", nil
-	}
-	return verdict, h.read, h.sum, nil
+	return verdict
 }
 
 // scanRange scans bytes first..last on their own scanner connection.
-func (s *Service) scanRange(ctx context.Context, ranger rangeread.Ranger, bucket, key string, first, last int64, cond interfaces.ReadCondition) interfaces.ScanResult {
+func (s *Service) scanRange(ctx context.Context, open func(ctx context.Context, first, last int64) (io.ReadCloser, error), first, last int64) interfaces.ScanResult {
 	scanCtx, cancel := context.WithTimeout(ctx, s.cfg.ScanTimeout)
 	defer cancel()
-	body, err := ranger.OpenRange(scanCtx, bucket, key, first, last, cond)
+	body, err := open(scanCtx, first, last)
 	if err != nil {
 		return interfaces.ScanResult{Outcome: model.ScanError, Detail: "could not read a segment to scan"}
 	}

@@ -224,6 +224,7 @@ func run() error {
 		ScanPolicy:          processingservice.ScanPolicy(workerCfg.ScanPolicy),
 		ScanTimeout:         workerCfg.ClamAVTimeout,
 		ScanSegmentBytes:    workerCfg.ScanSegmentBytes,
+		ScanSpoolBytes:      workerCfg.ScanSpoolBytes,
 		ScanParallelism:     workerCfg.ScanParallelism,
 		MinThroughput:       workerCfg.MinThroughput,
 		QuarantineRetention: workerCfg.QuarantineRetention,

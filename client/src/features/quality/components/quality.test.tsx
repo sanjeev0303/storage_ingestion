@@ -53,7 +53,12 @@ const profile = {
 function base() {
   server.use(
     http.get(`${API}/datasets/ds1/versions/v2/profile`, () => HttpResponse.json(profile)),
-    http.get(`${API}/datasets`, () => HttpResponse.json({ datasets: [{ id: "tr", name: "training-set" }], next_cursor: "" })),
+    // The real API refuses a status it does not know, as ACTIVE once was.
+    http.get(`${API}/datasets`, ({ request }) =>
+      ["", "DRAFT", "VALIDATING", "READY", "READY_WITH_WARNINGS", "FAILED", "ARCHIVED"].includes(new URL(request.url).searchParams.get("status") ?? "")
+        ? HttpResponse.json({ datasets: [{ id: "tr", name: "training-set" }], next_cursor: "" })
+        : HttpResponse.json({ error: "invalid status", code: "invalid_request" }, { status: 400 }),
+    ),
     http.get(`${API}/datasets/tr/versions`, () => HttpResponse.json({ versions: [{ id: "tv3", version: 3 }] })),
   );
 }

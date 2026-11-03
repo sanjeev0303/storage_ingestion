@@ -73,6 +73,38 @@ func TestALargeObjectIsScannedInOverlappingSegmentsAndPromoted(t *testing.T) {
 	}
 }
 
+// From a remote bucket the network is the slow part: a large object is read once,
+// into a temporary file, and its segments are scanned from there.
+func TestALargeObjectCrossesTheNetworkOnce(t *testing.T) {
+	data := bytes.Repeat([]byte{0x01, 0x02, 0x03, 0x04}, 7*mib/4)
+	reads := func(spool int64) int {
+		h, _, svc := largeHarness(t, data, "application/octet-stream")
+		svc.cfg.ScanSpoolBytes = spool
+		before := h.storage.RangeCalls
+		if stats := h.run(t, svc); stats.Succeeded != 1 {
+			t.Fatalf("stats %+v", stats)
+		}
+		return h.storage.RangeCalls - before
+	}
+	once, twice := reads(1<<30), reads(-1)
+	// Promotion reads the object too; the scan's share is what differs.
+	if twice-once != 4 {
+		t.Fatalf("%d range reads spooled, %d not: want the 4 segment reads saved", once, twice)
+	}
+}
+
+// The signature is found the same way when the segments come from storage.
+func TestASignatureAcrossASegmentBoundaryIsFoundWithoutASpool(t *testing.T) {
+	data := bytes.Repeat([]byte{0x01, 0x02, 0x03, 0x04}, 7*mib/4)
+	copy(data[4*mib-10:], []byte("SIGNATURE-ACROSS-THE-BOUNDARY"))
+	h, _, svc := largeHarness(t, data, "application/octet-stream")
+	svc.cfg.ScanSpoolBytes = -1
+	h.run(t, svc)
+	if asset := h.onlyAsset(t); asset.Status != model.AssetStatusRejected {
+		t.Fatalf("asset is %s, want REJECTED", asset.Status)
+	}
+}
+
 func TestASignatureAcrossASegmentBoundaryIsFound(t *testing.T) {
 	data := bytes.Repeat([]byte{0x01, 0x02, 0x03, 0x04}, 7*mib/4)
 	marker := []byte("SIGNATURE-ACROSS-THE-BOUNDARY")

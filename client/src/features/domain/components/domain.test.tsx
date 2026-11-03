@@ -10,7 +10,7 @@ const base = `${API}/datasets/d1/versions/v1`;
 
 function routes(publication: object | null = null, recordings: object[] = []) {
   server.use(
-    http.get(`${base}/publication`, () => (publication ? HttpResponse.json(publication) : HttpResponse.json({ error: "not found", code: "not_found" }, { status: 404 }))),
+    http.get(`${base}/publication`, () => (publication ? HttpResponse.json(publication) : HttpResponse.json({ publication: null, landing_url: "" }))),
     http.get(`${base}/recordings`, () => HttpResponse.json({ recordings })),
     http.get(`${base}/segments`, () => HttpResponse.json({ segments: [] })),
     http.get(`${base}/embedding-indexes`, () => HttpResponse.json({ indexes: [] })),

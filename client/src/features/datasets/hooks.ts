@@ -95,7 +95,8 @@ export function useVersions(id: string) {
   const organizationId = useOrganizationId();
   return usePagedQuery<Awaited<ReturnType<typeof api.listVersions>>["versions"][number], number>({
     queryKey: orgKey(organizationId, "datasets", "versions", id),
-    enabled: Boolean(organizationId),
+    // Pickers call this before a dataset is chosen.
+    enabled: Boolean(organizationId && id),
     fetchPage: async (before, signal) => {
       const page = await api.listVersions(id, before, signal);
       return { items: page.versions, next: page.next_before };

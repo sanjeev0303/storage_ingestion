@@ -15,7 +15,12 @@ function routes(devices: object[], recordings: object[] = []) {
   server.use(
     http.get(`${API}/edge-devices`, () => HttpResponse.json({ devices })),
     http.get(`${API}/edge-recordings`, () => HttpResponse.json({ recordings })),
-    http.get(`${API}/datasets`, () => HttpResponse.json({ datasets: [{ id: "ds1", name: "instruments" }], next_cursor: "" })),
+    // The real API refuses a status it does not know, as ACTIVE once was.
+    http.get(`${API}/datasets`, ({ request }) =>
+      ["", "DRAFT", "VALIDATING", "READY", "READY_WITH_WARNINGS", "FAILED", "ARCHIVED"].includes(new URL(request.url).searchParams.get("status") ?? "")
+        ? HttpResponse.json({ datasets: [{ id: "ds1", name: "instruments" }], next_cursor: "" })
+        : HttpResponse.json({ error: "invalid status", code: "invalid_request" }, { status: 400 }),
+    ),
   );
 }
 

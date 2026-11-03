@@ -185,6 +185,9 @@ type Processing struct {
 	// clamd's StreamMaxLength.
 	ScanSegmentBytes int64
 	ScanParallelism  int
+	// ScanSpoolBytes: a segmented object up to this size is read once to a
+	// temporary file and scanned from it; negative turns that off.
+	ScanSpoolBytes int64
 	// MinThroughput (bytes a second) stretches MaxJobDuration for large
 	// objects: a job may also take its object's size at this rate.
 	MinThroughput   int64
@@ -275,6 +278,7 @@ func LoadProcessing() (Processing, error) {
 	}{
 		{"PROCESSING_MAX_FILE_BYTES", "5368709120", &cfg.MaxFileBytes},
 		{"PROCESSING_SCAN_SEGMENT_BYTES", "67108864", &cfg.ScanSegmentBytes},
+		{"PROCESSING_SCAN_SPOOL_BYTES", "2147483648", &cfg.ScanSpoolBytes},
 		{"PROCESSING_MIN_THROUGHPUT_BYTES", "16777216", &cfg.MinThroughput},
 		{"ARCHIVE_MAX_BYTES", "536870912", &cfg.ArchiveMaxBytes},
 		{"ARCHIVE_MAX_UNCOMPRESSED_BYTES", "2147483648", &cfg.ArchiveMaxExpanded},

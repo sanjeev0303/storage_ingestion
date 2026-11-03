@@ -184,7 +184,7 @@ export function EdgeScreen() {
 }
 
 function RegisterPanel({ onDone }: { onDone: () => void }) {
-  const datasets = useDatasets("ACTIVE");
+  const datasets = useDatasets("");
   const [form, setForm] = useState({ name: "", dataset_id: "", path_prefix: "" });
   const register = useMutation({
     mutationFn: () => registerDevice({ name: form.name.trim(), dataset_id: form.dataset_id, path_prefix: form.path_prefix.trim() }),

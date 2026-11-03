@@ -234,7 +234,7 @@ export function DriftView({ report }: { report: DriftReport }) {
 }
 
 function LeakagePanel({ id, versionId }: { id: string; versionId: string }) {
-  const datasets = useDatasets("ACTIVE");
+  const datasets = useDatasets("");
   const [trainDataset, setTrainDataset] = useState("");
   const [trainVersion, setTrainVersion] = useState("");
   const versions = useVersions(trainDataset);

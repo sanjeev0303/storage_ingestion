@@ -275,6 +275,11 @@ func (h *DomainHandler) withLanding(p model.Publication) map[string]any {
 
 func (h *DomainHandler) publication(w nethttp.ResponseWriter, r *nethttp.Request) {
 	out, err := h.service.Publication(r.Context(), principalOf(r), r.PathValue("id"), r.PathValue("versionID"))
+	// Not published yet is an answer about a snapshot that exists, not a missing page.
+	if errors.Is(err, model.ErrDomainNotFound) {
+		writeJSON(w, nethttp.StatusOK, map[string]any{"publication": nil, "landing_url": ""})
+		return
+	}
 	if err != nil {
 		h.fail(w, err)
 		return
