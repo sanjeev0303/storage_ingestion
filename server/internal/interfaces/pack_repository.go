@@ -14,6 +14,29 @@ type PackLocator interface {
 	PackedLocation(ctx context.Context, tenantID, assetID string) (model.PackedLocation, bool, error)
 }
 
+// ChunkLocator tells readers where a chunked asset's bytes are.
+type ChunkLocator interface {
+	// ChunkedExtents returns the chunks serving the asset, of this tenant
+	// only; false when the asset is not chunked.
+	ChunkedExtents(ctx context.Context, tenantID, assetID string) ([]model.ChunkExtent, bool, error)
+}
+
+// ChunkedExtents asks a pack locator about chunks, when it can answer: the
+// repository that knows about packs knows about chunks too.
+func ChunkedExtents(ctx context.Context, packs PackLocator, tenantID, assetID string) ([]model.ChunkExtent, bool, error) {
+	locator, ok := packs.(ChunkLocator)
+	if !ok {
+		return nil, false, nil
+	}
+	return locator.ChunkedExtents(ctx, tenantID, assetID)
+}
+
+// ChunkRehydrator asks for a chunked asset to become one object again, and
+// reports whether it was chunked.
+type ChunkRehydrator interface {
+	RequestRehydrate(ctx context.Context, tenantID, assetID string) (bool, error)
+}
+
 // PackReleaser lets lifecycle deletion take an asset out of its pack.
 type PackReleaser interface {
 	PackLocator

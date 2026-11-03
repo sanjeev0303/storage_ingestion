@@ -12,6 +12,7 @@ const tabs = [
   { href: "/app/settings/sso", label: "Single sign-on" },
   { href: "/app/settings/content-checks", label: "Content checks" },
   { href: "/app/settings/webhooks", label: "Webhooks" },
+  { href: "/app/settings/chat", label: "Chat" },
   { href: "/app/settings/account", label: "Account" },
 ];
 

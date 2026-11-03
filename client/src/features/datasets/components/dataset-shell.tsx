@@ -22,6 +22,7 @@ export function DatasetShell({ id, children }: { id: string; children: ReactNode
     { href: `${base}/validation`, label: "Validation" },
     { href: `${base}/lineage`, label: "Lineage" },
     { href: `${base}/protection`, label: "Protection" },
+    { href: `${base}/connect`, label: "Connect" },
     { href: `${base}/branches`, label: dataset.data?.branch ? "Branch" : "Branches" },
   ];
 

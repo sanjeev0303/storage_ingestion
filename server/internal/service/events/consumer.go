@@ -366,6 +366,11 @@ func (c *Consumer) handle(ctx context.Context, msg interfaces.QueueMessage) stri
 	started := time.Now()
 	note, err := c.run(ctx, handler, env, msg, log)
 	c.metrics.Add("events_handler_ms_total", time.Since(started).Milliseconds())
+	// The handler may have run for longer than a record may take. Its outcome
+	// gets a clock of its own, or a slow event's success is lost and it runs again.
+	outcome, cancelOutcome := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+	defer cancelOutcome()
+	record = outcome
 	if ctx.Err() != nil {
 		// Shutting down: write nothing. The lease and the message's
 		// visibility run out and the event is delivered again.

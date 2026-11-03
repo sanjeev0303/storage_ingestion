@@ -139,6 +139,7 @@ func (r *TieringRepository) Candidates(ctx context.Context, rule model.TierRule,
 			  AND a.storage_tier = ANY($2)
 			  AND COALESCE(a.storage_etag, '') <> '' AND COALESCE(a.shared_from, '') = ''
 			  AND NOT EXISTS (SELECT 1 FROM pack_entries e WHERE e.asset_id = a.id AND e.state IN ('RESERVED', 'PUBLISHED'))
+			  AND NOT EXISTS (SELECT 1 FROM chunked_assets c WHERE c.asset_id = a.id AND c.state IN ('WRITING', 'PUBLISHED', 'REHYDRATING'))
 			  AND NOT EXISTS (SELECT 1 FROM assets s WHERE s.shared_from = a.id AND s.status <> 'DELETED')
 			  AND NOT EXISTS (SELECT 1 FROM tier_moves m WHERE m.asset_id = a.id AND m.state = 'FAILED' AND m.created_at > $6::timestamptz - interval '1 day')
 			ORDER BY a.id
@@ -588,6 +589,7 @@ func (r *TieringRepository) VersionUses(ctx context.Context, tenantID, datasetID
 		      THEN 'a derived dataset came from it'
 		    WHEN EXISTS (SELECT 1 FROM training_run_inputs ri WHERE ri.version_id = v.id) THEN 'a training run read it'
 		    WHEN EXISTS (SELECT 1 FROM run_checkpoints rc WHERE rc.version_id = v.id) THEN 'it holds a training checkpoint'
+		    WHEN EXISTS (SELECT 1 FROM publications p WHERE p.version_id = v.id) THEN 'it is published'
 		    WHEN EXISTS (SELECT 1 FROM legal_holds h JOIN datasets d ON d.id = v.dataset_id
 		                 WHERE h.tenant_id = $1 AND h.released_at IS NULL
 		                   AND (h.scope = 'TENANT' OR (h.scope = 'DATASET' AND h.scope_key IN (d.name, d.id))))
@@ -713,6 +715,7 @@ func (r *TieringRepository) VersionObjects(ctx context.Context, tenantID, versio
 		SELECT vm.path, a.id, COALESCE(a.storage_connection_id, 'platform'), a.object_key, COALESCE(a.storage_version_id, ''),
 		       COALESCE(a.checksum_sha256, ''), a.size_bytes, a.storage_tier,
 		       EXISTS (SELECT 1 FROM pack_entries e WHERE e.asset_id = a.id AND e.state = 'PUBLISHED')
+		       OR EXISTS (SELECT 1 FROM chunked_assets c WHERE c.asset_id = a.id AND c.state IN ('PUBLISHED', 'REHYDRATING'))
 		FROM dataset_version_members vm
 		JOIN assets a ON a.id = vm.asset_id AND a.tenant_id = vm.tenant_id AND a.status = 'AVAILABLE'
 		WHERE vm.tenant_id = $1 AND vm.version_id = $2 AND vm.path COLLATE "C" > $3 COLLATE "C"

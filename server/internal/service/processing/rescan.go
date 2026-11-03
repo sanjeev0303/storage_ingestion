@@ -8,6 +8,7 @@ import (
 
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
+	"github.com/sanjeev0303/object-storage-platform/internal/platform/chunkread"
 )
 
 // A CLEAN verdict holds for the signatures that gave it. When the
@@ -141,6 +142,13 @@ func (s *Service) scanPublished(ctx context.Context, asset model.Asset) (interfa
 		if packed {
 			return s.scanPacked(ctx, storage, loc, asset)
 		}
+		extents, chunked, err := interfaces.ChunkedExtents(ctx, s.deps.Packs, asset.TenantID, asset.ID)
+		if err != nil {
+			return interfaces.ScanResult{}, err
+		}
+		if chunked {
+			return s.scanChunked(ctx, storage, bucket, extents)
+		}
 	}
 
 	var result interfaces.ScanResult
@@ -159,6 +167,21 @@ func (s *Service) scanPublished(ctx context.Context, asset model.Asset) (interfa
 		return result, errors.New("the published object no longer matches the asset's SHA-256")
 	}
 	return result, nil
+}
+
+func (s *Service) scanChunked(ctx context.Context, storage interfaces.MultipartStorage, bucket string, extents []model.ChunkExtent) (interfaces.ScanResult, error) {
+	reader, ok := storage.(interfaces.ObjectDelivery)
+	if !ok {
+		return interfaces.ScanResult{}, errors.New("the storage cannot read chunks")
+	}
+	scanCtx, cancel := context.WithTimeout(ctx, s.cfg.ScanTimeout)
+	defer cancel()
+	body, err := chunkread.Open(scanCtx, reader, bucket, extents, 0, -1)
+	if err != nil {
+		return interfaces.ScanResult{}, fmt.Errorf("open chunked asset: %w", err)
+	}
+	defer body.Close()
+	return s.deps.Scanner.Scan(scanCtx, body), nil
 }
 
 func (s *Service) scanPacked(ctx context.Context, storage interfaces.MultipartStorage, loc model.PackedLocation, asset model.Asset) (interfaces.ScanResult, error) {

@@ -397,6 +397,12 @@ func (s *Service) reread(ctx context.Context, a postgres.StoredAsset, fromReplic
 	defer body.Close()
 	sum, n, err := hashOf(body)
 	switch {
+	// A chunk that is gone or damaged shows only as the bytes are read: that is
+	// the object, not a provider that did not answer.
+	case errors.Is(err, model.ErrChunkCorrupt):
+		return fmt.Errorf("MISMATCH: %w", err)
+	case errors.Is(err, interfaces.ErrObjectNotFound):
+		return errors.New("MISSING: a chunk of the stored object is gone")
 	case err != nil:
 		return fmt.Errorf("UNREADABLE: %w", err)
 	case n != a.SizeBytes || (a.SHA256 != "" && sum != a.SHA256):

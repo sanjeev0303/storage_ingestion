@@ -61,7 +61,7 @@ func (s *Service) authenticateToken(ctx context.Context, raw string) (Identity, 
 // its permissions within the member's current role, its datasets.
 func tokenPrincipal(p model.Principal, token *model.APIToken) model.Principal {
 	p.Permissions &= token.Permissions
-	p.Scope = model.Scope{TokenID: token.ID, Datasets: token.Datasets, NoLinks: !token.AllowLinks, Restricted: len(token.Datasets) > 0}
+	p.Scope = model.Scope{TokenID: token.ID, Datasets: token.Datasets, NoLinks: !token.AllowLinks, Restricted: len(token.Datasets) > 0, PathPrefix: token.PathPrefix}
 	return p
 }
 

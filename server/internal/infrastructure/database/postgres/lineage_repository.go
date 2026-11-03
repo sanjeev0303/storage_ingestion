@@ -153,6 +153,13 @@ func refExists(ctx context.Context, tx pgx.Tx, tenantID string, ref model.Lineag
 		table = "models"
 	case model.NodeTransformation:
 		return true, nil
+	case model.NodeUpstreamSource:
+		var known bool
+		err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM upstream_sources WHERE tenant_id = $1 AND url = $2)`, tenantID, ref.RefID).Scan(&known)
+		if err != nil {
+			return false, fmt.Errorf("check %s: %w", ref.Kind, err)
+		}
+		return known, nil
 	default:
 		return false, nil
 	}

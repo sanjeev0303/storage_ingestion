@@ -31,6 +31,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/retry"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/adoption"
 	assetservice "github.com/sanjeev0303/object-storage-platform/internal/service/asset"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/deltaupload"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/events"
 	processingservice "github.com/sanjeev0303/object-storage-platform/internal/service/processing"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/promotion"
@@ -351,6 +352,31 @@ func run() error {
 			MaxSizeBytes: workerCfg.MaxFileBytes, UnknownTypeAction: workerCfg.UnknownType},
 		ScanTimeout: workerCfg.ClamAVTimeout, ScanSegmentBytes: workerCfg.ScanSegmentBytes, MaxImportBytes: cfg.UploadMaxSize,
 	}, log)
+	// Delta uploads: files built here from what is held and what was sent, into
+	// ordinary uploads (docs/chunks.md).
+	deltas := deltaupload.New(deltaupload.Deps{Store: postgres.NewDeltaUploadRepository(db),
+		Uploads: uploadservice.NewService(uploads, storage, bucket, cfg.UploadMaxSize, cfg.UploadSessionTTL).Route(router, router),
+		Assets:  assets, Packs: postgres.NewPackRepository(db), Router: router, Log: log})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(workerCfg.PollInterval)
+		defer ticker.Stop()
+		for {
+			found, err := deltas.RunOnce(ctx, owner)
+			if err != nil {
+				log.Warn("delta upload failed", "error", err)
+			}
+			if found && err == nil {
+				continue
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

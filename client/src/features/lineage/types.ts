@@ -7,7 +7,8 @@ export type NodeKind =
   | "TRANSFORMATION"
   | "OBJECT_VERSION"
   | "TRAINING_RUN"
-  | "MODEL";
+  | "MODEL"
+  | "UPSTREAM_SOURCE";
 
 export type Relation =
   | "CONTAINS"

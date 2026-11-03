@@ -22,6 +22,9 @@ import { ReadForTraining } from "@/features/streaming/components/read-for-traini
 import { VersionCosts } from "@/features/tiering/components/version-costs";
 import { VersionEvidence } from "@/features/evidence/components/version-evidence";
 import { VersionQuality } from "@/features/quality/components/version-quality";
+import { DicomwebLink } from "@/features/connectors/components/connect-screen";
+import { VersionChunks } from "@/features/chunks/components/version-chunks";
+import { VersionDomain } from "@/features/domain/components/version-domain";
 import { TrainingRuns } from "./training-runs";
 import { VersionDiff } from "./version-diff";
 
@@ -170,6 +173,9 @@ export function VersionDetail({ id, versionId }: { id: string; versionId: string
       <VersionCosts id={id} versionId={v.id} />
       <VersionEvidence id={id} versionId={v.id} version={v.version} />
       <VersionQuality id={id} versionId={v.id} />
+      <DicomwebLink datasetId={id} versionId={v.id} />
+      <VersionDomain id={id} versionId={v.id} version={v.version} />
+      <VersionChunks id={id} versionId={v.id} version={v.version} />
       <TrainingRuns datasetId={id} versionId={v.id} />
 
       <Panel

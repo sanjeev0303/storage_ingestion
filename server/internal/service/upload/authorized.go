@@ -20,6 +20,9 @@ func (s *Service) CreateFor(ctx context.Context, p model.Principal, req request.
 	if err := audit.Require(ctx, s.audit, p, model.PermUploadsWrite, "upload.create", "upload", ""); err != nil {
 		return CreateResult{}, err
 	}
+	if !p.Scope.AllowsUpload(req.Dataset, req.Path) {
+		return CreateResult{}, model.ErrForbidden
+	}
 	result, err := s.Create(ctx, CreateInput{TenantID: p.TenantID, OwnerID: p.UserID, Request: req, Principal: p})
 	if err == nil && !result.Reused {
 		s.record(ctx, p, "upload.create", result.Upload, map[string]any{"multipart": false})
@@ -101,6 +104,9 @@ func (s *Service) record(ctx context.Context, p model.Principal, action string, 
 func (s *MultipartService) StartFor(ctx context.Context, p model.Principal, input StartMultipartInput) (MultipartResult, error) {
 	if err := audit.Require(ctx, s.audit, p, model.PermUploadsWrite, "upload.create", "upload", ""); err != nil {
 		return MultipartResult{}, err
+	}
+	if !p.Scope.AllowsUpload(input.Dataset, input.Path) {
+		return MultipartResult{}, model.ErrForbidden
 	}
 	input.TenantID, input.OwnerID, input.Principal = p.TenantID, p.UserID, p
 	result, err := s.Start(ctx, input)

@@ -19,6 +19,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/infrastructure/database/postgres"
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
+	"github.com/sanjeev0303/object-storage-platform/internal/platform/chunkread"
 )
 
 // Store is the copy repository (postgres.CopyRepository).
@@ -142,6 +143,13 @@ func (s *Service) open(ctx context.Context, a postgres.StoredAsset) (io.ReadClos
 			}
 			return loc.Storage.OpenRange(ctx, packed.Bucket, packed.ObjectKey, start, end,
 				interfaces.ReadCondition{IfMatch: packed.StorageETag, VersionID: packed.StorageVersionID})
+		}
+		extents, chunked, err := interfaces.ChunkedExtents(ctx, s.deps.Packs, a.TenantID, a.AssetID)
+		if err != nil {
+			return nil, err
+		}
+		if chunked {
+			return chunkread.Open(ctx, loc.Storage, loc.ReadyBucket, extents, 0, -1)
 		}
 	}
 	return loc.Storage.OpenRange(ctx, loc.ReadyBucket, a.ObjectKey, 0, -1, interfaces.ReadCondition{VersionID: a.VersionID})

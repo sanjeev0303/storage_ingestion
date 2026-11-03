@@ -20,7 +20,7 @@ import sys
 import time
 
 # Names, not the module: osp.branches is also the name of a function.
-from . import access, adoption, checks, erasure, evidence, governance, ingest, posture, protection, quality, shards, snapshots, tiering
+from . import access, adoption, checks, chunks, connectors, domain, edge, erasure, evidence, governance, ingest, posture, protection, quality, shards, snapshots, tiering
 from .branches import MergeConflict, branches as list_branches, create_branch, merge
 from .runs import runs as list_runs
 from .client import APIError, Client
@@ -740,6 +740,225 @@ def cmd_erasure_certificate(args):
               f"{len(body['snapshots_superseded'])} snapshots superseded, {len(body['models'])} models to retrain; "
               f"issued {body['issued_at']}")
     return 0
+
+
+def cmd_import_export(args):
+    client = client_from_config()
+    r = connectors.import_export(client, args.format, args.file, args.dataset, source=args.source or "", retain=args.retain, retain_lock=args.lock or "")
+    print(f"{r['format']}: {r['verified']} of {r['items']} items match what the export declares")
+    for m in r["mismatches"][:50]:
+        print(f"  {m}")
+    return 1 if r["mismatches"] else 0
+
+
+def cmd_chat(args):
+    client = client_from_config()
+    if args.add:
+        c = connectors.add_chat(client, args.kind, args.add, args.url)
+        print(f"channel {c['id']}: {c['name']} on {c['url_host']}")
+    for c in connectors.chat_integrations(client):
+        print(f"{c['id']}  {c['kind']:<6} {c['name']}")
+    return 0
+
+
+def cmd_share_chat(args):
+    client = client_from_config()
+    s = connectors.share_to_chat(client, args.asset_id, args.channel, args.note or "", args.expires or "")
+    print(f"posted: {s['url']} (until {s['expires_at']})")
+    return 0
+
+
+def cmd_lfs_setup(args):
+    client = client_from_config()
+    print("git lfs install")
+    print(f"git config -f .lfsconfig lfs.url {connectors.lfs_url(client.base_url, args.dataset)}")
+    print("# use an API token as the password when Git asks")
+    return 0
+
+
+def cmd_lfs_promote(args):
+    client = client_from_config()
+    r = connectors.promote(client, args.dataset, args.label, repo=args.repo, notes=args.notes or "", hold=args.hold)
+    print(f"version {r['version']} released as {r['label']}" + (f", held under {args.hold}" if args.hold else ""))
+    return 0
+
+
+def cmd_device_add(args):
+    client = client_from_config()
+    ds = snapshots.find_dataset(client, args.dataset)
+    d, token = edge.register(client, args.name, ds["id"], args.prefix or "")
+    print(f"device {d['id']}: writes to {d['namespace']}/{d['path_prefix']}")
+    print("its token, shown once; put it in the agent's token_file:")
+    print(token)
+    return 0
+
+
+def cmd_devices(args):
+    client = client_from_config()
+    for d in edge.devices(client):
+        state = "revoked" if d.get("revoked_at") else f"seen {d.get('last_seen') or 'never'}"
+        print(f"{d['id']}  {d['name']:<20} {state}  {d['pending_files']} files waiting ({d['pending_bytes']:,} bytes), {d['failed_files']} failed")
+    return 0
+
+
+def cmd_device_revoke(args):
+    client = client_from_config()
+    edge.revoke(client, args.id)
+    print("revoked: its credential has stopped working")
+    return 0
+
+
+def cmd_recordings(args):
+    client = client_from_config()
+    if args.id:
+        r = edge.recording(client, args.id)
+        print(f"{r['name']} ({r['kind']}): {r['state'].lower()}, {r['chunks']} files, {r['bytes']:,} bytes" + (f", version {r['version_id']}" if r.get("version_id") else ""))
+        for m in r["missing"]:
+            print(f"  missing: {m}")
+        for g in r["gaps"]:
+            print(f"  gap: {g['from']} to {g['to']}")
+        return 0
+    for r in edge.recordings(client, args.device):
+        print(f"{r['id']}  {r['kind']:<9} {r['state']:<10} {r['chunks']:>6} files  {r['name']}")
+    return 0
+
+
+def cmd_recorded(args):
+    client = client_from_config()
+    ds = snapshots.find_dataset(client, args.dataset)
+    v = snapshots.find_version(client, ds["id"], args.version)
+    for r in domain.recordings(client, ds["id"], v["id"], topic=args.topic):
+        seconds = (r["end_ns"] - r["start_ns"]) / 1e9
+        print(f"{r['path']}: {r['kind']}, {seconds:.1f}s, {r['message_count']:,} messages")
+        for t in r["topics"]:
+            print(f"  {t['topic']:<40} {t.get('schema', ''):<36} {t['message_count']:,}")
+    return 0
+
+
+def cmd_stac(args):
+    client = client_from_config()
+    ds = snapshots.find_dataset(client, args.dataset)
+    v = snapshots.find_version(client, ds["id"], args.version)
+    out = domain.stac_collection(client, ds["id"], v["id"]) if args.collection else client.get(f"/api/v1/datasets/{ds['id']}/versions/{v['id']}/stac/items.json")
+    text = json.dumps(out, indent=2)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(text)
+    else:
+        print(text)
+    return 0
+
+
+def cmd_upstream(args):
+    client = client_from_config()
+    dataset_id = snapshots.find_dataset(client, args.dataset)["id"] if args.dataset else None
+    for u in domain.upstream(client, dataset_id, args.state):
+        print(f"{u['state']:<9} {u['path']}  {u['url']}" + (f"  ({u['note']})" if u.get("note") else ""))
+    return 0
+
+
+def cmd_publish(args):
+    client = client_from_config()
+    ds = snapshots.find_dataset(client, args.dataset)
+    v = snapshots.find_version(client, ds["id"], args.version)
+    out = domain.publish(client, ds["id"], v["id"], args.title, [domain.parse_creator(c) for c in args.creator], args.publisher,
+                         description=args.description or "", license=args.license or "", mint_doi=args.doi)
+    p = out["publication"]
+    print(f"published version {v['version']} of {ds['name']}: {out['landing_url']}")
+    if p.get("doi"):
+        print(f"DOI: https://doi.org/{p['doi']}")
+    if p.get("doi_error"):
+        print(f"the DOI was not registered: {p['doi_error']}; osp publish-doi {args.dataset} {args.version} tries again", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_publish_doi(args):
+    client = client_from_config()
+    ds = snapshots.find_dataset(client, args.dataset)
+    v = snapshots.find_version(client, ds["id"], args.version)
+    p = domain.mint_doi(client, ds["id"], v["id"])["publication"]
+    if p.get("doi_error"):
+        print(f"the DOI was not registered: {p['doi_error']}", file=sys.stderr)
+        return 1
+    print(f"DOI: https://doi.org/{p['doi']}")
+    return 0
+
+
+def cmd_retention_cost(args):
+    client = client_from_config()
+    ds = snapshots.find_dataset(client, args.dataset)
+    v = snapshots.find_version(client, ds["id"], args.version)
+    e = domain.retention_cost(client, ds["id"], v["id"], args.years, args.price)
+    for t in e["tiers"]:
+        print(f"{t['tier']:<30} ${t['price_per_gb_month']}/GB-month  ${t['per_year']:,.2f} a year  ${t['total']:,.2f} over {e['years']} years")
+    print(e["note"])
+    return 0
+
+
+def cmd_chunking(args):
+    client = client_from_config()
+    ds = snapshots.find_dataset(client, args.dataset)
+    chunks.set_enabled(client, ds["id"], args.state == "on")
+    print(f"chunk indexing is {args.state} for {ds['name']}" + ("; every file is read once, which on your own bucket costs what reading it costs" if args.state == "on" else ""))
+    return 0
+
+
+def cmd_chunk_savings(args):
+    client = client_from_config()
+    ds = snapshots.find_dataset(client, args.dataset)
+    s = chunks.savings(client, ds["id"])
+    print(f"all versions, counted in full:  {s['logical_bytes']:>18,} bytes")
+    print(f"each distinct file once:        {s['unique_file_bytes']:>18,} bytes  (what is stored today)")
+    print(f"of that, indexed:               {s['indexed_file_bytes']:>18,} bytes in {s['indexed_files']:,} files")
+    print(f"each distinct chunk once:       {s['unique_chunk_bytes']:>18,} bytes in {s['unique_chunks']:,} chunks")
+    print(f"chunk dedup would save:         {s['would_save_bytes']:>18,} bytes more")
+    if s["not_indexed_files"]:
+        print(f"not indexed yet: {s['not_indexed_files']:,} files, {s['not_indexed_bytes']:,} bytes")
+    return 0
+
+
+def cmd_delta(args):
+    client = client_from_config()
+    ds = snapshots.find_dataset(client, args.dataset)
+    old = snapshots.find_version(client, ds["id"], args.old)
+    new = snapshots.find_version(client, ds["id"], args.new)
+    if args.folder is None:
+        d = chunks.delta(client, ds["id"], new["id"], old["id"])
+        print(f"{d['unchanged_files']:,} files unchanged, {d['changed_files']:,} changed ({d['changed_bytes']:,} bytes)")
+        print(f"a delta download fetches {d['fetch_bytes']:,} of {d['total_bytes']:,} bytes; {d['reused_bytes']:,} of the changed bytes are in chunks you hold")
+        if d["not_indexed_files"]:
+            print(f"{d['not_indexed_files']:,} changed files are not indexed, and would be fetched whole")
+        return 0
+    r = chunks.delta_download(client, ds["id"], old["id"], new["id"], args.folder, args.out, progress=say)
+    print(f"{r['files']:,} files: {r['copied']:,} copied whole, {r['patched']:,} patched, {r['fetched']:,} fetched whole")
+    print(f"fetched {r['bytes_fetched']:,} of {r['total_bytes']:,} bytes; every file checked against its SHA-256")
+    return 0
+
+
+def cmd_chunk_storage(args):
+    client = client_from_config()
+    ds = snapshots.find_dataset(client, args.dataset)
+    if args.state == "rehydrate":
+        print(f"{chunks.rehydrate(client, ds['id'])['files']:,} files are being made whole objects again")
+        return 0
+    if args.state:
+        chunks.set_storage(client, ds["id"], args.state == "on")
+    s = chunks.storage(client, ds["id"])
+    print(f"chunk storage is {'on' if s['enabled'] else 'off'} for {ds['name']}")
+    print(f"{s['files']:,} files ({s['logical_bytes']:,} bytes) served from {s['chunk_objects']:,} chunks ({s['chunk_bytes']:,} bytes)")
+    print(f"{s['retired_source_bytes']:,} bytes of originals have gone; until theirs go, a file takes space twice")
+    return 0
+
+
+def cmd_delta_push(args):
+    client = client_from_config()
+    ds = snapshots.find_dataset(client, args.dataset)
+    base = snapshots.find_version(client, ds["id"], args.base)
+    r = chunks.delta_push(client, ds["id"], base["id"], args.folder, progress=say)
+    print(f"{r['files']:,} files: {r['unchanged']:,} unchanged, {r['sent']:,} sent, {r['rejected']:,} refused")
+    print(f"sent {r['sent_bytes']:,} bytes; {r['reused_bytes']:,} were already held. Snapshot the dataset to pin them.")
+    return 1 if r["rejected"] else 0
 
 
 def cmd_mount(args):
@@ -1591,6 +1810,127 @@ def main(argv=None):
     p.add_argument("--out")
     p.add_argument("--verify", action="store_true")
     p.set_defaults(run=cmd_erasure_certificate)
+
+    p = sub.add_parser("import-export", help="bring in a comms-archive or forensic export, its hashes checked; exit 1 on a mismatch")
+    p.add_argument("format", choices=list(connectors.FORMATS))
+    p.add_argument("file")
+    p.add_argument("dataset")
+    p.add_argument("--source", help="where it came from (Smarsh, Cellebrite, a case)")
+    p.add_argument("--retain", metavar="DURATION", help="retention applied before the first file arrives, such as 61320h")
+    p.add_argument("--lock", choices=["GOVERNANCE", "COMPLIANCE"])
+    p.set_defaults(run=cmd_import_export)
+
+    p = sub.add_parser("chat", help="list or add Slack and Teams channels")
+    p.add_argument("--add", metavar="NAME")
+    p.add_argument("--kind", choices=["SLACK", "TEAMS"], default="SLACK")
+    p.add_argument("--url", help="the incoming webhook URL")
+    p.set_defaults(run=cmd_chat)
+
+    p = sub.add_parser("share-chat", help="post an expiring, sign-in-gated link to a channel")
+    p.add_argument("asset_id")
+    p.add_argument("channel", help="a channel id, from osp chat")
+    p.add_argument("--note")
+    p.add_argument("--expires", metavar="DURATION", help="how long the link lasts (24h)")
+    p.set_defaults(run=cmd_share_chat)
+
+    p = sub.add_parser("lfs-setup", help="print the Git configuration that uses a dataset as a Git LFS store")
+    p.add_argument("dataset")
+    p.set_defaults(run=cmd_lfs_setup)
+
+    p = sub.add_parser("lfs-promote", help="snapshot the LFS files at HEAD as a release, and optionally hold it")
+    p.add_argument("dataset")
+    p.add_argument("label")
+    p.add_argument("--repo", default=".")
+    p.add_argument("--notes")
+    p.add_argument("--hold", metavar="REFERENCE", help="also place a legal hold under this reference")
+    p.set_defaults(run=cmd_lfs_promote)
+
+    p = sub.add_parser("device-add", help="register an edge device: an upload-only credential confined to a path")
+    p.add_argument("name")
+    p.add_argument("dataset")
+    p.add_argument("--prefix", help="the path it writes under (devices/<name>/)")
+    p.set_defaults(run=cmd_device_add)
+
+    p = sub.add_parser("devices", help="edge devices, with what waits on each")
+    p.set_defaults(run=cmd_devices)
+
+    p = sub.add_parser("device-revoke", help="stop a device's credential")
+    p.add_argument("id")
+    p.set_defaults(run=cmd_device_revoke)
+
+    p = sub.add_parser("recordings", help="runs and recordings from edge devices")
+    p.add_argument("id", nargs="?")
+    p.add_argument("--device")
+    p.set_defaults(run=cmd_recordings)
+
+    p = sub.add_parser("recorded", help="what a snapshot's MCAP files and rosbag2 folders hold")
+    p.add_argument("dataset")
+    p.add_argument("version")
+    p.add_argument("--topic")
+    p.set_defaults(run=cmd_recorded)
+
+    p = sub.add_parser("stac", help="export a snapshot as STAC")
+    p.add_argument("dataset")
+    p.add_argument("version")
+    p.add_argument("--collection", action="store_true", help="the Collection, not its items")
+    p.add_argument("--out")
+    p.set_defaults(run=cmd_stac)
+
+    p = sub.add_parser("upstream", help="where imports came from, and whether each copy changed or went away")
+    p.add_argument("--dataset")
+    p.add_argument("--state", choices=["WATCHING", "CHANGED", "GONE"])
+    p.set_defaults(run=cmd_upstream)
+
+    p = sub.add_parser("publish", help="publish a snapshot: a public landing page, and a DOI with --doi. The data stays private")
+    p.add_argument("dataset")
+    p.add_argument("version")
+    p.add_argument("--title", required=True)
+    p.add_argument("--creator", action="append", required=True, help='"Name (Affiliation) 0000-0002-1825-0097"; repeat for each')
+    p.add_argument("--publisher", required=True)
+    p.add_argument("--description")
+    p.add_argument("--license", help="the dataset's recorded licence if left out")
+    p.add_argument("--doi", action="store_true")
+    p.set_defaults(run=cmd_publish)
+
+    p = sub.add_parser("publish-doi", help="register a publication's DOI, or try again after a failure")
+    p.add_argument("dataset")
+    p.add_argument("version")
+    p.set_defaults(run=cmd_publish_doi)
+
+    p = sub.add_parser("retention-cost", help="what keeping a snapshot for years costs in storage")
+    p.add_argument("dataset")
+    p.add_argument("version")
+    p.add_argument("--years", type=int, default=10)
+    p.add_argument("--price", type=float, help="your own price per GB-month")
+    p.set_defaults(run=cmd_retention_cost)
+
+    p = sub.add_parser("chunking", help="index a dataset's files into content-defined chunks, for the savings report and delta downloads")
+    p.add_argument("dataset")
+    p.add_argument("state", choices=["on", "off"])
+    p.set_defaults(run=cmd_chunking)
+
+    p = sub.add_parser("chunk-savings", help="what storing each distinct chunk once would save")
+    p.add_argument("dataset")
+    p.set_defaults(run=cmd_chunk_savings)
+
+    p = sub.add_parser("delta", help="what moving between two versions fetches; with a folder holding OLD, build NEW from it, fetching only what differs")
+    p.add_argument("dataset")
+    p.add_argument("old")
+    p.add_argument("new")
+    p.add_argument("folder", nargs="?", help="a copy of the old version")
+    p.add_argument("out", nargs="?", help="where to write the new one; the old copy is not changed")
+    p.set_defaults(run=cmd_delta)
+
+    p = sub.add_parser("chunk-storage", help="keep files that share bytes as chunks stored once; with no state, say what it holds")
+    p.add_argument("dataset")
+    p.add_argument("state", nargs="?", choices=["on", "off", "rehydrate"])
+    p.set_defaults(run=cmd_chunk_storage)
+
+    p = sub.add_parser("delta-push", help="make the draft hold a folder, sending only what differs from a snapshot")
+    p.add_argument("dataset")
+    p.add_argument("base", help="the snapshot to reuse: a version number, id, or latest")
+    p.add_argument("folder")
+    p.set_defaults(run=cmd_delta_push)
 
     p = sub.add_parser("mount", help="mount a version read-only as a folder (FUSE)")
     p.add_argument("dataset")

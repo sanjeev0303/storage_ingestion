@@ -75,6 +75,7 @@ type TokenInput struct {
 	Name        string
 	Permissions []string
 	Datasets    []string
+	PathPrefix  string
 	Networks    []string
 	ExpiresIn   time.Duration
 	AllowLinks  bool
@@ -139,7 +140,7 @@ func (s *Service) CreateTokenFor(ctx context.Context, p model.Principal, in Toke
 	now := s.now()
 	t := model.APIToken{ID: event.NewID(), TenantID: p.TenantID, UserID: p.UserID, Name: in.Name,
 		TokenHash: identity.HashAPIToken(raw), Hint: "…" + raw[len(raw)-4:], Permissions: perms,
-		Datasets: in.Datasets, Networks: in.Networks, AllowLinks: in.AllowLinks && len(in.Datasets) == 0,
+		Datasets: in.Datasets, PathPrefix: in.PathPrefix, Networks: in.Networks, AllowLinks: in.AllowLinks && len(in.Datasets) == 0,
 		ExpiresAt: now.Add(in.ExpiresIn), CreatedAt: now}
 	if err := s.store.CreateToken(ctx, t); err != nil {
 		return model.APIToken{}, "", err

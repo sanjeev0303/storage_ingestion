@@ -81,6 +81,15 @@ func (s *Service) syncLock(ctx context.Context, asset model.Asset, policy Effect
 	if err != nil || !enabled {
 		return err
 	}
+	if r, ok := s.deps.Packs.(interfaces.ChunkRehydrator); ok {
+		chunked, err := r.RequestRehydrate(ctx, asset.TenantID, asset.ID)
+		if err != nil {
+			return err
+		}
+		if chunked {
+			return fmt.Errorf("asset %s is kept as chunks and is being made one object again; the lock follows", asset.ID)
+		}
+	}
 	current, _, err := s.deps.Locks.GetLock(ctx, asset.TenantID, asset.ID)
 	if err != nil {
 		return err

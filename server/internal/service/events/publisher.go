@@ -27,7 +27,7 @@ import (
 
 // recordTimeout bounds the database write that records an outcome. It
 // runs even during shutdown: by then the outcome is already known.
-const recordTimeout = 10 * time.Second
+var recordTimeout = 10 * time.Second
 
 type PublisherConfig struct {
 	// Owner identifies this publisher on the leases it takes.
