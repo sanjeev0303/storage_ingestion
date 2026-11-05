@@ -5,11 +5,13 @@ import type { StopId } from "./copy";
 type Tone = "ground" | "plum" | "faint" | "amber";
 
 // ground is the 60%, plum the 30% (and the dark theme's ground), amber the 10%.
+// --box fills a diagram's boxes and --mask sits behind its labels, so both
+// read on whichever field the section has.
 const tones: Record<Tone, string> = {
-  ground: "bg-ground text-ink",
-  plum: "bg-ink text-ground",
-  faint: "bg-faint text-ink",
-  amber: "bg-accent text-on-accent",
+  ground: "bg-ground text-ink [--fg:var(--ink)] [--box:var(--faint)] [--mask:var(--ground)]",
+  plum: "bg-ink text-ground [--fg:var(--ground)] [--box:transparent] [--mask:var(--ink)]",
+  faint: "bg-faint text-ink [--fg:var(--ink)] [--box:var(--ground)] [--mask:var(--faint)]",
+  amber: "bg-accent text-on-accent [--fg:var(--on-accent)] [--box:transparent] [--mask:var(--accent)]",
 };
 
 export function Container({ children, className }: { children: ReactNode; className?: string }) {

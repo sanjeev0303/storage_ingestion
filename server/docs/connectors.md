@@ -35,7 +35,7 @@ Objects are stored under `.lfs/` by their SHA-256, through the same upload path 
 
 ## DICOMweb
 
-A read-only gateway over one snapshot, not a PACS. When a version is profiled, each `.dcm` member's header is indexed.
+A read-only gateway over one snapshot, not a PACS. When a version is profiled, each `.dcm` member's header is indexed, deflated transfer syntax included. At upload every DICOM file is also walked to its end and checked for patient identifiers (docs/content-checks.md).
 
 | Route | Answers |
 |---|---|

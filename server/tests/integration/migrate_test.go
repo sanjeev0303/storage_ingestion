@@ -125,7 +125,7 @@ func TestMigrationsFromScratchAndRollback(t *testing.T) {
 	}
 
 	// The newest release rolls back...
-	want := []string{"000046_chunk_indexes.sql", "000045_chunk_storage.sql", "000044_chunks.sql", "000043_domain.sql", "000042_edge.sql", "000041_connectors.sql", "000040_erasure.sql", "000039_quality.sql", "000038_evidence.sql", "000037_tiering_costs.sql", "000036_pack_streaming.sql", "000035_copy_engine.sql",
+	want := []string{"000047_adoption_quota.sql", "000046_chunk_indexes.sql", "000045_chunk_storage.sql", "000044_chunks.sql", "000043_domain.sql", "000042_edge.sql", "000041_connectors.sql", "000040_erasure.sql", "000039_quality.sql", "000038_evidence.sql", "000037_tiering_costs.sql", "000036_pack_streaming.sql", "000035_copy_engine.sql",
 		"000034_residency_keys.sql", "000033_storage_posture.sql", "000032_access_governance.sql", "000031_adoption.sql",
 		"000030_governance.sql", "000029_content_checks.sql", "000028_lock_sync.sql", "000027_training_runs.sql"}
 	undone, err := m.Rollback(ctx, len(want))

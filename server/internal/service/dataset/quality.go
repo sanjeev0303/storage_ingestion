@@ -444,11 +444,16 @@ func (s *Service) indexDicom(ctx context.Context, job model.VersionProfile, m mo
 		SeriesUID: h.Series, Modality: h.Modality, PatientID: h.PatientID, StudyDate: h.StudyDate, Tags: h.Tags})
 }
 
+// rosbag2DB marks a rosbag2 SQLite file; its summary's kind is still ROSBAG2.
+const rosbag2DB = "ROSBAG2_DB3"
+
 func recordingKind(p string) string {
 	name := strings.ToLower(p)
 	switch {
 	case strings.HasSuffix(name, ".mcap"):
 		return recording.KindMCAP
+	case strings.HasSuffix(name, ".db3"):
+		return rosbag2DB
 	case name == "metadata.yaml" || strings.HasSuffix(name, "/metadata.yaml"):
 		return recording.KindRosbag2
 	}
@@ -466,9 +471,62 @@ func readRange(ctx context.Context, src memberBytes, off, n int64) ([]byte, erro
 	return io.ReadAll(io.LimitReader(body, n))
 }
 
+// blockReader reads a member through ranged reads of a fixed block size,
+// keeping the last few blocks, for formats read out of order.
+type blockReader struct {
+	ctx    context.Context
+	src    memberBytes
+	size   int64
+	block  int64
+	cached []cachedBlock
+}
+
+type cachedBlock struct {
+	start int64
+	data  []byte
+}
+
+func (b *blockReader) ReadAt(p []byte, off int64) (int, error) {
+	n := 0
+	for n < len(p) {
+		at := off + int64(n)
+		if at >= b.size {
+			return n, io.EOF
+		}
+		start := at / b.block * b.block
+		data, err := b.get(start)
+		if err != nil {
+			return n, err
+		}
+		if at-start >= int64(len(data)) {
+			return n, io.ErrUnexpectedEOF // the store answered fewer bytes than the member has
+		}
+		n += copy(p[n:], data[at-start:])
+	}
+	return n, nil
+}
+
+func (b *blockReader) get(start int64) ([]byte, error) {
+	for _, c := range b.cached {
+		if c.start == start {
+			return c.data, nil
+		}
+	}
+	data, err := readRange(b.ctx, b.src, start, min(b.block, b.size-start))
+	if err != nil {
+		return nil, err
+	}
+	if len(b.cached) == 4 {
+		b.cached = b.cached[1:]
+	}
+	b.cached = append(b.cached, cachedBlock{start, data})
+	return data, nil
+}
+
 // indexRecording reads only what a recording says about itself: for MCAP its
-// footer and summary, a few ranged reads however large the file. A
-// metadata.yaml that is not a rosbag2's is simply some other file.
+// footer and summary, a few ranged reads however large the file; for a
+// rosbag2 SQLite file (.db3) its topics and each message's topic and time.
+// A metadata.yaml that is not a rosbag2's is simply some other file.
 func (s *Service) indexRecording(ctx context.Context, job model.VersionProfile, m model.MemberEvidence, kind string) error {
 	if s.deps.Recordings == nil || m.AssetStatus != model.AssetStatusAvailable || m.ObjectKey == "" {
 		return nil
@@ -478,7 +536,14 @@ func (s *Service) indexRecording(ctx context.Context, job model.VersionProfile, 
 		return err
 	}
 	var sum recording.Summary
-	if kind == recording.KindMCAP {
+	if kind == rosbag2DB {
+		// A SQLite bag is read in large blocks: its pages are scattered, and a
+		// ranged read per page would be thousands of requests.
+		r := &blockReader{ctx: ctx, src: src, size: m.SizeBytes, block: 8 << 20}
+		if sum, err = recording.ParseRosbag2DB(r, m.SizeBytes); err != nil {
+			return err
+		}
+	} else if kind == recording.KindMCAP {
 		if m.SizeBytes < int64(recording.MCAPTailBytes) {
 			return errors.New("too short to be an MCAP file")
 		}

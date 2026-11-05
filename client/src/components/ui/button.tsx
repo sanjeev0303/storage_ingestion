@@ -7,13 +7,13 @@ export type ButtonVariant = "primary" | "secondary" | "accent" | "ghost";
 
 const base =
   "inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md px-4 text-base font-medium whitespace-nowrap " +
-  "transition-[box-shadow,transform,background-color] duration-150 ease-out " +
+  "transition-[transform,background-color,border-color] duration-150 ease-out " +
   "disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50";
 
 const variants: Record<ButtonVariant, string> = {
-  primary: "bg-ink text-ground shadow-neo-sm active:scale-[0.97] active:shadow-none",
-  secondary: "neo-sm active:scale-[0.97] active:shadow-neo-in",
-  accent: "bg-accent text-on-accent shadow-neo-sm active:scale-[0.97] active:shadow-none",
+  primary: "bg-ink text-ground active:scale-[0.97]",
+  secondary: "neo-sm hover:border-edge active:scale-[0.97] active:bg-faint",
+  accent: "bg-accent text-on-accent active:scale-[0.97]",
   ghost: "hover:bg-faint active:scale-[0.97] active:bg-faint",
 };
 

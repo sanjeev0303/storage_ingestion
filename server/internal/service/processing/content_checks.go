@@ -36,6 +36,9 @@ func (ContentInspector) Name() string { return "content" }
 type inspection struct {
 	findings []model.ContentFinding
 	notes    []string
+	// Bytes of archived text the secret scan has read, out of its budget.
+	secretBytes       int64
+	secretBudgetSpent bool
 }
 
 func (in *inspection) find(source, code, detail string) {
@@ -64,10 +67,13 @@ func (v ContentInspector) Validate(ctx context.Context, sample interfaces.Conten
 
 	var err error
 	switch format {
-	case "zip", "pdf":
+	case "zip", "pdf", "tiff":
 		err = v.spooled(ctx, sample, func(f *os.File, size int64) error {
-			if format == "pdf" {
+			switch format {
+			case "pdf":
 				return inspectPDF(ctx, f, size, in)
+			case "tiff":
+				return inspectTIFF(f, size, path.Ext(strings.ToLower(sample.FileName)), in)
 			}
 			return v.inspectZip(ctx, f, size, in)
 		})
@@ -87,8 +93,14 @@ func contentFormat(sample interfaces.ContentSample) string {
 	name := strings.ToLower(sample.FileName)
 	ext := path.Ext(name)
 	switch {
+	case len(head) >= 132 && string(head[128:132]) == "DICM":
+		return "dicom"
 	case bytes.HasPrefix(head, []byte("%PDF-")):
 		return "pdf"
+	case bytes.HasPrefix(head, pngMagic):
+		return "png"
+	case bytes.HasPrefix(head, []byte{0xFF, 0xD8, 0xFF}):
+		return "jpeg"
 	case bytes.HasPrefix(head, []byte("PK\x03\x04")):
 		return "zip"
 	case bytes.HasPrefix(head, oleMagic):
@@ -99,6 +111,15 @@ func contentFormat(sample interfaces.ContentSample) string {
 		return "gzip"
 	case bytes.HasPrefix(head, npyMagic):
 		return "npy"
+	case bytes.HasPrefix(head, cramMagic):
+		return "cram"
+	case bytes.HasPrefix(head, sqliteMagic):
+		return "sqlite"
+	case bytes.HasPrefix(head, []byte("II*\x00")), bytes.HasPrefix(head, []byte("MM\x00*")),
+		bytes.HasPrefix(head, []byte("II+\x00")), bytes.HasPrefix(head, []byte("MM\x00+")):
+		return "tiff"
+	case mediaFormat(head, ext) != "":
+		return mediaFormat(head, ext)
 	case len(head) >= 2 && head[0] == 0x80 && head[1] >= 2 && head[1] <= 5:
 		return "pickle"
 	case ext == ".safetensors":
@@ -107,6 +128,8 @@ func contentFormat(sample interfaces.ContentSample) string {
 		return "tar"
 	case ext == ".fastq" || ext == ".fq":
 		return "fastq"
+	case ext == ".vcf":
+		return "vcf"
 	case ext == ".mcap":
 		return "mcap" // named MCAP without the magic: the format check says so
 	case pickleNames[ext]:
@@ -126,9 +149,19 @@ func isText(sample interfaces.ContentSample) bool {
 	case "text/plain", "text/csv", "application/json":
 		return true
 	}
-	switch strings.ToLower(path.Ext(sample.FileName)) {
+	return textName(sample.FileName) && !hasBinaryBytes(sample.Head)
+}
+
+// textName: configuration, code, notebook and data files people commit
+// credentials to, whether alone or inside an archive.
+func textName(name string) bool {
+	base := strings.ToLower(path.Base(name))
+	if base == ".env" || strings.HasPrefix(base, ".env.") {
+		return true
+	}
+	switch path.Ext(base) {
 	case ".env", ".yaml", ".yml", ".ini", ".cfg", ".conf", ".toml", ".properties", ".ipynb", ".tf", ".tfvars", ".py", ".r", ".sql", ".log", ".txt", ".csv", ".tsv", ".json", ".jsonl", ".md":
-		return !hasBinaryBytes(sample.Head)
+		return true
 	}
 	return false
 }
@@ -142,6 +175,10 @@ func (v ContentInspector) streamed(ctx context.Context, sample interfaces.Conten
 	defer body.Close()
 	r := &ctxReader{ctx: ctx, r: body}
 	switch format {
+	case "png":
+		return inspectPNG(r, in)
+	case "jpeg":
+		return inspectJPEG(r, in)
 	case "ole":
 		return inspectOLE(r, in)
 	case "mcap":
@@ -158,8 +195,28 @@ func (v ContentInspector) streamed(ctx context.Context, sample interfaces.Conten
 		return inspectSafetensors(r, sample.SizeBytes, in)
 	case "fastq":
 		return inspectFASTQ(r, "fastq", in)
+	case "vcf":
+		return inspectVCF(r, "vcf", in)
+	case "cram":
+		return inspectCRAM(r, sample.SizeBytes, in)
+	case "dicom":
+		return inspectDICOM(r, sample.SizeBytes, in)
+	case "sqlite":
+		return inspectSQLite(r, sample.SizeBytes, in)
+	case "riff":
+		return inspectRIFF(r, sample.SizeBytes, in)
+	case "flac":
+		return inspectFLAC(r, sample.SizeBytes, in)
+	case "mp3":
+		return inspectMP3(r, sample.SizeBytes, in)
+	case "bmff":
+		return inspectBMFF(r, sample.SizeBytes, in)
+	case "matroska":
+		return inspectMatroska(r, sample.SizeBytes, in)
+	case "ogg":
+		return inspectOgg(r, sample.SizeBytes, in)
 	case "text":
-		return scanSecrets(r, v.SecretScanBytes, in)
+		return scanSecrets(r, v.SecretScanBytes, in, "")
 	}
 	return nil
 }
@@ -217,6 +274,10 @@ func (v ContentInspector) inspectZip(ctx context.Context, f *os.File, size int64
 			}
 		case strings.HasSuffix(name, ".npy"):
 			if err := v.zipEntry(entry, func(r io.Reader) error { return inspectNPY(r, "npz", in) }); err != nil {
+				return err
+			}
+		case !entry.FileInfo().IsDir() && textName(name):
+			if err := v.zipEntry(entry, func(r io.Reader) error { return v.scanArchived(r, entry.Name, in) }); err != nil {
 				return err
 			}
 		}

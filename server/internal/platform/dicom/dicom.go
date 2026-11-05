@@ -4,9 +4,12 @@
 package dicom
 
 import (
+	"bytes"
+	"compress/flate"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 )
@@ -35,6 +38,9 @@ var wanted = map[uint32]tagInfo{
 }
 
 const lastWanted = 0x00280100
+
+// maxInflated bounds how much of a deflated data set the header read expands.
+const maxInflated = 4 << 20
 
 type reader struct {
 	b        []byte
@@ -154,7 +160,12 @@ func Parse(data []byte) (Header, error) {
 	}
 	body := &reader{b: data, pos: meta.pos, explicit: syntax != "1.2.840.10008.1.2", big: syntax == "1.2.840.10008.1.2.2"}
 	if syntax == "1.2.840.10008.1.2.1.99" {
-		return h, fmt.Errorf("%w: deflated transfer syntax", ErrNotDICOM)
+		// Deflated explicit little endian: the data set is one raw deflate
+		// stream. Only the start of the file was read, so the stream ends
+		// early; what inflated is enough for the header.
+		inflated, _ := io.ReadAll(io.LimitReader(flate.NewReader(bytes.NewReader(data[meta.pos:])), maxInflated))
+		data = inflated
+		body = &reader{b: data, explicit: true}
 	}
 	for {
 		tag, _, n, err := body.element()

@@ -34,11 +34,13 @@ const (
 	pdfStreamLimit    = 8 << 20   // inflated bytes read from one stream
 	pdfInflatedBudget = 256 << 20 // inflated bytes read from all streams
 	pdfMaxStreams     = 20000
+	pdfDictLookback   = 2048 // bytes before a stream searched for its dictionary
 )
 
 func inspectPDF(ctx context.Context, f *os.File, size int64, in *inspection) error {
 	names := map[string]bool{}
 	starts := map[int64]bool{}
+	encrypted := false
 	const chunk, overlap = 1 << 20, 256
 	buf := make([]byte, chunk+overlap)
 	var base int64 // file offset of buf[0]
@@ -50,6 +52,9 @@ func inspectPDF(ctx context.Context, f *os.File, size int64, in *inspection) err
 		n, err := f.ReadAt(buf[carry:], base+int64(carry))
 		data := buf[:carry+n]
 		pdfCollectNames(data, names)
+		if bytes.Contains(data, []byte("/Encrypt")) {
+			encrypted = true
+		}
 		for _, m := range pdfStreamRe.FindAllIndex(data, -1) {
 			// "endstream" is not the start of one.
 			if m[0] >= 3 && string(data[m[0]-3:m[0]]) == "end" {
@@ -71,20 +76,42 @@ func inspectPDF(ctx context.Context, f *os.File, size int64, in *inspection) err
 		carry = keep
 	}
 
+	if encrypted {
+		in.note("the PDF is encrypted: its streams could not be decoded and were not checked")
+	}
 	budget := int64(pdfInflatedBudget)
+	dict := make([]byte, pdfDictLookback)
 	for start := range starts {
 		if budget <= 0 {
 			in.note("PDF content checked in %d MiB of decompressed streams; the rest were not", pdfInflatedBudget>>20)
 			break
 		}
-		zr, err := zlib.NewReader(io.NewSectionReader(f, start, size-start))
-		if err != nil {
-			continue // not a Flate stream
+		// The stream's dictionary sits just before its "stream" keyword.
+		from := max(0, start-pdfDictLookback)
+		n, _ := f.ReadAt(dict[:start-from], from)
+		filters, earlyChange, ok := pdfStreamFilters(dict[:n])
+		if !ok {
+			continue // an image or crypt filter
 		}
-		inflated, _ := io.ReadAll(io.LimitReader(zr, min(pdfStreamLimit, budget)))
-		zr.Close()
-		budget -= int64(len(inflated))
-		pdfCollectNames(inflated, names)
+		body := io.NewSectionReader(f, start, size-start)
+		limit := min(pdfStreamLimit, budget)
+		var decoded []byte
+		if filters == nil {
+			// No /Filter where we looked: try Flate, as most streams are.
+			zr, err := zlib.NewReader(body)
+			if err != nil {
+				continue
+			}
+			decoded, _ = io.ReadAll(io.LimitReader(zr, limit))
+			zr.Close()
+		} else {
+			var err error
+			if decoded, err = pdfDecode(body, filters, earlyChange, limit); err != nil {
+				continue
+			}
+		}
+		budget -= int64(len(decoded))
+		pdfCollectNames(decoded, names)
 	}
 
 	for name := range names {

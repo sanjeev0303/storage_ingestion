@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -117,13 +118,19 @@ func TestDomain(t *testing.T) {
 	mcap := s.publishAt(t, dev, "logs/run1.mcap", mcapFile(1_000, 9_000, 42))
 	bag := s.publishAt(t, dev, "bags/b1/metadata.yaml", []byte(rosbagYAML))
 	notBag := s.publishAt(t, dev, "conf/metadata.yaml", []byte("name: something else\n"))
+	// A bag whose recorder never wrote metadata.yaml: only its SQLite file.
+	db3Bytes, err := os.ReadFile("../../internal/platform/recording/testdata/rosbag2.db3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db3 := s.publishAt(t, dev, "bags/b2/bag_0.db3", db3Bytes)
 	band := withMetadata(map[string]string{"stac.item": "t1", "stac.collection": "s2", "stac.datetime": "2024-03-01T10:00:00Z",
 		"stac.eo.cloud_cover": "12.5", "stac.s2.processing_baseline": "04.00", "stac.bbox": "10,20,11,21"})
 	b4 := s.publishAt(t, dev, "s2/t1/B04.bin", textData("band4", 300), band)
 	b8 := s.publishAt(t, dev, "s2/t1/B08.bin", textData("band8", 300), band)
 
 	d := s.newDataset(t, dev, "domain-set")
-	s.addMembers(t, dev, d.ID, memberOf(mcap, "", ""), memberOf(bag, "", ""), memberOf(notBag, "", ""), memberOf(b4, "", ""), memberOf(b8, "", ""))
+	s.addMembers(t, dev, d.ID, memberOf(mcap, "", ""), memberOf(bag, "", ""), memberOf(notBag, "", ""), memberOf(db3, "", ""), memberOf(b4, "", ""), memberOf(b8, "", ""))
 	v, _, err := s.datasets.Snapshot(ctx, dev, d.ID, "")
 	if err != nil {
 		t.Fatal(err)
@@ -132,8 +139,17 @@ func TestDomain(t *testing.T) {
 
 	// Recordings.
 	recs, err := svc.Recordings(ctx, dev, d.ID, v.ID, "", nil, nil)
-	if err != nil || len(recs) != 2 {
+	if err != nil || len(recs) != 3 {
 		t.Fatalf("recordings: %+v %v", recs, err)
+	}
+	var fromDB *model.RecordingMeta
+	for i := range recs {
+		if recs[i].Path == "bags/b2/bag_0.db3" {
+			fromDB = &recs[i]
+		}
+	}
+	if fromDB == nil || fromDB.Kind != "ROSBAG2" || fromDB.MessageCount != 160 || fromDB.StartNS != 1730000000000000000 || len(fromDB.Topics) != 3 {
+		t.Fatalf("rosbag2 sqlite: %+v", fromDB)
 	}
 	if r := recs[0]; r.Path != "logs/run1.mcap" || r.Kind != "MCAP" || r.StartNS != 1_000 || r.EndNS != 9_000 || r.MessageCount != 42 ||
 		r.Topics[0].Topic != "/imu" || r.Topics[0].Schema != "sensor_msgs/Imu" {
@@ -142,11 +158,11 @@ func TestDomain(t *testing.T) {
 	if r := recs[1]; r.Kind != "ROSBAG2" || r.StartNS != 2_000 || r.EndNS != 6_000 || r.Topics[0].Topic != "/camera" {
 		t.Fatalf("rosbag2: %+v", r)
 	}
-	if byTopic, err := svc.Recordings(ctx, dev, d.ID, v.ID, "/imu", nil, nil); err != nil || len(byTopic) != 1 {
+	if byTopic, err := svc.Recordings(ctx, dev, d.ID, v.ID, "/imu", nil, nil); err != nil || len(byTopic) != 2 {
 		t.Fatalf("by topic: %+v %v", byTopic, err)
 	}
 	late := int64(7_000)
-	if byTime, err := svc.Recordings(ctx, dev, d.ID, v.ID, "", &late, nil); err != nil || len(byTime) != 1 || byTime[0].Kind != "MCAP" {
+	if byTime, err := svc.Recordings(ctx, dev, d.ID, v.ID, "", &late, nil); err != nil || len(byTime) != 2 || byTime[0].Kind != "MCAP" {
 		t.Fatalf("by time: %+v %v", byTime, err)
 	}
 	if _, err := svc.Recordings(ctx, other, d.ID, v.ID, "", nil, nil); err == nil {
@@ -259,7 +275,7 @@ func TestDomain(t *testing.T) {
 			t.Fatalf("place: %+v %+v", f.Geometry, f.BBox)
 		}
 	}
-	if !found || len(fc.Features) != 4 {
+	if !found || len(fc.Features) != 5 { // the STAC item and each other file, the bag's SQLite file included
 		t.Fatalf("features: %s", buf.String())
 	}
 

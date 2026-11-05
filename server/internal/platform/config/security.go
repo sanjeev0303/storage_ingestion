@@ -206,6 +206,10 @@ var renamedQuotas = map[string]string{
 	"INGESTION_MAX_PENDING_ENTRIES":  "QUOTA_MAX_PENDING_ENTRIES",
 }
 
+// QuotaDefaults reads the default per-tenant limits, for a process that
+// needs them without the rest of the security settings.
+func QuotaDefaults() (model.TenantQuota, error) { return loadQuotaDefaults() }
+
 // loadQuotaDefaults reads the default per-tenant limits. Tenants'
 // overrides in tenant_quotas take precedence.
 func loadQuotaDefaults() (model.TenantQuota, error) {

@@ -8,7 +8,9 @@ The content inspector (`ContentInspector`, validator `content`) opens each objec
 
 | Format (by its bytes, or its name where bytes are ambiguous) | Check | Codes |
 | --- | --- | --- |
-| PDF | JavaScript, launch actions, embedded files, rich media, XFA, including names escaped as `#xx` and inside compressed object streams | `active_content.pdf_javascript`, `pdf_launch`, `pdf_embedded_file`, `pdf_rich_media`, `pdf_xfa` |
+| PDF | JavaScript, launch actions, embedded files, rich media, XFA, including names escaped as `#xx` and inside streams decoded through their `/Filter` chain (Flate, ASCIIHex, ASCII85, LZW with either EarlyChange, RunLength; image filters are left alone). An encrypted PDF is noted: its streams cannot be read | `active_content.pdf_javascript`, `pdf_launch`, `pdf_embedded_file`, `pdf_rich_media`, `pdf_xfa` |
+| PNG | Every chunk's CRC, IHDR first and IEND last; a text chunk named `profile` (ImageMagick embeds the file it names in what it writes, CVE-2022-44268); chunks outside the PNG specification; bytes after IEND | `image.png_profile_text`, `image.png_unknown_chunk`, `image.trailing_data`, `format.corrupt_png` |
+| JPEG | Every segment to the end-of-image marker, through the coded data of each scan; bytes after it (except a multi-picture file's other pictures); a file cut short | `image.trailing_data`, `image.truncated_jpeg`, `format.corrupt_jpeg` |
 | Office (zip) | VBA projects, ActiveX, embedded OLE objects | `active_content.ooxml_macro`, `ooxml_activex`, `ooxml_ole_object` |
 | Office (legacy OLE) | VBA projects, embedded packages | `active_content.ole_macro`, `ole_package` |
 | Pickle, PyTorch (`.pt`, `.pth`, `.ckpt`, zip or legacy), joblib | Opcode walk without executing: every GLOBAL and STACK_GLOBAL import judged against a safe list (tensors, arrays, containers) and a dangerous list (os, subprocess, builtins.eval...) | `model.unsafe_pickle`, `model.pickle_imports`, `model.invalid_pickle` |
@@ -18,8 +20,20 @@ The content inspector (`ContentInspector`, validator `content`) opens each objec
 | BGZF / BAM | EOF block present; BAM header, references and every record's length and reference ids | `format.truncated_bgzf`, `format.invalid_bam` |
 | FASTQ (plain or gzipped) | Every record: `@` header, sequence, `+`, quality as long as the sequence, printable | `format.invalid_fastq` |
 | MCAP | Magic, every record's length, footer and closing magic | `format.invalid_mcap` |
+| VCF (plain or gzipped) | `##fileformat=VCFv` first, the `#CHROM` column header (with `FORMAT` before samples), and in every record the header's column count, a whole position, reference bases `ACGTN` and an alternate allele | `format.invalid_vcf` |
+| CRAM 2.1 and 3.x | Every container to the end-of-file container; CRAM 3 container headers' CRC-32 | `format.invalid_cram`, `format.truncated_cram` |
+| WAV, RF64/BW64, AVI, WebP (RIFF) | Every chunk inside the declared size (placeholder sizes from streaming writers allowed; RF64's real sizes from `ds64`); a WAV's `fmt ` before its `data` | `format.truncated_media`, `format.corrupt_media` |
+| FLAC | `fLaC`, STREAMINFO first, every metadata block to the last, then a frame sync | `format.truncated_media`, `format.corrupt_media` |
+| MP3 (by an ID3 tag or the name) | Every MPEG audio frame to the end, its length from its header; ID3v1, APE and Lyrics3 tags after the audio end the walk | `format.truncated_media`, `format.corrupt_media` |
+| MP4, MOV, M4A, 3GP, HEIF/AVIF | Every top-level box inside the file (64-bit sizes included); a movie needs `moov`, a fragment `moof`, an image `meta`. An index after the media data is noted: the file plays only once it has fully arrived | `format.truncated_media`, `format.corrupt_media` |
+| Matroska, WebM | The EBML header, then every Segment element; tracks and at least one cluster. Clusters of unknown size, as live recorders write them, are walked block by block | `format.truncated_media`, `format.corrupt_media` |
+| Ogg (Vorbis, Opus) | Every page's checksum, and an end-of-stream page for each stream | `format.truncated_media`, `format.corrupt_media` |
+| TIFF and BigTIFF, GeoTIFF, COG | Every image directory, and every strip or tile inside the file. When georeferenced: a well-formed GeoKey directory, a raster-to-model tie (pixel scale and tiepoint, or transformation), and the Cloud Optimized GeoTIFF layout: tiled, every directory before the image data, overviews from largest to smallest when the image is over 512 pixels | `format.corrupt_tiff`, `geo.missing_geokeys`, `geo.invalid_geokeys`, `geo.missing_georeference`, `geo.not_cloud_optimized` |
+| DICOM Part 10 | Every element to the end in its transfer syntax (implicit, explicit, big endian, deflated), through nested sequences and encapsulated pixel data. Patient name, IDs, birth date, address, telephone, referring physician or institution present without Patient Identity Removed = YES; Burned In Annotation = YES | `format.invalid_dicom`, `phi.dicom_identifiers`, `phi.burned_in_annotation` |
+| SQLite (ROS 2 `.db3` bags and others) | The header's page size, a whole number of pages, and as many as the header counts | `format.invalid_sqlite`, `format.truncated_sqlite` |
 | tar (plain or gzipped) | Entry count, paths and links that leave the extraction folder, device files | `format.unsafe_archive_entry`, `format.archive_too_many_entries`, `format.corrupt_tar` |
 | Text (detected text, JSON, CSV, and configuration and notebook files) | Credentials: AWS keys, private keys, GitHub, Slack, Stripe, Google, Azure and AI provider keys, signed JWTs. A finding names the kind, the byte offset and the count, never the value. | `secret.*` |
+| Text inside a zip, a tar or a gzip stream (by the inner file's name: `.env`, `.json`, `.yaml`, `.tfvars`, `.py`...) | The same credentials; the finding names the file inside (`in app/config/.env`). Every archived text file shares one budget of `SECRET_SCAN_MAX_BYTES`, noted when spent | `secret.*` |
 
 A read failure of the object is retried, never taken for a broken file. A check that read only part of an object (larger than `CONTENT_CHECK_MAX_BYTES`, a text file past `SECRET_SCAN_MAX_BYTES`, a gzip past `ARCHIVE_MAX_UNCOMPRESSED_BYTES`) says so in the processing history (`content_checks_partial`), and the job's coverage is recorded as `PARTIAL`.
 
@@ -43,6 +57,9 @@ Defaults, by family and where a code differs:
 | `model` | reject | `pickle_imports` and `npy_object_array` flag |
 | `secret` | flag | |
 | `format` | reject | |
+| `image` | flag | `png_profile_text` rejects |
+| `phi` | flag | Clinical data is expected to carry identifiers; set `phi` to `reject` where only de-identified images may come in |
+| `geo` | flag | A GeoTIFF that is not fully georeferenced or not cloud optimized still opens |
 | `external` | the engine's action, else flag | |
 | `malware` | reject, always | cannot be changed |
 
@@ -88,8 +105,15 @@ A claim lasts an hour; a re-scan that fails is tried again after it.
 
 Archive limits (`ARCHIVE_MAX_ENTRIES`, `ARCHIVE_MAX_UNCOMPRESSED_BYTES`, `ARCHIVE_MAX_RATIO`) also bound the content inspector's zip, tar and gzip reading.
 
+## Disarming images before upload
+
+The platform never changes stored bytes: their SHA-256 is what it vouches for. `osp disarm FILE... --out DIR` (or `osp.disarm.disarm_file`) writes copies of PNG and JPEG files with only what draws the picture: PNG keeps its palette, transparency, colour space, pixel size and animation chunks; JPEG keeps its JFIF header, ICC profile, Adobe marker and coded image. Text, EXIF and XMP (orientation included), comments, private chunks and anything after the image's end go. Upload the copies, and set `image` to `reject` if only clean images may come in.
+
 ## Not covered
 
-- Secrets inside archives and compressed text are not scanned.
-- PDF streams with filters other than Flate are not decompressed.
+- Archives inside archives are not opened for secrets; neither are 7z, rar or bzip2.
+- Encrypted PDFs, and PDF streams behind image or crypt filters, are not decoded.
+- Audio and video codecs are not decoded: the container is checked, not the samples inside it. Free-format MP3 frames end the MP3 walk.
+- DICOM attributes inside implicit-VR sequences are skipped, not searched for identifiers; the platform does not de-identify files.
+- YARA and second antivirus engines run through `CONTENT_HOOK_URL`, not inside the platform.
 - Blocking does not delete the bytes: retention, legal holds and Object Lock still decide that, through the asset's normal deletion.

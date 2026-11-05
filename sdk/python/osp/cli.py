@@ -961,6 +961,26 @@ def cmd_delta_push(args):
     return 1 if r["rejected"] else 0
 
 
+def cmd_disarm(args):
+    from .disarm import disarm_file
+    os.makedirs(args.out, exist_ok=True)
+    failed = 0
+    for src in args.files:
+        dst = os.path.join(args.out, os.path.basename(src))
+        if os.path.abspath(dst) == os.path.abspath(src):
+            print(f"{src}: --out must be another folder; originals are never overwritten")
+            return 2
+        try:
+            r = disarm_file(src, dst)
+        except (OSError, ValueError) as e:
+            print(f"{src}: {e}")
+            failed += 1
+            continue
+        gone = ", ".join(r["removed"]) or "nothing"
+        print(f"{src} -> {dst}: {r['before']:,} -> {r['after']:,} bytes, removed {gone}")
+    return 1 if failed else 0
+
+
 def cmd_mount(args):
     from .mount import mount
     client = client_from_config()
@@ -1931,6 +1951,11 @@ def main(argv=None):
     p.add_argument("base", help="the snapshot to reuse: a version number, id, or latest")
     p.add_argument("folder")
     p.set_defaults(run=cmd_delta_push)
+
+    p = sub.add_parser("disarm", help="strip PNG and JPEG files down to their picture before upload")
+    p.add_argument("files", nargs="+")
+    p.add_argument("--out", required=True, help="folder for the cleaned copies")
+    p.set_defaults(run=cmd_disarm)
 
     p = sub.add_parser("mount", help="mount a version read-only as a folder (FUSE)")
     p.add_argument("dataset")

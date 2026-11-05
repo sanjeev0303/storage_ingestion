@@ -35,6 +35,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/service/events"
 	processingservice "github.com/sanjeev0303/object-storage-platform/internal/service/processing"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/promotion"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/quota"
 	uploadservice "github.com/sanjeev0303/object-storage-platform/internal/service/upload"
 	processingworker "github.com/sanjeev0303/object-storage-platform/internal/worker/processing"
 )
@@ -343,7 +344,12 @@ func run() error {
 	}
 	// Adoption jobs: objects checked and published where they are, and
 	// URL and STAC imports sent through ordinary uploads.
+	quotaDefaults, err := config.QuotaDefaults()
+	if err != nil {
+		return fmt.Errorf("quota configuration: %w", err)
+	}
 	adoptions := adoption.NewService(adoption.Dependencies{
+		Quota: quota.NewService(postgres.NewQuotaRepository(db), quotaDefaults, nil, log),
 		Store: postgres.NewAdoptionRepository(db), Router: router, Platform: storage, PlatformBucket: bucket,
 		Validators: validators, Scanner: deps.Scanner, Policies: deps.Policies, Checks: deps.Checks,
 		Uploads: uploadservice.NewService(uploads, storage, bucket, cfg.UploadMaxSize, cfg.UploadSessionTTL).Route(router, router),

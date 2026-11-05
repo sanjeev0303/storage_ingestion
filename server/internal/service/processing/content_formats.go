@@ -74,6 +74,10 @@ func (v ContentInspector) inspectGzip(r io.Reader, sample interfaces.ContentSamp
 		err = v.inspectTar(br, 0, in)
 	case path.Ext(inner) == ".fastq" || path.Ext(inner) == ".fq":
 		err = inspectFASTQ(br, "fastq", in)
+	case path.Ext(inner) == ".vcf":
+		err = inspectVCF(br, "vcf", in)
+	case textName(inner) && !hasBinaryBytes(head):
+		err = v.scanArchived(br, path.Base(inner), in)
 	}
 	if err == nil {
 		// Read what the inner check left, so every member's CRC is checked.
@@ -143,6 +147,10 @@ func (v ContentInspector) inspectTar(r io.Reader, _ int64, in *inspection) error
 			in.find("tar", "format.unsafe_archive_entry", "link "+h.Name+" points outside the archive")
 		case h.Typeflag == tar.TypeChar || h.Typeflag == tar.TypeBlock || h.Typeflag == tar.TypeFifo:
 			in.find("tar", "format.unsafe_archive_entry", "entry "+h.Name+" is a device file")
+		case h.Typeflag == tar.TypeReg && textName(h.Name):
+			if err := v.scanArchived(tr, h.Name, in); err != nil {
+				return err
+			}
 		}
 	}
 }
@@ -413,4 +421,39 @@ func isSourceError(err error) bool {
 // not a broken format and goes up to the caller instead of a finding.
 func passthrough(err error) bool {
 	return err != nil && (isSourceError(err) || errors.Is(err, errBomb) || errors.Is(err, errExpandedLimit))
+}
+
+var sqliteMagic = []byte("SQLite format 3\x00")
+
+// inspectSQLite checks a SQLite database's header against its size: a
+// whole number of pages, and as many as the header counts. A ROS 2 bag
+// (.db3) copied off a robot before the recorder closed it is cut short.
+func inspectSQLite(r io.Reader, size int64, in *inspection) error {
+	var h [100]byte
+	if _, err := io.ReadFull(r, h[:]); err != nil || !bytes.HasPrefix(h[:], sqliteMagic) {
+		if passthrough(err) {
+			return err
+		}
+		in.find("sqlite", "format.invalid_sqlite", "the SQLite header is missing or cut short")
+		return nil
+	}
+	pageSize := int64(binary.BigEndian.Uint16(h[16:18]))
+	if pageSize == 1 {
+		pageSize = 65536
+	}
+	if pageSize < 512 || pageSize&(pageSize-1) != 0 {
+		in.find("sqlite", "format.invalid_sqlite", fmt.Sprintf("the page size %d is not valid", pageSize))
+		return nil
+	}
+	if size%pageSize != 0 {
+		in.find("sqlite", "format.truncated_sqlite", fmt.Sprintf("%d bytes is not a whole number of %d-byte pages: the database was cut short", size, pageSize))
+		return nil
+	}
+	// The header's page count is trusted only when it was written by the
+	// same change as the rest of the header.
+	pages := int64(binary.BigEndian.Uint32(h[28:32]))
+	if pages > 0 && binary.BigEndian.Uint32(h[24:28]) == binary.BigEndian.Uint32(h[92:96]) && pages*pageSize > size {
+		in.find("sqlite", "format.truncated_sqlite", fmt.Sprintf("the header counts %d pages but the file holds %d: the database was cut short", pages, size/pageSize))
+	}
+	return nil
 }

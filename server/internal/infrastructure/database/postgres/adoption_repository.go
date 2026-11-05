@@ -81,21 +81,87 @@ func (r *AdoptionRepository) ClaimJob(ctx context.Context, owner string, now tim
 	return j, err == nil, err
 }
 
-// SetState moves a job on while owner holds it; terminal states release it.
+// SetState moves a job on while owner holds it; terminal states release it
+// and give back the quota it still has reserved.
 func (r *AdoptionRepository) SetState(ctx context.Context, id, owner, state, message string, now time.Time) error {
-	tag, err := r.db.Pool.Exec(ctx, `
-		UPDATE adoption_jobs SET state = $3, error = $4, updated_at = $5,
-			finished_at = CASE WHEN $3 IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN $5::timestamptz END,
-			lease_owner = CASE WHEN $3 IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN NULL ELSE lease_owner END,
-			lease_expires_at = CASE WHEN $3 IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN NULL ELSE lease_expires_at END
-		WHERE id = $1 AND lease_owner = $2 AND state NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')`, id, owner, state, message, now)
-	if err != nil {
-		return fmt.Errorf("move adoption job: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return model.ErrLeaseLost
-	}
-	return nil
+	return withTx(ctx, r.db, func(tx pgx.Tx) error {
+		var tenantID string
+		var bytes, assets int64
+		err := tx.QueryRow(ctx, `
+			WITH old AS (SELECT id, reserved_bytes, reserved_assets FROM adoption_jobs
+				WHERE id = $1 AND lease_owner = $2 AND state NOT IN ('COMPLETED', 'FAILED', 'CANCELLED') FOR UPDATE)
+			UPDATE adoption_jobs AS j SET state = $3, error = $4, updated_at = $5,
+				finished_at = CASE WHEN $3 IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN $5::timestamptz END,
+				lease_owner = CASE WHEN $3 IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN NULL ELSE j.lease_owner END,
+				lease_expires_at = CASE WHEN $3 IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN NULL ELSE j.lease_expires_at END,
+				reserved_bytes = CASE WHEN $3 IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN 0 ELSE j.reserved_bytes END,
+				reserved_assets = CASE WHEN $3 IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN 0 ELSE j.reserved_assets END
+			FROM old WHERE j.id = old.id
+			RETURNING j.tenant_id,
+				CASE WHEN $3 IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN old.reserved_bytes ELSE 0 END,
+				CASE WHEN $3 IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN old.reserved_assets ELSE 0 END`,
+			id, owner, state, message, now).Scan(&tenantID, &bytes, &assets)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.ErrLeaseLost
+		}
+		if err != nil {
+			return fmt.Errorf("move adoption job: %w", err)
+		}
+		return addUsage(ctx, tx, tenantID, usageDelta{reserved: -bytes, uploads: -assets}, now)
+	})
+}
+
+// ReserveQuota reserves the organization's quota for the job's pending
+// entries before any is adopted, once: entries larger than the per-object
+// limit are rejected, and a *model.QuotaError says the rest do not fit.
+// Entries whose size the source did not give reserve nothing here; their
+// bytes are checked when they are adopted (AdoptObject).
+func (r *AdoptionRepository) ReserveQuota(ctx context.Context, id, owner string, limits model.TenantQuota, now time.Time) error {
+	return withTx(ctx, r.db, func(tx pgx.Tx) error {
+		var tenantID string
+		var reserved int64
+		err := tx.QueryRow(ctx, `SELECT tenant_id, reserved_assets FROM adoption_jobs
+			WHERE id = $1 AND lease_owner = $2 AND state IN ('QUEUED', 'READING', 'RUNNING') FOR UPDATE`, id, owner).Scan(&tenantID, &reserved)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.ErrLeaseLost
+		}
+		if err != nil {
+			return fmt.Errorf("read adoption job: %w", err)
+		}
+		if reserved > 0 {
+			return nil // reserved before a restart
+		}
+		if limits.MaxObjectBytes > 0 {
+			if _, err := tx.Exec(ctx, `UPDATE adoption_entries SET state = 'REJECTED', code = 'quota_exceeded', detail = $3, updated_at = $4
+				WHERE job_id = $1 AND state = 'PENDING' AND size_bytes > $2`, id, limits.MaxObjectBytes,
+				fmt.Sprintf("larger than the organization's limit of %d bytes per object", limits.MaxObjectBytes), now); err != nil {
+				return fmt.Errorf("reject oversized entries: %w", err)
+			}
+		}
+		var count, bytes int64
+		if err := tx.QueryRow(ctx, `SELECT count(*), COALESCE(sum(size_bytes), 0) FROM adoption_entries
+			WHERE job_id = $1 AND state = 'PENDING'`, id).Scan(&count, &bytes); err != nil {
+			return fmt.Errorf("size adoption job: %w", err)
+		}
+		if count == 0 {
+			return nil
+		}
+		usage, err := lockStorageUsage(ctx, tx, tenantID, now)
+		if err != nil {
+			return err
+		}
+		used := usage.ReservedBytes + usage.StoredBytes + usage.PendingDeletionBytes
+		switch {
+		case limits.MaxStorageBytes > 0 && used+bytes > limits.MaxStorageBytes:
+			return &model.QuotaError{Limit: "storage_bytes", Max: limits.MaxStorageBytes, Used: used, Requested: bytes}
+		case limits.MaxAssets > 0 && usage.AssetCount+usage.ReservedUploads+count > limits.MaxAssets:
+			return &model.QuotaError{Limit: "assets", Max: limits.MaxAssets, Used: usage.AssetCount + usage.ReservedUploads, Requested: count}
+		}
+		if _, err := tx.Exec(ctx, `UPDATE adoption_jobs SET reserved_bytes = $2, reserved_assets = $3 WHERE id = $1`, id, bytes, count); err != nil {
+			return fmt.Errorf("reserve adoption quota: %w", err)
+		}
+		return addUsage(ctx, tx, tenantID, usageDelta{reserved: bytes, uploads: count}, now)
+	})
 }
 
 // Release gives a running job back for the next cycle.
@@ -105,18 +171,25 @@ func (r *AdoptionRepository) Release(ctx context.Context, id, owner string) erro
 	return err
 }
 
-// Cancel stops a job that has not finished.
+// Cancel stops a job that has not finished and gives back its reservation.
 func (r *AdoptionRepository) Cancel(ctx context.Context, tenantID, id string, now time.Time) error {
-	tag, err := r.db.Pool.Exec(ctx, `
-		UPDATE adoption_jobs SET state = 'CANCELLED', finished_at = $3, updated_at = $3, lease_owner = NULL, lease_expires_at = NULL
-		WHERE tenant_id = $1 AND id = $2 AND state IN ('QUEUED', 'READING', 'RUNNING')`, tenantID, id, now)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return model.ErrAdoptionNotFound
-	}
-	return nil
+	return withTx(ctx, r.db, func(tx pgx.Tx) error {
+		var bytes, assets int64
+		err := tx.QueryRow(ctx, `
+			WITH old AS (SELECT id, reserved_bytes, reserved_assets FROM adoption_jobs
+				WHERE tenant_id = $1 AND id = $2 AND state IN ('QUEUED', 'READING', 'RUNNING') FOR UPDATE)
+			UPDATE adoption_jobs AS j SET state = 'CANCELLED', finished_at = $3, updated_at = $3, lease_owner = NULL,
+				lease_expires_at = NULL, reserved_bytes = 0, reserved_assets = 0
+			FROM old WHERE j.id = old.id
+			RETURNING old.reserved_bytes, old.reserved_assets`, tenantID, id, now).Scan(&bytes, &assets)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.ErrAdoptionNotFound
+		}
+		if err != nil {
+			return err
+		}
+		return addUsage(ctx, tx, tenantID, usageDelta{reserved: -bytes, uploads: -assets}, now)
+	})
 }
 
 // AddEntries stores a batch of a job's entries. Reading a source again
@@ -228,6 +301,10 @@ func truncateText(s string, n int) string {
 
 // AdoptedObject is an object that passed every check, to publish where it is.
 type AdoptedObject struct {
+	// JobID's reservation covers the object; bytes past it must fit under
+	// MaxStorageBytes (0: no limit).
+	JobID                                    string
+	MaxStorageBytes                          int64
 	TenantID, OwnerID, ConnectionID, Dataset string
 	Path, ObjectKey, FileName, ContentType   string
 	SizeBytes                                int64
@@ -297,7 +374,11 @@ func (r *AdoptionRepository) AdoptObject(ctx context.Context, o AdoptedObject) (
 		if err != nil {
 			return err
 		}
-		if err := addUsage(ctx, tx, o.TenantID, usageDelta{stored: o.SizeBytes, assets: 1}, o.At); err != nil {
+		usage, err := adoptedUsage(ctx, tx, o)
+		if err != nil {
+			return err
+		}
+		if err := addUsage(ctx, tx, o.TenantID, usage, o.At); err != nil {
 			return err
 		}
 		return appendAudits(ctx, tx, events)
@@ -306,6 +387,38 @@ func (r *AdoptionRepository) AdoptObject(ctx context.Context, o AdoptedObject) (
 		return "", err
 	}
 	return assetID, nil
+}
+
+// adoptedUsage turns the job's reservation for an adopted object into stored
+// usage. Bytes the reservation does not cover (the source gave no size, or
+// a smaller one) must still fit under the storage limit.
+func adoptedUsage(ctx context.Context, tx pgx.Tx, o AdoptedObject) (usageDelta, error) {
+	d := usageDelta{stored: o.SizeBytes, assets: 1}
+	if o.JobID == "" {
+		return d, nil
+	}
+	var bytes, assets int64
+	err := tx.QueryRow(ctx, `
+		WITH old AS (SELECT id, reserved_bytes, reserved_assets FROM adoption_jobs WHERE id = $1 FOR UPDATE)
+		UPDATE adoption_jobs AS j SET reserved_bytes = j.reserved_bytes - LEAST(old.reserved_bytes, $2),
+			reserved_assets = j.reserved_assets - LEAST(old.reserved_assets, 1)
+		FROM old WHERE j.id = old.id
+		RETURNING LEAST(old.reserved_bytes, $2), LEAST(old.reserved_assets, 1)`, o.JobID, o.SizeBytes).Scan(&bytes, &assets)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return d, fmt.Errorf("use adoption reservation: %w", err)
+	}
+	d.reserved, d.uploads = -bytes, -assets
+	if extra := o.SizeBytes - bytes; extra > 0 && o.MaxStorageBytes > 0 {
+		usage, err := lockStorageUsage(ctx, tx, o.TenantID, o.At)
+		if err != nil {
+			return d, err
+		}
+		used := usage.ReservedBytes + usage.StoredBytes + usage.PendingDeletionBytes
+		if used+extra > o.MaxStorageBytes {
+			return d, &model.QuotaError{Limit: "storage_bytes", Max: o.MaxStorageBytes, Used: used, Requested: extra}
+		}
+	}
+	return d, nil
 }
 
 // AdoptedKey reports whether a live asset already adopts the object.
