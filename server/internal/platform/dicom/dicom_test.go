@@ -1,6 +1,8 @@
 package dicom
 
 import (
+	"bytes"
+	"compress/flate"
 	"encoding/binary"
 	"errors"
 	"testing"
@@ -85,5 +87,23 @@ func TestNotDICOM(t *testing.T) {
 	}
 	if _, err := Parse(file("1.2.840.10008.1.2.1", el(0x00080060, "CS", "CT"))); !errors.Is(err, ErrNotDICOM) {
 		t.Fatalf("no UIDs: %v", err)
+	}
+}
+
+func TestParseDeflated(t *testing.T) {
+	var dataSet bytes.Buffer
+	zw, _ := flate.NewWriter(&dataSet, flate.BestCompression)
+	for _, e := range [][]byte{el(0x00080018, "UI", "7.7"), el(0x00080060, "CS", "MR"), el(0x0020000D, "UI", "7"), el(0x0020000E, "UI", "7.1")} {
+		_, _ = zw.Write(e)
+	}
+	_ = zw.Close()
+	data := file("1.2.840.10008.1.2.1.99", dataSet.Bytes())
+	h, err := Parse(data)
+	if err != nil || h.SOPInstance != "7.7" || h.Modality != "MR" {
+		t.Fatalf("%+v %v", h, err)
+	}
+	// Only the start of a large file is read: a stream cut short still gives the header.
+	if h, err = Parse(data[:len(data)-2]); err != nil || h.Series != "7.1" {
+		t.Fatalf("cut short: %+v %v", h, err)
 	}
 }

@@ -45,6 +45,32 @@ These confinements apply to every API token: an upload outside a token's dataset
 
 **Deleting.** With `delete_after_confirm`, a local copy goes only when `GET /api/v1/edge/confirm` answers `AVAILABLE`: the platform computed this SHA-256 from the stored bytes and its checks passed. A rejected file (malware, wrong hash) stays on the device and is counted as failed.
 
+## MQTT
+
+Devices that publish to a broker rather than write files: add `mqtt` to the agent's configuration (with it, `watches` may be empty).
+
+```json
+"mqtt": {
+  "broker": "tls://broker.factory.local:8883",
+  "client_id": "line-3-agent",
+  "username": "agent", "password_file": "/etc/osp/mqtt-password",
+  "ca_file": "/etc/osp/broker-ca.pem",
+  "topics": ["factory/+/telemetry", "factory/+/alarms"],
+  "qos": 1,
+  "dir": "/var/lib/osp-agent/mqtt",
+  "name": "line3",
+  "roll_seconds": 60,
+  "roll_bytes": 67108864,
+  "delete_after_confirm": true
+}
+```
+
+The agent subscribes with a persistent session (clean session off, under `client_id`), so the broker holds QoS 1 and 2 messages while the device or its link is down. Each message is one JSON line: `topic`, `received_at`, `qos`, `retain`, and `payload` when the payload is JSON, otherwise `payload_base64`. Lines go to `dir/<name>_<unix ns>.jsonl.part`; after `roll_seconds` or `roll_bytes` the file is synced and renamed to `.jsonl`, and a recording watch the agent adds for `dir` sends it as a chunk of the recording `<name>`, covering the roll period, like any other recording chunk.
+
+**Delivery.** A QoS 1 message is acknowledged (PUBACK), and a QoS 2 message received (PUBREC), only once its line is synced to disk, within 200 ms: a power cut loses nothing the broker was told is kept. A QoS 2 message resent before its release is kept once. QoS 1 is at least once: a message whose acknowledgement was lost in a reconnect arrives again, as a second line. QoS 0 is as the broker sends it. A `.part` file left by a stop is cut back to its last whole line and finished at the next start.
+
+`tcp://`, `mqtt://` (1883) and `tls://`, `ssl://`, `mqtts://` (8883, TLS 1.2 or later, the system's CAs or `ca_file`) are accepted. The client speaks MQTT 3.1.1 with the standard library; messages over 64 MiB end the session. The agent reconnects with backoff from 1 second to a minute.
+
 ## Runs and recordings
 
 A device's own credential calls these; the agent does so for you:

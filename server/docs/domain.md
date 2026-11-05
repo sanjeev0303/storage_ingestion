@@ -15,11 +15,11 @@ A value such as a Sentinel-2 processing baseline of `04.00` stays a string, so n
 
 ## Recordings
 
-When a version is profiled (docs/quality.md), each `.mcap` file and each rosbag2 `metadata.yaml` is indexed: start and end time, message count, and each topic's schema, encoding and count. For MCAP only the footer and summary section are read, a few ranged reads however large the file. A file that cannot be read, or an MCAP without a summary section or statistics, is listed under the profile's `skipped` with the reason.
+When a version is profiled (docs/quality.md), each `.mcap` file, each rosbag2 `metadata.yaml` and each rosbag2 SQLite file (`.db3`) is indexed: start and end time, message count, and each topic's schema, encoding and count. For MCAP only the footer and summary section are read, a few ranged reads however large the file. A `.db3` is read whole, in 8 MiB ranged reads: its topics table, and each message's topic and timestamp, so a bag whose recorder crashed before writing `metadata.yaml` is still indexed. A bag with both is listed twice, once per file. A file that cannot be read, or an MCAP without a summary section or statistics, is listed under the profile's `skipped` with the reason.
 
 `GET .../versions/{versionID}/recordings[?topic=/imu&from_ns=&to_ns=]` lists them.
 
-Not read: messages themselves, so nothing here can search on what a message contains, and rosbag2 `.db3` files. Use segments and embeddings for that.
+Not read: message payloads, so nothing here can search on what a message contains. Use segments and embeddings for that.
 
 ## Segments
 

@@ -95,6 +95,9 @@ type Config struct {
 	Concurrency          int     `json:"concurrency,omitempty"`
 	ScanSeconds          int     `json:"scan_seconds,omitempty"`
 	HeartbeatSeconds     int     `json:"heartbeat_seconds,omitempty"`
+
+	// MQTT, when set, also keeps messages from a broker (see MQTT).
+	MQTT *MQTT `json:"mqtt,omitempty"`
 }
 
 // LoadConfig reads a configuration file.
@@ -126,8 +129,13 @@ func (c Config) Validate() error {
 		return errors.New("api and token (or token_file) are required")
 	case c.StateDir == "":
 		return errors.New("state_dir is required: it holds the journal")
-	case len(c.Watches) == 0:
-		return errors.New("at least one watch is required")
+	case len(c.Watches) == 0 && c.MQTT == nil:
+		return errors.New("at least one watch, or mqtt, is required")
+	}
+	if c.MQTT != nil {
+		if err := c.MQTT.validate(); err != nil {
+			return err
+		}
 	}
 	for _, w := range c.Windows {
 		if _, err := parseClock(w.From); err != nil {
@@ -229,6 +237,16 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 2
 	}
+	if cfg.MQTT != nil {
+		m := *cfg.MQTT
+		m.withDefaults()
+		cfg.MQTT = &m
+		if err := os.MkdirAll(m.Dir, 0o755); err != nil {
+			return nil, err
+		}
+		// The finished files go out as chunks of one recording.
+		cfg.Watches = append(cfg.Watches, m.watch())
+	}
 	return &Agent{cfg: cfg, client: osp.New(cfg.API, cfg.Token), journal: j, limiter: osp.NewLimiter(cfg.BandwidthBytesPerSecond),
 		log: log, now: time.Now, seen: map[string]seenFile{}}, nil
 }
@@ -246,6 +264,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	beat := time.Duration(max(a.cfg.HeartbeatSeconds, 5)) * time.Second
 	if a.cfg.HeartbeatSeconds == 0 {
 		beat = time.Minute
+	}
+	if a.cfg.MQTT != nil {
+		go a.runMQTT(ctx)
 	}
 	go func() {
 		ticker := time.NewTicker(beat)

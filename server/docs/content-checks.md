@@ -20,6 +20,17 @@ The content inspector (`ContentInspector`, validator `content`) opens each objec
 | BGZF / BAM | EOF block present; BAM header, references and every record's length and reference ids | `format.truncated_bgzf`, `format.invalid_bam` |
 | FASTQ (plain or gzipped) | Every record: `@` header, sequence, `+`, quality as long as the sequence, printable | `format.invalid_fastq` |
 | MCAP | Magic, every record's length, footer and closing magic | `format.invalid_mcap` |
+| VCF (plain or gzipped) | `##fileformat=VCFv` first, the `#CHROM` column header (with `FORMAT` before samples), and in every record the header's column count, a whole position, reference bases `ACGTN` and an alternate allele | `format.invalid_vcf` |
+| CRAM 2.1 and 3.x | Every container to the end-of-file container; CRAM 3 container headers' CRC-32 | `format.invalid_cram`, `format.truncated_cram` |
+| WAV, RF64/BW64, AVI, WebP (RIFF) | Every chunk inside the declared size (placeholder sizes from streaming writers allowed; RF64's real sizes from `ds64`); a WAV's `fmt ` before its `data` | `format.truncated_media`, `format.corrupt_media` |
+| FLAC | `fLaC`, STREAMINFO first, every metadata block to the last, then a frame sync | `format.truncated_media`, `format.corrupt_media` |
+| MP3 (by an ID3 tag or the name) | Every MPEG audio frame to the end, its length from its header; ID3v1, APE and Lyrics3 tags after the audio end the walk | `format.truncated_media`, `format.corrupt_media` |
+| MP4, MOV, M4A, 3GP, HEIF/AVIF | Every top-level box inside the file (64-bit sizes included); a movie needs `moov`, a fragment `moof`, an image `meta`. An index after the media data is noted: the file plays only once it has fully arrived | `format.truncated_media`, `format.corrupt_media` |
+| Matroska, WebM | The EBML header, then every Segment element; tracks and at least one cluster. Clusters of unknown size, as live recorders write them, are walked block by block | `format.truncated_media`, `format.corrupt_media` |
+| Ogg (Vorbis, Opus) | Every page's checksum, and an end-of-stream page for each stream | `format.truncated_media`, `format.corrupt_media` |
+| TIFF and BigTIFF, GeoTIFF, COG | Every image directory, and every strip or tile inside the file. When georeferenced: a well-formed GeoKey directory, a raster-to-model tie (pixel scale and tiepoint, or transformation), and the Cloud Optimized GeoTIFF layout: tiled, every directory before the image data, overviews from largest to smallest when the image is over 512 pixels | `format.corrupt_tiff`, `geo.missing_geokeys`, `geo.invalid_geokeys`, `geo.missing_georeference`, `geo.not_cloud_optimized` |
+| DICOM Part 10 | Every element to the end in its transfer syntax (implicit, explicit, big endian, deflated), through nested sequences and encapsulated pixel data. Patient name, IDs, birth date, address, telephone, referring physician or institution present without Patient Identity Removed = YES; Burned In Annotation = YES | `format.invalid_dicom`, `phi.dicom_identifiers`, `phi.burned_in_annotation` |
+| SQLite (ROS 2 `.db3` bags and others) | The header's page size, a whole number of pages, and as many as the header counts | `format.invalid_sqlite`, `format.truncated_sqlite` |
 | tar (plain or gzipped) | Entry count, paths and links that leave the extraction folder, device files | `format.unsafe_archive_entry`, `format.archive_too_many_entries`, `format.corrupt_tar` |
 | Text (detected text, JSON, CSV, and configuration and notebook files) | Credentials: AWS keys, private keys, GitHub, Slack, Stripe, Google, Azure and AI provider keys, signed JWTs. A finding names the kind, the byte offset and the count, never the value. | `secret.*` |
 | Text inside a zip, a tar or a gzip stream (by the inner file's name: `.env`, `.json`, `.yaml`, `.tfvars`, `.py`...) | The same credentials; the finding names the file inside (`in app/config/.env`). Every archived text file shares one budget of `SECRET_SCAN_MAX_BYTES`, noted when spent | `secret.*` |
@@ -47,6 +58,8 @@ Defaults, by family and where a code differs:
 | `secret` | flag | |
 | `format` | reject | |
 | `image` | flag | `png_profile_text` rejects |
+| `phi` | flag | Clinical data is expected to carry identifiers; set `phi` to `reject` where only de-identified images may come in |
+| `geo` | flag | A GeoTIFF that is not fully georeferenced or not cloud optimized still opens |
 | `external` | the engine's action, else flag | |
 | `malware` | reject, always | cannot be changed |
 
@@ -100,5 +113,7 @@ The platform never changes stored bytes: their SHA-256 is what it vouches for. `
 
 - Archives inside archives are not opened for secrets; neither are 7z, rar or bzip2.
 - Encrypted PDFs, and PDF streams behind image or crypt filters, are not decoded.
+- Audio and video codecs are not decoded: the container is checked, not the samples inside it. Free-format MP3 frames end the MP3 walk.
+- DICOM attributes inside implicit-VR sequences are skipped, not searched for identifiers; the platform does not de-identify files.
 - YARA and second antivirus engines run through `CONTENT_HOOK_URL`, not inside the platform.
 - Blocking does not delete the bytes: retention, legal holds and Object Lock still decide that, through the asset's normal deletion.

@@ -94,10 +94,16 @@ var defaultFindingActions = map[string]string{
 	"image.png_profile_text":    FindingReject, // ImageMagick embeds the named file (CVE-2022-44268)
 	"external":                  FindingFlag,
 	"malware":                   FindingReject,
+	// Patient identifiers in medical images are expected in clinical data and
+	// a problem in shared data; the tenant decides, so they are only flagged.
+	"phi": FindingFlag,
+	// A GeoTIFF that is valid but not georeferenced fully or not cloud
+	// optimized still opens; it is noted, not refused.
+	"geo": FindingFlag,
 }
 
 // FindingFamilies are the code families a tenant may set an action for.
-var FindingFamilies = []string{"active_content", "model", "secret", "format", "image", "external", "malware"}
+var FindingFamilies = []string{"active_content", "model", "secret", "format", "image", "phi", "geo", "external", "malware"}
 
 // FindingAction decides what a finding does: the tenant's override for
 // the code, then for its family, then the default. Malware always rejects.

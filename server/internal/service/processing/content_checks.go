@@ -67,10 +67,13 @@ func (v ContentInspector) Validate(ctx context.Context, sample interfaces.Conten
 
 	var err error
 	switch format {
-	case "zip", "pdf":
+	case "zip", "pdf", "tiff":
 		err = v.spooled(ctx, sample, func(f *os.File, size int64) error {
-			if format == "pdf" {
+			switch format {
+			case "pdf":
 				return inspectPDF(ctx, f, size, in)
+			case "tiff":
+				return inspectTIFF(f, size, path.Ext(strings.ToLower(sample.FileName)), in)
 			}
 			return v.inspectZip(ctx, f, size, in)
 		})
@@ -90,6 +93,8 @@ func contentFormat(sample interfaces.ContentSample) string {
 	name := strings.ToLower(sample.FileName)
 	ext := path.Ext(name)
 	switch {
+	case len(head) >= 132 && string(head[128:132]) == "DICM":
+		return "dicom"
 	case bytes.HasPrefix(head, []byte("%PDF-")):
 		return "pdf"
 	case bytes.HasPrefix(head, pngMagic):
@@ -106,6 +111,15 @@ func contentFormat(sample interfaces.ContentSample) string {
 		return "gzip"
 	case bytes.HasPrefix(head, npyMagic):
 		return "npy"
+	case bytes.HasPrefix(head, cramMagic):
+		return "cram"
+	case bytes.HasPrefix(head, sqliteMagic):
+		return "sqlite"
+	case bytes.HasPrefix(head, []byte("II*\x00")), bytes.HasPrefix(head, []byte("MM\x00*")),
+		bytes.HasPrefix(head, []byte("II+\x00")), bytes.HasPrefix(head, []byte("MM\x00+")):
+		return "tiff"
+	case mediaFormat(head, ext) != "":
+		return mediaFormat(head, ext)
 	case len(head) >= 2 && head[0] == 0x80 && head[1] >= 2 && head[1] <= 5:
 		return "pickle"
 	case ext == ".safetensors":
@@ -114,6 +128,8 @@ func contentFormat(sample interfaces.ContentSample) string {
 		return "tar"
 	case ext == ".fastq" || ext == ".fq":
 		return "fastq"
+	case ext == ".vcf":
+		return "vcf"
 	case ext == ".mcap":
 		return "mcap" // named MCAP without the magic: the format check says so
 	case pickleNames[ext]:
@@ -179,6 +195,26 @@ func (v ContentInspector) streamed(ctx context.Context, sample interfaces.Conten
 		return inspectSafetensors(r, sample.SizeBytes, in)
 	case "fastq":
 		return inspectFASTQ(r, "fastq", in)
+	case "vcf":
+		return inspectVCF(r, "vcf", in)
+	case "cram":
+		return inspectCRAM(r, sample.SizeBytes, in)
+	case "dicom":
+		return inspectDICOM(r, sample.SizeBytes, in)
+	case "sqlite":
+		return inspectSQLite(r, sample.SizeBytes, in)
+	case "riff":
+		return inspectRIFF(r, sample.SizeBytes, in)
+	case "flac":
+		return inspectFLAC(r, sample.SizeBytes, in)
+	case "mp3":
+		return inspectMP3(r, sample.SizeBytes, in)
+	case "bmff":
+		return inspectBMFF(r, sample.SizeBytes, in)
+	case "matroska":
+		return inspectMatroska(r, sample.SizeBytes, in)
+	case "ogg":
+		return inspectOgg(r, sample.SizeBytes, in)
 	case "text":
 		return scanSecrets(r, v.SecretScanBytes, in, "")
 	}

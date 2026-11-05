@@ -31,7 +31,14 @@ func dicomElement(tag uint32, vr, value string) []byte {
 	out := binary.LittleEndian.AppendUint16(nil, uint16(tag>>16))
 	out = binary.LittleEndian.AppendUint16(out, uint16(tag))
 	out = append(out, vr...)
-	out = binary.LittleEndian.AppendUint16(out, uint16(len(value)))
+	switch vr {
+	case "OB", "OW", "SQ", "UN", "UT":
+		// These VRs carry two reserved bytes and a 32-bit length.
+		out = append(out, 0, 0)
+		out = binary.LittleEndian.AppendUint32(out, uint32(len(value)))
+	default:
+		out = binary.LittleEndian.AppendUint16(out, uint16(len(value)))
+	}
 	return append(out, value...)
 }
 
