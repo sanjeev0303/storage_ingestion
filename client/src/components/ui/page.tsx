@@ -3,7 +3,7 @@
 import { CaretRight } from "@phosphor-icons/react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import type { ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { cn } from "@/lib/utils/cn";
 import { Button } from "./button";
 
@@ -59,19 +59,26 @@ export function TabNav({ tabs, label }: { tabs: { href: string; label: string }[
   const active = tabs
     .filter((tab) => pathname === tab.href || pathname.startsWith(`${tab.href}/`))
     .sort((a, b) => b.href.length - a.href.length)[0]?.href;
+  // On a narrow screen the row scrolls sideways; bring the current tab into view.
+  const currentRef = useRef<HTMLAnchorElement>(null);
+  useEffect(() => {
+    currentRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [active]);
   return (
-    <nav aria-label={label} className="mb-6">
-      <ul className="neo-in-sm inline-flex max-w-full flex-wrap gap-1 p-1">
+    // The current tab is a 2px ink underline over the row's hairline. A long row scrolls sideways instead of wrapping.
+    <nav aria-label={label} className="mb-6 border-b border-line">
+      <ul className="-mb-px flex gap-1 overflow-x-auto">
         {tabs.map((tab) => {
           const current = tab.href === active;
           return (
             <li key={tab.href}>
               <Link
+                ref={current ? currentRef : undefined}
                 href={tab.href}
                 aria-current={current ? "page" : undefined}
                 className={cn(
-                  "block rounded-sm px-3.5 py-1.5 text-base font-medium transition-colors",
-                  current ? "bg-ink text-ground" : "hover:bg-faint",
+                  "flex h-11 items-center border-b-2 px-3 text-base font-medium whitespace-nowrap transition-colors",
+                  current ? "border-ink text-ink" : "border-transparent text-muted hover:text-ink",
                 )}
               >
                 {tab.label}

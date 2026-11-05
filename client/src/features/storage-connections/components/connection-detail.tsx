@@ -332,7 +332,7 @@ function StatusBadges({ connection }: { connection: StorageConnection }) {
       <StateBadge tone={connection.status === "ACTIVE" ? "done" : connection.status === "PENDING" ? "attention" : "neutral"}>
         {connection.status === "ACTIVE" ? "Active" : connection.status === "PENDING" ? "Pending" : connection.status === "DISABLED" ? "Disabled" : connection.status}
       </StateBadge>
-      {connection.is_default && <StateBadge tone="active">Default</StateBadge>}
+      {connection.is_default && <StateBadge>Default</StateBadge>}
       {connection.provider === "PLATFORM_MANAGED" && <StateBadge>Platform-managed</StateBadge>}
     </div>
   );

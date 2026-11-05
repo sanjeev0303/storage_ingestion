@@ -19,6 +19,8 @@ const DEFAULTS: Record<string, { action: PolicyAction; except?: string }> = {
   secret: { action: "flag" },
   format: { action: "reject" },
   image: { action: "flag", except: 'a PNG "profile" text chunk rejects' },
+  phi: { action: "flag" },
+  geo: { action: "flag" },
   external: { action: "flag", except: "the engine's own verdict applies when it gives one" },
   malware: { action: "reject" },
 };

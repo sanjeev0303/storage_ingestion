@@ -137,7 +137,7 @@ export function Token({ x = 0, y = 0, size = 16, className }: { x?: number; y?: 
       y={y}
       width={size}
       height={size}
-      fill="var(--accent)"
+      fill="var(--token, var(--accent))"
       stroke="currentColor"
       strokeWidth="2"
       className={className}

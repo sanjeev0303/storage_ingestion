@@ -30,12 +30,22 @@ export const FAMILY_TEXT: Record<string, { title: string; detail: string }> = {
   format: {
     title: "Broken formats",
     detail:
-      "Damaged gzip, cut-short BGZF and BAM files, malformed FASTQ records, MCAP recordings without a footer, tar entries that escape their folder, and broken PNG and JPEG files.",
+      "Damaged gzip, cut-short BGZF, BAM and CRAM files, malformed FASTQ and VCF records, MCAP recordings without a footer, cut-short ROS 2 bag databases, tar entries that escape their folder, broken PNG, JPEG and TIFF files, audio and video files cut short (WAV, FLAC, MP3, MP4, MOV, MKV, WebM, Ogg), and DICOM files that end inside an element.",
   },
   image: {
     title: "Image metadata",
     detail:
       "PNG text chunks ImageMagick reads as a file to embed, chunks outside the PNG specification, JPEG files cut short, and bytes after an image's end that make it a second file.",
+  },
+  phi: {
+    title: "Patient information",
+    detail:
+      "DICOM files that still name the patient (name, IDs, birth date, address, telephone, referring physician or institution) without saying their identity was removed, and images whose pixels have patient information burned in.",
+  },
+  geo: {
+    title: "Georeferencing",
+    detail:
+      "GeoTIFFs tied to map coordinates without a coordinate system, with a malformed GeoKey directory or no raster tie, and GeoTIFFs not laid out as Cloud Optimized GeoTIFFs for ranged reads.",
   },
   external: {
     title: "External engine",

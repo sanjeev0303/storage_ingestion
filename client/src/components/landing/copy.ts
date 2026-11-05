@@ -12,15 +12,21 @@ export const STOPS = [
   { id: "connect", name: "Connect" },
   { id: "upload", name: "Upload" },
   { id: "verify", name: "Verify" },
+  { id: "inspect", name: "Inspect" },
   { id: "ingest", name: "Ingest" },
+  { id: "adopt", name: "Adopt" },
   { id: "catalog", name: "Catalog" },
   { id: "snapshot", name: "Snapshot" },
   { id: "validate", name: "Validate" },
   { id: "report", name: "Report" },
   { id: "readiness", name: "Readiness" },
+  { id: "stream", name: "Stream" },
   { id: "lineage", name: "Lineage" },
   { id: "retain", name: "Retain" },
+  { id: "lock", name: "Lock" },
+  { id: "copies", name: "Copies" },
   { id: "access", name: "Access" },
+  { id: "prove", name: "Prove" },
   { id: "begin", name: "Begin" },
 ] as const;
 
@@ -221,7 +227,7 @@ export const copy = {
 
   lineage: {
     title: "Where every version came from",
-    text: "Lineage records how datasets, versions, manifest imports, validation reports and transformations relate. Walk it upstream or downstream, a few levels at a time.",
+    text: "Lineage records how datasets, versions, manifest imports, validation reports, transformations, training runs and models relate. Walk it upstream or downstream, a few levels at a time.",
     directions: ["Upstream", "Downstream"],
     relationNotes: [
       { name: "Contains", text: "A dataset holds its versions." },
@@ -230,9 +236,10 @@ export const copy = {
       { name: "Validated by", text: "A version was checked, and a report was written." },
       { name: "Created from snapshot", text: "A new draft started from a pinned version." },
       { name: "Transformed by", text: "A transformation produced the data." },
+      { name: "Trained on", text: "A training run read a snapshot, and the model it made points back to that run." },
     ],
     caption: "Example graph. Lineage is walked a few levels at a time and may be truncated in large graphs.",
-    relations: ["Contains", "Derived from", "Imported from", "Validated by", "Created from snapshot", "Transformed by"],
+    relations: ["Contains", "Derived from", "Imported from", "Validated by", "Created from snapshot", "Transformed by", "Trained on"],
     diagramLabel:
       "A dataset contains versions. Version 2 is derived from Version 1 through a transformation. Each version is validated by a report, and the dataset was imported from a manifest.",
   },
@@ -272,6 +279,184 @@ export const copy = {
     ],
     diagramLabel:
       "Audit events are linked in a chain, each holding the hash of the one before. Verifying walks the chain and reports where it breaks, if it does.",
+  },
+
+  inspect: {
+    title: "Checks past the virus scan",
+    text: "Once its checksum matches, every upload is opened and read for what its type can hide: code in model files, keys in text and archives, scripts in documents, attacks in images. Your policy decides whether a finding flags the file or rejects it.",
+    pickLabel: "Pick an upload",
+    samples: [
+      {
+        id: "model",
+        file: "classifier.pt",
+        check: "Model files",
+        code: "model.unsafe_pickle",
+        finding: "Loading it would call os.system. The pickle is walked, never run.",
+        outcome: "rejected",
+      },
+      {
+        id: "archive",
+        file: "deploy.tar.gz",
+        check: "Secrets",
+        code: "secret.aws_access_key",
+        finding: "An AWS key in deploy/.env inside the archive. The value is never copied.",
+        outcome: "flagged",
+      },
+      {
+        id: "pdf",
+        file: "invoice.pdf",
+        check: "Documents",
+        code: "active_content.pdf_javascript",
+        finding: "JavaScript in a stream behind ASCII85 and Flate filters.",
+        outcome: "flagged",
+      },
+      {
+        id: "image",
+        file: "scan.png",
+        check: "Images",
+        code: "image.png_profile_text",
+        finding: "A text chunk named profile, which ImageMagick reads as a file to embed.",
+        outcome: "rejected",
+      },
+      {
+        id: "reads",
+        file: "reads.fastq.gz",
+        check: "Formats",
+        code: "No findings",
+        finding: "Every record read to the end: header, sequence, quality.",
+        outcome: "published",
+      },
+    ],
+    stages: { upload: "Upload", sum: "SHA-256", inspect: "Content checks", scan: "Malware scan" },
+    outcomes: { published: "Published", flagged: "Flagged, published", rejected: "Rejected" },
+    notes: [
+      { head: "Your engines too.", text: "A hook sends every upload to a PII, de-identification or YARA engine you run, and its verdict is recorded beside the platform's." },
+      { head: "Signatures move on.", text: "Published files are scanned again when the scanner's signatures change, and an infected one stops being served at once." },
+    ],
+    diagramLabel:
+      "An upload passes its SHA-256 check, then the content checks, then the malware scan. A rejecting finding stops it; a flagging finding lets it publish with the finding attached; a clean file is published.",
+  },
+
+  adopt: {
+    title: "Data already in your bucket",
+    text: "Point the platform at a list of what you already hold. Each object is read once where it sits, hashed against the digests the list gives, scanned, and published in place. Nothing is copied and the bucket is never listed.",
+    pickLabel: "Pick a source",
+    sources: [
+      {
+        id: "inventory",
+        name: "S3 Inventory",
+        reads: "manifest.json, then each CSV or Parquet data file",
+        brings: "MD5 from single-part ETags",
+        lands: "in place",
+      },
+      {
+        id: "mhl",
+        name: "ASC MHL",
+        reads: "every generation in ascmhl/, checked against its chain",
+        brings: "xxh64, MD5 and C4",
+        lands: "in place",
+      },
+      {
+        id: "bagit",
+        name: "BagIt",
+        reads: "bagit.txt, the payload manifests and bag-info",
+        brings: "SHA-256, SHA-512 or MD5",
+        lands: "in place",
+      },
+      {
+        id: "stac",
+        name: "STAC",
+        reads: "a catalog's items and their assets, over the network guard",
+        brings: "file:checksum multihashes",
+        lands: "through an upload",
+      },
+      {
+        id: "edge",
+        name: "Edge agent",
+        reads: "a watched folder beside the instrument, from a durable journal",
+        brings: "SHA-256 worked out on the device",
+        lands: "through an upload",
+      },
+    ],
+    stages: { source: "Source list", pin: "Pin the version", read: "One read", match: "Digests match?" },
+    outcomes: { inPlace: "Published in place", upload: "Uploaded, then checked", mismatch: "Refused: digest mismatch" },
+    readNote: "hash, scan, checks",
+    quota: "Quota is reserved for the whole job before the first object is adopted.",
+    diagramLabel:
+      "A source list names objects. Each version is pinned, read once to hash, scan and check it, and compared with the expected digests. A match is published in place or uploaded; a mismatch is refused.",
+  },
+
+  stream: {
+    title: "Train straight from a snapshot",
+    text: "A pinned snapshot streams as shards that never split a sample, in parallel, to the framework you train with. Each file is checked against the SHA-256 the snapshot pinned before your code sees it.",
+    pickLabel: "Pick a framework",
+    frameworks: [
+      { id: "torch", name: "PyTorch", code: "from osp.torch import SnapshotDataset\nds = SnapshotDataset(client, dataset_id, version_id)" },
+      { id: "tf", name: "TensorFlow", code: "from osp.tf import as_tf_dataset\nds = as_tf_dataset(stream, output_signature)" },
+      { id: "hf", name: "Hugging Face", code: "from osp.hf import as_hf_dataset\nds = as_hf_dataset(stream)" },
+      { id: "jax", name: "JAX", code: "from osp.jax import batches\nfor batch in batches(stream, batch_size=64): ..." },
+      { id: "ray", name: "Ray", code: "from osp.ray import read_snapshot\nds = read_snapshot(client, dataset_id, version_id)" },
+    ],
+    stages: { snapshot: "Snapshot", shards: "Shards", check: "SHA-256 check", workers: "Workers" },
+    shardNote: "about 128 MiB each, samples kept whole",
+    bench: "osp bench measures how many streams this machine reads fastest with.",
+    diagramLabel:
+      "A pinned snapshot is cut into shards that keep samples whole. Each shard streams to a worker, every file is checked against its pinned SHA-256, and the framework receives the samples.",
+  },
+
+  lock: {
+    title: "Holds outrank every delete",
+    text: "Retention decides how long. This decides the order a delete must clear: a legal hold, then a retention period, then the bucket's own Object Lock. Any one keeps the bytes and the delete is tried again later. Erasure for a withdrawn subject waits in the same line, and every purge ends in a signed certificate.",
+    toggleLabel: "Set what applies",
+    toggles: [
+      { id: "hold", name: "Legal hold", question: "Legal hold?" },
+      { id: "retention", name: "Retention period", question: "Retention?" },
+      { id: "lock", name: "Object Lock", question: "Object Lock?" },
+    ],
+    request: "Delete or erasure",
+    outcomes: { kept: "Kept, checked again later", purged: "Purged", certificate: "Signed certificate" },
+    notes: [
+      { head: "COMPLIANCE when it must be.", text: "A COMPLIANCE lock cannot be shortened by anyone, so it is opt-in per policy and comes with guardrails." },
+      { head: "Two people for the big ones.", text: "Bulk deletes and shortened retention can need a second approver, and a dry run shows what would go first." },
+    ],
+    diagramLabel:
+      "A delete or erasure request is checked for a legal hold, a retention period and an Object Lock. If any applies the bytes are kept and checked again later. If none applies they are purged and a signed certificate records it.",
+  },
+
+  copies: {
+    title: "A second copy that checks itself",
+    text: "Replicate a dataset to a bucket at another provider. Scrubs re-read stored bytes against their SHA-256, a damaged chunk is rewritten from a verified replica, and reads move to the replica when the primary stops answering.",
+    pickLabel: "Pick what happens",
+    scenarios: [
+      { id: "replicate", name: "Normal day", says: "Each new object is copied and verified. The console shows the recovery point: the age of the oldest object not yet copied." },
+      { id: "repair", name: "A scrub finds damage", says: "The scrub reads a chunk that no longer matches its SHA-256. Only that chunk is rewritten, from the replica, after the replica's copy is checked." },
+      { id: "failover", name: "The primary goes down", says: "The reader's request fails at the primary and is served from the replica, which holds the same verified bytes." },
+    ],
+    nodes: { writer: "New objects", primary: "Primary bucket", replica: "Replica, other provider", scrub: "Scrub", reader: "Reader" },
+    diagramLabel:
+      "New objects go to a primary bucket and are copied to a replica at another provider. A scrub re-reads the primary and repairs a damaged chunk from the replica. A reader is served from the primary, or from the replica when the primary fails.",
+  },
+
+  prove: {
+    title: "Evidence an auditor can check",
+    text: "The audit chain from the last stop does not stay in the database. On a schedule its head is signed and written outside it, so someone with database access still cannot rewrite history unnoticed, and the chain can leave for a SIEM or an inspector.",
+    tamperLabel: "Change event 3",
+    events: [
+      { action: "dataset.snapshot", who: "dev@lab" },
+      { action: "asset.download_url", who: "trainer-token" },
+      { action: "retention.hold_place", who: "counsel@lab" },
+      { action: "asset.download_url", who: "vendor-ws" },
+      { action: "audit.export", who: "auditor@lab" },
+    ],
+    anchor: "Signed anchor, outside the database",
+    intact: "Chain verified. The anchor's signature and head match.",
+    broken: "Chain broken at event 3. Every later hash and the anchor disagree with it.",
+    exports: [
+      { head: "For your SIEM.", text: "Export the chain as JSON Lines or CEF, page by page, oldest first." },
+      { head: "For an inspector.", text: "Custody reports, scheduled audit reviews and an EU AI Act training summary built from a model's lineage." },
+    ],
+    diagramLabel:
+      "Five audit events, each holding the hash of the one before, end in a signed anchor kept outside the database. Changing an event breaks every hash after it and the anchor no longer matches.",
   },
 
   begin: {

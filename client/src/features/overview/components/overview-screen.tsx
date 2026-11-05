@@ -6,24 +6,31 @@ import Link from "next/link";
 import { useState, type ReactNode } from "react";
 import { Button, ButtonLink } from "@/components/ui/button";
 import { PageHeader } from "@/components/ui/page";
-import { Panel } from "@/components/ui/panel";
-import { EmptyState, ErrorState, SkeletonRows } from "@/components/ui/states";
-import { StateBadge } from "@/components/ui/status";
+import { ErrorState, SkeletonRows } from "@/components/ui/states";
+import { StateBadge, StateMark } from "@/components/ui/status";
 import { Time } from "@/components/ui/time";
 import { isApiError } from "@/lib/api/errors";
 import { useSession } from "@/lib/auth/session";
+import { cn } from "@/lib/utils/cn";
 import { useQuotaQuery } from "@/features/organization/hooks";
 import { QuotaMeters } from "@/features/organization/components/quota-view";
 import { shortId } from "@/lib/utils/format";
 import { useOverviewData, overviewKey } from "../hooks";
-import { findAttentionJobs, describeConnectionTest } from "../attention";
+import { describeConnectionTest, lastTestFailed, rackJobs } from "../attention";
 import type { AuditEventSummary, ConnectionSummary, DatasetSummary, DeadLetterSummary } from "../types";
 
+type OverviewData = ReturnType<typeof useOverviewData>;
+
+// The overview is a strip board: every job, dataset, connection and dead letter is
+// a strip racked by its state, and what needs the user sits in the front bay.
 export function OverviewScreen() {
   const { can, organizationId, isPlatformAdmin } = useSession();
   const client = useQueryClient();
   const data = useOverviewData();
-  const quota = useQuotaQuery({ enabled: can("quota.read"), keySuffix: "overview" });
+  const quota = useQuotaQuery({
+    enabled: can("quota.read"),
+    keySuffix: "overview",
+  });
   const fetching = useIsFetching({ queryKey: overviewKey(organizationId) }) > 0;
 
   const all = [...Object.values(data), quota];
@@ -33,7 +40,7 @@ export function OverviewScreen() {
     <>
       <PageHeader
         title="Overview"
-        description="What needs a look right now, from the API as of the last refresh."
+        description={<StatusLine data={data} />}
         actions={
           <>
             <span className="text-sm text-muted" aria-live="polite">
@@ -42,57 +49,74 @@ export function OverviewScreen() {
                   Updated <Time value={new Date(updatedAt).toISOString()} />
                 </>
               ) : (
-                "Loading"
+                "Loading…"
               )}
             </span>
             <Button loading={fetching} onClick={() => client.refetchQueries({ queryKey: overviewKey(organizationId) })}>
               {!fetching && <ArrowClockwise aria-hidden />}
               Refresh
             </Button>
+            <QuickActions />
           </>
         }
       />
-      <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
-        <StatusLine data={data} />
-        <QuickActions />
-      </div>
-      <div className="grid gap-6 lg:grid-cols-3">
-        <div className="flex min-w-0 flex-col gap-6 lg:col-span-2">
-          <AttentionPanel data={data} />
-          <ActivityPanel query={data.audit} allowed={can("audit.read")} />
+
+      <div className="mt-8 grid gap-x-6 gap-y-10 lg:grid-cols-3">
+        <div className="flex min-w-0 flex-col gap-10 lg:col-span-2">
+          <NeedsYouBay data={data} />
+          <MovingRack data={data} />
         </div>
-        <div className="flex min-w-0 flex-col gap-6">
-          <QuotaPanel query={quota} allowed={can("quota.read")} />
-          <StoragePanel query={data.connections} allowed={can("storage.read")} />
-          {isPlatformAdmin && <DeadLettersPanel query={data.deadLetters} />}
+        <div className="flex min-w-0 flex-col gap-10">
+          <StorageRack query={data.connections} allowed={can("storage.read")} />
+          <QuotaRack query={quota} allowed={can("quota.read")} />
+          {isPlatformAdmin && <DeadLetterRack query={data.deadLetters} />}
         </div>
       </div>
+
+      <ActivityLog query={data.audit} allowed={can("audit.read")} />
     </>
   );
 }
 
-// The one sentence a person opens this page for. It stays quiet when all is well
-// and takes the accent only when something needs them.
-function StatusLine({ data }: { data: ReturnType<typeof useOverviewData> }) {
-  const { jobs, failedDatasets } = data;
-  const settled = [jobs, failedDatasets].filter((q) => q.fetchStatus !== "idle" || q.data);
-  // Reserve the line's height so the page does not jump when the answer arrives.
-  if (settled.length === 0 || settled.some((q) => q.isPending)) return <p className="min-h-9 text-base text-muted" aria-live="polite" />;
-  if (settled.some((q) => q.isError)) return <p className="min-h-9 text-base text-muted">Some checks did not load. Try them again below.</p>;
-
-  const count =
-    findAttentionJobs(jobs.data?.jobs ?? []).length + (failedDatasets.data?.datasets ?? []).length;
-  if (count === 0) {
-    return (
-      <p className="min-h-9 text-md font-semibold" aria-live="polite">
-        All clear. Nothing failed or stalled.
-      </p>
-    );
+function sum(...parts: (number | undefined)[]) {
+  let total: number | undefined;
+  for (const part of parts) {
+    if (part !== undefined) total = (total ?? 0) + part;
   }
+  return total;
+}
+
+// The line a person opens this page for: how many strips sit in each rack.
+// Only the needs-you count takes the orange, and only above zero.
+function StatusLine({ data }: { data: OverviewData }) {
+  const { jobs, failedDatasets, validatingDatasets } = data;
+  // Queries the role cannot run stay idle with no data; they say nothing here.
+  const settled = [jobs, failedDatasets].filter((q) => q.fetchStatus !== "idle" || q.data);
+  if (settled.length === 0) return null;
+  if (settled.some((q) => q.isPending)) return <span aria-live="polite">Reading the board…</span>;
+  if (settled.some((q) => q.isError)) return <span>Some racks did not load. Try them again below.</span>;
+
+  const racks = jobs.data ? rackJobs(jobs.data.jobs ?? []) : null;
+  const needs = sum(racks?.attention.length, failedDatasets.data?.datasets.length) ?? 0;
+  const moving = sum(racks?.moving.length, validatingDatasets.data?.datasets.length);
   return (
-    <p aria-live="polite" className="inline-flex min-h-9 items-center bg-accent px-3 text-md font-semibold text-on-accent">
-      {count} {count === 1 ? "item needs" : "items need"} attention
-    </p>
+    <span aria-live="polite" className="flex flex-wrap items-center gap-x-3 gap-y-1">
+      <span
+        className={cn(
+          "rounded-sm px-2 py-0.5 font-semibold tabular-nums",
+          needs > 0 ? "bg-accent text-on-accent" : "bg-faint text-ink",
+        )}
+      >
+        {needs > 0 ? `${needs} need you` : "Nothing needs you"}
+      </span>
+      {moving !== undefined && <span className="tabular-nums">{moving} in motion</span>}
+      {racks && (
+        <>
+          <span className="tabular-nums">{racks.ready.length} ready to run</span>
+          <span className="tabular-nums">{racks.completed.length} completed, of the latest 50 jobs</span>
+        </>
+      )}
+    </span>
   );
 }
 
@@ -100,42 +124,147 @@ function StatusLine({ data }: { data: ReturnType<typeof useOverviewData> }) {
 function QuickActions() {
   const { can } = useSession();
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      {can("uploads.write") && (
-        <ButtonLink href="/app/ingestion/uploads" variant="primary" className="h-11">
-          Upload files
-        </ButtonLink>
-      )}
+    <>
       {can("datasets.write") && (
-        <ButtonLink href="/app/datasets/new" className="h-11">
+        <ButtonLink href="/app/datasets/new" className="max-sm:hidden">
           New dataset
         </ButtonLink>
       )}
       {can("ingestion.write") && (
-        <ButtonLink href="/app/ingestion/jobs/new" className="h-11">
+        <ButtonLink href="/app/ingestion/jobs/new" className="max-sm:hidden">
           New ingestion job
         </ButtonLink>
+      )}
+      {can("uploads.write") && (
+        <ButtonLink href="/app/ingestion/uploads" variant="primary">
+          Upload files
+        </ButtonLink>
+      )}
+    </>
+  );
+}
+
+type Mark = "failed" | "warning" | "active" | "done" | "neutral";
+
+const cellTone: Record<Mark, string> = {
+  failed: "bg-accent text-on-accent",
+  // A stalled or partly published strip: an ink ring around an orange core, so failed stays the loudest.
+  warning: "bg-faint text-ink",
+  active: "bg-ink text-ground",
+  done: "bg-faint text-ink",
+  neutral: "bg-faint text-muted",
+};
+
+// One strip: a filled state cell, the strip's name and what is wrong, and its state and time on the right.
+function Strip({
+  mark,
+  href,
+  name,
+  mono = false,
+  detail,
+  state,
+  when,
+  size = "md",
+}: {
+  mark: Mark;
+  href?: string;
+  name: ReactNode;
+  mono?: boolean;
+  detail?: ReactNode;
+  state?: ReactNode;
+  when?: string;
+  size?: "md" | "lg";
+}) {
+  const nameClass = cn("font-semibold [overflow-wrap:anywhere]", mono && "mono-data", size === "lg" && "text-md");
+  return (
+    <li className="grid grid-cols-[2.5rem_1fr] overflow-hidden rounded-[var(--radius)] border border-line bg-ground">
+      <span className={cn("flex justify-center", size === "lg" ? "pt-5" : "pt-3.5", cellTone[mark])}>
+        <StateMark tone={mark} className="size-4" />
+      </span>
+      <div
+        className={cn(
+          "flex flex-wrap items-start justify-between gap-x-6 gap-y-1 px-4",
+          size === "lg" ? "py-4" : "py-2.5",
+        )}
+      >
+        <div className="min-w-0">
+          {href ? (
+            <Link
+              href={href}
+              translate={mono ? "no" : undefined}
+              className={cn(nameClass, "underline decoration-line underline-offset-4 hover:decoration-ink")}
+            >
+              {name}
+            </Link>
+          ) : (
+            <p className={nameClass} translate={mono ? "no" : undefined}>
+              {name}
+            </p>
+          )}
+          {detail && <p className="text-sm text-muted [overflow-wrap:anywhere]">{detail}</p>}
+        </div>
+        {(state || when) && (
+          <div className="flex flex-col text-sm sm:items-end">
+            {state && <span className="font-semibold">{state}</span>}
+            {when && (
+              <span className="text-muted tabular-nums">
+                <Time value={when} />
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+    </li>
+  );
+}
+
+// An empty slot in a rack: dashed, so it never reads as a strip.
+function EmptySlot({ children }: { children: ReactNode }) {
+  return (
+    <p className="rounded-[var(--radius)] border border-dashed border-edge px-4 py-3 text-base text-muted">
+      {children}
+    </p>
+  );
+}
+
+function RackHeader({
+  id,
+  title,
+  note,
+  link,
+  size = "md",
+}: {
+  id: string;
+  title: string;
+  note?: string;
+  link?: { href: string; label: string };
+  size?: "md" | "lg";
+}) {
+  return (
+    <div className="mb-3 flex flex-wrap items-end justify-between gap-x-4 gap-y-1">
+      <div className="min-w-0">
+        <h2 id={id} className={cn("font-semibold", size === "lg" ? "text-xl" : "text-lg")}>
+          {title}
+        </h2>
+        {note && <p className="text-sm text-muted">{note}</p>}
+      </div>
+      {link && (
+        <Link href={link.href} className="text-sm underline underline-offset-2">
+          {link.label}
+        </Link>
       )}
     </div>
   );
 }
 
-// Shows the first few rows and keeps the rest one press away.
-function ShortList<T>({
-  items,
-  limit = 4,
-  render,
-}: {
-  items: T[];
-  limit?: number;
-  render: (item: T) => ReactNode;
-}) {
+// Shows the first few strips and keeps the rest one press away.
+function ShortList<T>({ items, limit = 4, render }: { items: T[]; limit?: number; render: (item: T) => ReactNode }) {
   const [all, setAll] = useState(false);
   const shown = all ? items : items.slice(0, limit);
   const hidden = items.length - shown.length;
   return (
     <>
-      <ul className="flex flex-col divide-y divide-faint">{shown.map(render)}</ul>
+      <ul className="flex flex-col gap-2">{shown.map(render)}</ul>
       {(hidden > 0 || (all && items.length > limit)) && (
         <Button variant="ghost" className="mt-2 h-11" aria-expanded={all} onClick={() => setAll(!all)}>
           {all ? "Show fewer" : `Show ${hidden} more`}
@@ -147,9 +276,9 @@ function ShortList<T>({
 
 function NotAllowed({ permission, what }: { permission: string; what: string }) {
   return (
-    <p className="text-base text-muted">
+    <EmptySlot>
       Your role does not include <span className="mono-data">{permission}</span>, so {what} is not shown.
-    </p>
+    </EmptySlot>
   );
 }
 
@@ -168,52 +297,70 @@ function Body<T>({
   return <>{children(query.data)}</>;
 }
 
-function AttentionPanel({ data }: { data: ReturnType<typeof useOverviewData> }) {
+// "PARTIALLY_COMPLETED" reads as "Partially completed".
+function words(state: string) {
+  return state.charAt(0) + state.slice(1).toLowerCase().replaceAll("_", " ");
+}
+
+function SubRackHeader({ id, title, href, link }: { id: string; title: string; href: string; link: string }) {
+  return (
+    <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+      <h3 id={id} className="text-md font-semibold">
+        {title}
+      </h3>
+      <Link href={href} className="text-sm underline underline-offset-2">
+        {link}
+      </Link>
+    </div>
+  );
+}
+
+// The front bay: failed or stalled jobs and failed datasets, the biggest block on the board.
+function NeedsYouBay({ data }: { data: OverviewData }) {
   const { can } = useSession();
-  const { jobs, failedDatasets, validatingDatasets } = data;
+  const { jobs, failedDatasets } = data;
 
   return (
-    <Panel title="Needs attention" description="Failed or stalled work. Only the latest 50 jobs and the first 5 datasets of each kind are checked.">
-      <div className="flex flex-col gap-8">
-        <section aria-labelledby="attention-jobs" className="flex flex-col gap-3">
-          <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <h3 id="attention-jobs" className="text-md font-semibold">
-              Ingestion jobs <span className="text-sm font-normal text-muted">latest 50 jobs</span>
-            </h3>
-            <Link href="/app/ingestion/jobs" className="text-sm underline underline-offset-2">
-              All jobs
-            </Link>
-          </div>
+    <section aria-labelledby="bay-title">
+      <RackHeader
+        id="bay-title"
+        title="Needs you"
+        size="lg"
+        note="Failed, partly published, or stalled for over an hour."
+      />
+      <div className="flex flex-col gap-6">
+        <section aria-labelledby="bay-jobs">
+          <SubRackHeader id="bay-jobs" title="Ingestion jobs" href="/app/ingestion/jobs" link="All jobs" />
           {!can("ingestion.read") ? (
             <NotAllowed permission="ingestion.read" what="ingestion jobs" />
           ) : (
             <Body query={jobs}>
               {({ jobs: list }) => {
-                const attention = findAttentionJobs(list ?? []);
+                const attention = rackJobs(list ?? []).attention;
                 if (attention.length === 0) {
                   return (
-                    <EmptyState title="No failed or stalled jobs">
-                      None of the latest 50 jobs failed, finished partially or stopped moving. Older jobs are not checked
-                      here.
-                    </EmptyState>
+                    <EmptySlot>No failed or stalled jobs in the latest 50. Older jobs are not checked here.</EmptySlot>
                   );
                 }
                 return (
                   <ShortList
                     items={attention}
-                    render={({ job, reason }) => (
-                      <li key={job.id} className="flex flex-wrap items-center justify-between gap-3 py-2.5">
-                        <div className="min-w-0">
-                          <Link href={`/app/ingestion/jobs/${job.id}`} className="mono-data underline underline-offset-2">
-                            {shortId(job.id, 12)}
-                          </Link>
-                          <p className="text-sm text-muted">
-                            {reason}, <Time value={job.updated_at} />
-                          </p>
-                        </div>
-                        <StateBadge tone="attention">{job.state.replaceAll("_", " ")}</StateBadge>
-                      </li>
-                    )}
+                    render={({ job, reason }) => {
+                      const stalled = job.state !== "FAILED" && job.state !== "PARTIALLY_COMPLETED";
+                      return (
+                        <Strip
+                          key={job.id}
+                          size="lg"
+                          mark={job.state === "FAILED" ? "failed" : "warning"}
+                          href={`/app/ingestion/jobs/${job.id}`}
+                          name={shortId(job.id, 12)}
+                          mono
+                          detail={reason}
+                          state={stalled ? `Stalled while ${words(job.state).toLowerCase()}` : words(job.state)}
+                          when={job.updated_at}
+                        />
+                      );
+                    }}
                   />
                 );
               }}
@@ -221,226 +368,272 @@ function AttentionPanel({ data }: { data: ReturnType<typeof useOverviewData> }) 
           )}
         </section>
 
-        <section aria-labelledby="attention-datasets" className="flex flex-col gap-3">
-          <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <h3 id="attention-datasets" className="text-md font-semibold">
-              Datasets <span className="text-sm font-normal text-muted">failed or validating, first 5 of each</span>
-            </h3>
-            <Link href="/app/datasets" className="text-sm underline underline-offset-2">
-              All datasets
-            </Link>
-          </div>
+        <section aria-labelledby="bay-datasets">
+          <SubRackHeader id="bay-datasets" title="Datasets" href="/app/datasets" link="All datasets" />
           {!can("datasets.read") ? (
             <NotAllowed permission="datasets.read" what="datasets" />
           ) : (
-            <DatasetList failed={failedDatasets} validating={validatingDatasets} />
+            <Body query={failedDatasets} rows={2}>
+              {({ datasets }) =>
+                (datasets ?? []).length === 0 ? (
+                  <EmptySlot>No failed datasets. A dataset lands here when its validation fails.</EmptySlot>
+                ) : (
+                  <ShortList items={datasets} render={(d) => <DatasetStrip key={d.id} dataset={d} size="lg" />} />
+                )
+              }
+            </Body>
           )}
         </section>
       </div>
-    </Panel>
+    </section>
   );
 }
 
-function DatasetList({
-  failed,
-  validating,
-}: {
-  failed: UseQueryResult<{ datasets: DatasetSummary[] }>;
-  validating: UseQueryResult<{ datasets: DatasetSummary[] }>;
-}) {
-  if (failed.isPending || validating.isPending) return <SkeletonRows rows={2} />;
-  const error = failed.error ?? validating.error;
-  if (error) {
-    return (
-      <ErrorState
-        error={error}
-        onRetry={() => {
-          void failed.refetch();
-          void validating.refetch();
-        }}
-      />
-    );
-  }
-  const items = [...(failed.data?.datasets ?? []), ...(validating.data?.datasets ?? [])];
-  if (items.length === 0) {
-    return (
-      <EmptyState title="No failed or validating datasets">
-        Datasets move here when a validation fails or is still running.
-      </EmptyState>
-    );
-  }
+function DatasetStrip({ dataset, size }: { dataset: DatasetSummary; size?: "md" | "lg" }) {
+  const failed = dataset.lifecycle_status === "FAILED";
   return (
-    <ShortList
-      items={items}
-      render={(d) => (
-        <li key={d.id} className="flex flex-wrap items-center justify-between gap-3 py-2.5">
-          <div className="min-w-0">
-            <Link href={`/app/datasets/${d.id}`} className="font-medium underline underline-offset-2 [overflow-wrap:anywhere]">
-              {d.name}
-            </Link>
-            <p className="text-sm text-muted">
-              Updated <Time value={d.updated_at} />
-            </p>
-          </div>
-          <StateBadge tone={d.lifecycle_status === "FAILED" ? "attention" : "active"}>{d.lifecycle_status}</StateBadge>
-        </li>
-      )}
+    <Strip
+      size={size}
+      mark={failed ? "failed" : "active"}
+      href={`/app/datasets/${dataset.id}`}
+      name={dataset.name}
+      detail={failed ? "Validation failed" : "Validation running"}
+      state={words(dataset.lifecycle_status)}
+      when={dataset.updated_at}
     />
   );
 }
 
-function ActivityPanel({ query, allowed }: { query: UseQueryResult<{ events: AuditEventSummary[] }>; allowed: boolean }) {
+// What is moving or waiting for a start: running jobs, datasets still validating, then ready jobs.
+// A jobs error is already shown in the bay above, so here it is only a note.
+function MovingRack({ data }: { data: OverviewData }) {
+  const { can } = useSession();
+  const { jobs, validatingDatasets } = data;
+  const canJobs = can("ingestion.read");
+  const canDatasets = can("datasets.read");
+  if (!canJobs && !canDatasets) return null;
+
+  let body: ReactNode;
+  if ((canJobs && jobs.isPending) || (canDatasets && validatingDatasets.isPending)) {
+    body = <SkeletonRows rows={2} />;
+  } else if (canDatasets && validatingDatasets.isError) {
+    body = <ErrorState error={validatingDatasets.error} onRetry={() => validatingDatasets.refetch()} />;
+  } else {
+    const racks = rackJobs(jobs.data?.jobs ?? []);
+    const strips = [
+      ...racks.moving.map((job) => (
+        <Strip
+          key={job.id}
+          mark="active"
+          href={`/app/ingestion/jobs/${job.id}`}
+          name={shortId(job.id, 12)}
+          mono
+          detail={`${job.progress.published} of ${job.progress.total} published`}
+          state={words(job.state)}
+          when={job.updated_at}
+        />
+      )),
+      ...(validatingDatasets.data?.datasets ?? []).map((d) => <DatasetStrip key={d.id} dataset={d} />),
+      ...racks.ready.map((job) => (
+        <Strip
+          key={job.id}
+          mark="neutral"
+          href={`/app/ingestion/jobs/${job.id}`}
+          name={shortId(job.id, 12)}
+          mono
+          detail={`${job.progress.total} files, waiting to be started`}
+          state="Ready to run"
+          when={job.updated_at}
+        />
+      )),
+    ];
+    body = (
+      <>
+        {strips.length === 0 ? (
+          <EmptySlot>Nothing is running or waiting for a start.</EmptySlot>
+        ) : (
+          <ShortList items={strips} render={(s) => s} />
+        )}
+        {canJobs && jobs.isError && (
+          <p className="mt-2 text-sm text-muted">Jobs did not load, so only datasets are shown.</p>
+        )}
+      </>
+    );
+  }
+
   return (
-    <Panel
-      title="Recent activity"
-      description="The 8 newest audit events."
-      actions={
-        allowed && (
-          <Link href="/app/audit" className="text-sm underline underline-offset-2">
-            Open audit log
-          </Link>
-        )
-      }
-    >
+    <section aria-labelledby="moving-title">
+      <RackHeader
+        id="moving-title"
+        title="In motion and ready"
+        note="Running jobs and validations, then jobs waiting for a start."
+      />
+      {body}
+    </section>
+  );
+}
+
+function StorageRack({
+  query,
+  allowed,
+}: {
+  query: UseQueryResult<{
+    connections: ConnectionSummary[];
+    default_connection_id: string;
+  }>;
+  allowed: boolean;
+}) {
+  return (
+    <section aria-labelledby="storage-title">
+      <RackHeader
+        id="storage-title"
+        title="Storage"
+        link={allowed ? { href: "/app/storage", label: "Manage" } : undefined}
+      />
       {!allowed ? (
-        <NotAllowed permission="audit.read" what="the audit log" />
+        <NotAllowed permission="storage.read" what="storage connections" />
       ) : (
-        <Body query={query} rows={4}>
-          {({ events }) =>
-            (events ?? []).length === 0 ? (
-              <EmptyState title="No audit events yet">Sign-ins, member changes and uploads are recorded here.</EmptyState>
+        <Body query={query}>
+          {({ connections, default_connection_id }) =>
+            (connections ?? []).length === 0 ? (
+              <EmptySlot>No storage connections yet.</EmptySlot>
             ) : (
-              <ShortList
-                items={events}
-                limit={5}
-                render={(e) => (
-                  <li key={e.id} className="flex flex-wrap items-center justify-between gap-3 py-2.5">
-                    <div className="min-w-0">
-                      <p className="mono-data text-sm [overflow-wrap:anywhere]">{e.action}</p>
-                      <p className="text-sm text-muted">
-                        {e.actor_id.length > 16 ? shortId(e.actor_id, 8) : e.actor_id}, <Time value={e.created_at} />
-                      </p>
-                    </div>
-                    <StateBadge tone={e.outcome === "SUCCESS" ? "neutral" : "attention"}>{e.outcome}</StateBadge>
-                  </li>
-                )}
-              />
+              <ul className="flex flex-col gap-2">
+                {connections.map((c) => {
+                  const broken = lastTestFailed(c) || c.status !== "ACTIVE";
+                  const isDefault = c.is_default || c.id === default_connection_id;
+                  return (
+                    <Strip
+                      key={c.id}
+                      // The filled square means a test passed; never-tested connections stay hollow.
+                      mark={broken ? "failed" : c.last_test_ok_at ? "done" : "neutral"}
+                      name={c.name}
+                      detail={describeConnectionTest(c)}
+                      state={c.status !== "ACTIVE" ? words(c.status) : isDefault ? "Default" : undefined}
+                    />
+                  );
+                })}
+              </ul>
             )
           }
         </Body>
       )}
-    </Panel>
+    </section>
   );
 }
 
-function QuotaPanel({ query, allowed }: { query: ReturnType<typeof useQuotaQuery>; allowed: boolean }) {
+function QuotaRack({ query, allowed }: { query: ReturnType<typeof useQuotaQuery>; allowed: boolean }) {
   return (
-    <Panel
-      title="Quota"
-      actions={
-        allowed && (
-          <Link href="/app/settings/quota" className="text-sm underline underline-offset-2">
-            All limits
-          </Link>
-        )
-      }
-    >
+    <section aria-labelledby="quota-title">
+      <RackHeader
+        id="quota-title"
+        title="Quota"
+        link={allowed ? { href: "/app/settings/quota", label: "All limits" } : undefined}
+      />
       {!allowed ? (
         <NotAllowed permission="quota.read" what="quota" />
       ) : (
         <Body query={query} rows={5}>
           {(quota) => (
-            <div className="flex flex-col gap-4">
+            <div className="flex flex-col gap-4 rounded-[var(--radius)] border border-line p-4">
               <QuotaMeters quota={quota} />
               <p className="text-sm text-muted">
-                Stored objects and bytes come from the quota ledger. Active ingestion jobs: Not available from the API.
+                From the quota ledger. Active ingestion jobs are not reported by the API.
               </p>
             </div>
           )}
         </Body>
       )}
-    </Panel>
+    </section>
   );
 }
 
-function StoragePanel({
-  query,
-  allowed,
-}: {
-  query: UseQueryResult<{ connections: ConnectionSummary[]; default_connection_id: string }>;
-  allowed: boolean;
-}) {
-  return (
-    <Panel
-      title="Storage"
-      actions={
-        allowed && (
-          <Link href="/app/storage" className="text-sm underline underline-offset-2">
-            Manage
-          </Link>
-        )
-      }
-    >
-      {!allowed ? (
-        <NotAllowed permission="storage.read" what="storage connections" />
-      ) : (
-        <Body query={query}>
-          {({ connections, default_connection_id }) => (
-            <ul className="flex flex-col divide-y divide-faint">
-              {(connections ?? []).map((c) => (
-                <li key={c.id} className="flex flex-col gap-1 py-2.5">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="font-medium [overflow-wrap:anywhere]">{c.name}</span>
-                    <span className="flex gap-1.5">
-                      {(c.is_default || c.id === default_connection_id) && <StateBadge tone="done">Default</StateBadge>}
-                      <StateBadge tone={c.status === "ACTIVE" ? "neutral" : "attention"}>{c.status}</StateBadge>
-                    </span>
-                  </div>
-                  <p className="text-sm text-muted">{describeConnectionTest(c)}</p>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Body>
-      )}
-    </Panel>
-  );
-}
-
-function DeadLettersPanel({ query }: { query: UseQueryResult<{ dead_letters: DeadLetterSummary[] }> }) {
+function DeadLetterRack({ query }: { query: UseQueryResult<{ dead_letters: DeadLetterSummary[] }> }) {
   const missing = query.isError && isApiError(query.error) && query.error.isNotFound;
   return (
-    <Panel
-      title="Open dead letters"
-      description="Platform admins only. The first 5 open items."
-      actions={
-        <Link href="/app/operations/dead-letters" className="text-sm underline underline-offset-2">
-          Open queue
-        </Link>
-      }
-    >
+    <section aria-labelledby="dead-title">
+      <RackHeader
+        id="dead-title"
+        title="Open dead letters"
+        note="Platform admins only. The first 5 open items."
+        link={{ href: "/app/operations/dead-letters", label: "Open queue" }}
+      />
       {missing ? (
-        <p className="text-base text-muted">Dead-letter handling is not enabled on this server.</p>
+        <EmptySlot>Dead-letter handling is not enabled on this server.</EmptySlot>
       ) : (
         <Body query={query}>
           {({ dead_letters }) =>
             (dead_letters ?? []).length === 0 ? (
-              <EmptyState title="No open dead letters">Events that could not be processed land here.</EmptyState>
+              <EmptySlot>No open dead letters. Events that could not be processed land here.</EmptySlot>
             ) : (
-              <ul className="flex flex-col divide-y divide-faint">
+              <ul className="flex flex-col gap-2">
                 {dead_letters.map((d) => (
-                  <li key={d.id} className="py-2.5">
-                    <p className="mono-data text-sm [overflow-wrap:anywhere]">{d.event_type ?? "Unknown event"}</p>
-                    <p className="text-sm text-muted">
-                      {d.category ?? "No category"}, <Time value={d.created_at} />
-                    </p>
-                  </li>
+                  <Strip
+                    key={d.id}
+                    mark="failed"
+                    name={d.event_type ?? "Unknown event"}
+                    mono
+                    detail={d.category ?? "No category"}
+                    when={d.created_at}
+                  />
                 ))}
               </ul>
             )
           }
         </Body>
       )}
-    </Panel>
+    </section>
+  );
+}
+
+// The log runs one way: newest first, time on the left.
+function ActivityLog({ query, allowed }: { query: UseQueryResult<{ events: AuditEventSummary[] }>; allowed: boolean }) {
+  return (
+    <section aria-labelledby="log-title" className="mt-10">
+      <RackHeader
+        id="log-title"
+        title="Recent activity"
+        note="The 8 newest audit events."
+        link={allowed ? { href: "/app/audit", label: "Open audit log" } : undefined}
+      />
+      {!allowed ? (
+        <NotAllowed permission="audit.read" what="the audit log" />
+      ) : (
+        <Body query={query} rows={4}>
+          {({ events }) =>
+            (events ?? []).length === 0 ? (
+              <EmptySlot>No audit events yet. Sign-ins, member changes and uploads are recorded here.</EmptySlot>
+            ) : (
+              <ol className="divide-y divide-line border-y border-line">
+                {events.map((e) => (
+                  <li
+                    key={e.id}
+                    className="grid gap-x-6 gap-y-0.5 py-2.5 sm:grid-cols-[11rem_1fr_auto] sm:items-center"
+                  >
+                    <span className="text-sm text-muted tabular-nums">
+                      <Time value={e.created_at} />
+                    </span>
+                    <span className="min-w-0 [overflow-wrap:anywhere]">
+                      <span className="mono-data" translate="no">
+                        {e.action}
+                      </span>
+                      <span className="text-sm text-muted">
+                        {" "}
+                        by {e.actor_id.length > 16 ? shortId(e.actor_id, 8) : e.actor_id}
+                      </span>
+                    </span>
+                    <span>
+                      <StateBadge tone={e.outcome === "SUCCESS" ? "neutral" : "attention"}>
+                        {words(e.outcome)}
+                      </StateBadge>
+                    </span>
+                  </li>
+                ))}
+              </ol>
+            )
+          }
+        </Body>
+      )}
+    </section>
   );
 }

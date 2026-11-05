@@ -105,7 +105,7 @@ function ConnectionTable({ connections, defaultId }: { connections: StorageConne
               </StateBadge>
             </Td>
             <Td className="mono-data">{c.bucket ?? <span className="text-muted">Not applicable</span>}</Td>
-            <Td>{c.is_default || c.id === defaultId ? <StateBadge tone="active">Default</StateBadge> : <span className="text-muted">No</span>}</Td>
+            <Td>{c.is_default || c.id === defaultId ? <StateBadge>Default</StateBadge> : <span className="text-muted">No</span>}</Td>
             <Td>
               <LastTestCell connection={c} />
             </Td>

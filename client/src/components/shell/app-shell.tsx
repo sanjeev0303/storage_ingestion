@@ -47,17 +47,12 @@ function Nav({ onNavigate }: { onNavigate?: () => void }) {
                       onClick={onNavigate}
                       aria-current={current ? "page" : undefined}
                       className={cn(
-                        "flex min-h-11 items-center gap-3 rounded-md px-3 text-base font-medium transition-shadow",
-                        current ? "neo-in text-ink" : "hover:bg-faint",
+                        "flex min-h-11 items-center gap-3 rounded-md border px-3 text-base font-medium transition-colors",
+                        current ? "border-line bg-ground text-ink" : "border-transparent text-muted hover:text-ink",
                       )}
                     >
-                      <Icon
-                        aria-hidden
-                        weight={current ? "fill" : "regular"}
-                        className={cn("size-5 shrink-0", current && "text-ink")}
-                      />
+                      <Icon aria-hidden weight={current ? "fill" : "regular"} className="size-5 shrink-0" />
                       {item.label}
-                      {current && <span aria-hidden className="ml-auto size-2 bg-accent" />}
                     </Link>
                   </li>
                 );
@@ -134,18 +129,20 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [menuOpen, setMenuOpen] = useState(false);
 
   return (
-    <div className="min-h-dvh lg:grid lg:grid-cols-[17rem_1fr]">
+    // One tinted frame holds the sidebar and the top bar; the page is a white sheet
+    // inset from the window's right and bottom edges. On a phone the sheet is the screen.
+    <div className="min-h-dvh bg-frame lg:grid lg:grid-cols-[15rem_1fr]">
       <aside className="hidden lg:block">
-        <div className="sticky top-0 flex h-dvh flex-col gap-6 overflow-y-auto p-5" data-lenis-prevent>
-          <Link href="/app/overview" className="px-1 text-lg font-bold tracking-tight">
+        <div className="sticky top-0 flex h-dvh flex-col gap-6 overflow-y-auto px-3 pt-1.5 pb-5" data-lenis-prevent>
+          <Link href="/app/overview" className="flex h-9 items-center px-3 text-lg font-bold tracking-tight">
             Object Storage
           </Link>
           <Nav />
         </div>
       </aside>
 
-      <div className="min-w-0">
-        <header className="sticky top-0 z-30 flex items-center gap-3 bg-ground px-4 py-3 sm:px-6 lg:px-8">
+      <div className="flex min-h-dvh min-w-0 flex-col">
+        <header className="sticky top-0 z-30 flex h-14 items-center gap-3 bg-frame px-4 sm:px-6 lg:h-12 lg:pr-2 lg:pl-0">
           <Button className="size-9 px-0 lg:hidden" aria-label="Open navigation" onClick={() => setMenuOpen(true)}>
             <List aria-hidden />
           </Button>
@@ -157,9 +154,11 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
         </header>
 
-        <main id="main" className="mx-auto w-full max-w-[1400px] px-4 pt-4 pb-16 sm:px-6 lg:px-8">
-          <OrganizationGate>{children}</OrganizationGate>
-        </main>
+        <div className="flex-1 bg-ground lg:mr-2 lg:mb-2 lg:rounded-[var(--radius-sheet)] lg:border lg:border-line">
+          <main id="main" className="mx-auto w-full max-w-[1400px] px-4 pt-6 pb-16 sm:px-6 lg:px-8">
+            <OrganizationGate>{children}</OrganizationGate>
+          </main>
+        </div>
       </div>
 
       <Modal open={menuOpen} onOpenChange={setMenuOpen} title="Navigation">
@@ -171,14 +170,14 @@ export function AppShell({ children }: { children: ReactNode }) {
 
 export function ShellSkeleton() {
   return (
-    <div className="min-h-dvh lg:grid lg:grid-cols-[17rem_1fr]" aria-busy>
+    <div className="min-h-dvh bg-frame lg:grid lg:grid-cols-[15rem_1fr]" aria-busy>
       <div className="hidden flex-col gap-3 p-5 lg:flex">
         <Skeleton className="h-6 w-40" />
         {Array.from({ length: 8 }, (_, i) => (
           <Skeleton key={i} className="h-10" />
         ))}
       </div>
-      <div className="flex flex-col gap-4 p-6">
+      <div className="flex flex-col gap-4 bg-ground p-6 lg:mt-12 lg:mr-2 lg:mb-2 lg:rounded-[var(--radius-sheet)] lg:border lg:border-line">
         <Skeleton className="h-9 w-64" />
         <Skeleton className="h-40" />
       </div>
