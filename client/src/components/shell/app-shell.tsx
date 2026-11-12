@@ -4,6 +4,7 @@ import { CaretDown, List, SignOut, UserCircle } from "@phosphor-icons/react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, type ReactNode } from "react";
+import { Logo } from "@/components/brand/logo";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { Modal } from "@/components/ui/dialog";
@@ -47,11 +48,13 @@ function Nav({ onNavigate }: { onNavigate?: () => void }) {
                       onClick={onNavigate}
                       aria-current={current ? "page" : undefined}
                       className={cn(
-                        "flex min-h-11 items-center gap-3 rounded-md border px-3 text-base font-medium transition-colors",
-                        current ? "border-line bg-ground text-ink" : "border-transparent text-muted hover:text-ink",
+                        "relative flex min-h-11 items-center gap-3 rounded-lg border px-3 text-base font-medium transition-colors duration-150",
+                        current
+                          ? "border-line bg-ground text-ink before:absolute before:top-1/2 before:-left-3 before:h-5 before:w-1 before:-translate-y-1/2 before:rounded-r-full before:bg-ultra"
+                          : "border-transparent text-muted hover:bg-ground/60 hover:text-ink",
                       )}
                     >
-                      <Icon aria-hidden weight={current ? "fill" : "regular"} className="size-5 shrink-0" />
+                      <Icon aria-hidden weight={current ? "fill" : "regular"} className={cn("size-5 shrink-0", current && "text-ultra-text")} />
                       {item.label}
                     </Link>
                   </li>
@@ -134,8 +137,13 @@ export function AppShell({ children }: { children: ReactNode }) {
     <div className="min-h-dvh bg-frame lg:grid lg:grid-cols-[15rem_1fr]">
       <aside className="hidden lg:block">
         <div className="sticky top-0 flex h-dvh flex-col gap-6 overflow-y-auto px-3 pt-1.5 pb-5" data-lenis-prevent>
-          <Link href="/app/overview" className="flex h-9 items-center px-3 text-lg font-bold tracking-tight">
-            Object Storage
+          <Link
+            href="/app/overview"
+            aria-label="Orbidune overview"
+            className="flex h-12 items-center px-3"
+            style={{ "--logo-gap": "var(--frame)" } as React.CSSProperties}
+          >
+            <Logo />
           </Link>
           <Nav />
         </div>

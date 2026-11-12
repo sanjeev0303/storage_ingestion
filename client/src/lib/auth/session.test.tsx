@@ -83,7 +83,7 @@ describe("session and organization scoping", () => {
 
   it("derives permissions from the role and treats unknown ones as denied only when they are known", async () => {
     useBackend();
-    sessionStorage.setItem("osp.organization", "org-a");
+    sessionStorage.setItem("orb.organization", "org-a");
     mount(newClient());
     // Until the role loads, can() allows everything; after it loads, only the role's permissions.
     await waitFor(() => expect(screen.getByTestId("can-delete")).toHaveTextContent("false"));
@@ -101,7 +101,7 @@ describe("session and organization scoping", () => {
         }),
       ),
     );
-    sessionStorage.setItem("osp.organization", "org-a");
+    sessionStorage.setItem("orb.organization", "org-a");
     const client = newClient();
     mount(client);
 
@@ -123,7 +123,7 @@ describe("session and organization scoping", () => {
         http.get(`${API}/catalog/objects`, () => HttpResponse.json({ owner: "secret" })),
       ),
     );
-    sessionStorage.setItem("osp.organization", "org-a");
+    sessionStorage.setItem("orb.organization", "org-a");
     const client = newClient();
     mount(client);
     await waitFor(() => expect(screen.getByTestId("owner")).toHaveTextContent("secret"));

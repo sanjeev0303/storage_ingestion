@@ -12,7 +12,7 @@ POST /api/v1/api-tokens
  "datasets": ["scans"], "networks": ["203.0.113.0/24"], "expires_in": "720h", "allow_links": false}
 ```
 
-- The response carries `token` (`osp_pat_…`) once. Only its SHA-256 is stored. Send it as `Authorization: Bearer osp_pat_…`.
+- The response carries `token` (`orb_pat_…`) once. Only its SHA-256 is stored. Send it as `Authorization: Bearer orb_pat_…`.
 - `permissions` must be ones the member holds (403 `escalation` otherwise). Each request also intersects them with the member's current role, so a demotion or removal narrows every token at once.
 - `datasets` confines the token to those dataset namespaces: any other asset answers 404, as if it did not exist. This is a vendor workspace. A dataset-confined token can never create share links.
 - `networks` (CIDRs) binds it to source addresses; from anywhere else it answers 401. Behind the console proxy set `AUTH_TRUST_PROXY_HEADERS=true` so the real client address is used.
@@ -70,7 +70,7 @@ access.revoke_links(client, asset_ids=[asset_id])
 ```
 
 ```
-OSP_URL=https://… OSP_API_TOKEN=osp_pat_… osp datasets
+OSP_URL=https://… OSP_API_TOKEN=orb_pat_… osp datasets
 osp token-create vendor-acme -p assets.read -p assets.download --dataset scans --network 203.0.113.0/24
 osp tokens
 osp token-revoke ID

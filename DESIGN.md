@@ -1,515 +1,343 @@
 ---
-name: Object Storage
-description: Storage that checks every byte first. Two worlds - a strip-board console and a specimen-accession homepage.
+name: Orbidune
+description: Verified dataset storage for ML teams, presented as a dataset paper. One world for the homepage, the console and the auth pages.
 colors:
-  frame: "#E9ECE8"
-  ground: "#FFFFFF"
-  ink: "#10161B"
-  accent: "#FF7A1F"
-  on-accent: "#10161B"
-  muted: "#494E52"
-  faint: "#ECECED"
-  well: "#F3F5F2"
-  line: "#E5E5E6"
-  control-line: "#CACCCD"
-  edge: "#7C7F82"
-  dark-frame: "#0B1013"
-  dark-ground: "#141B20"
-  dark-ink: "#E4E9E5"
-  dark-muted: "#BAC0BE"
-  dark-faint: "#293034"
-  dark-well: "#10161A"
-  dark-line: "#31383C"
-  dark-edge: "#868C8C"
-  home-orange: "#FF7A1F"
-  home-night: "#050F16"
-  home-white: "#FFFFFF"
-  home-dark-ink: "#F3EBE3"
-  home-tint-1: "#FFE6D4"
-  home-tint-2: "#FFC9A3"
-  home-tint-3: "#FFAD75"
-  home-rust: "#9A3D0A"
-  home-rust-ink: "#FFF4EA"
-  home-dark-tint-1: "#13242F"
-  home-dark-tint-2: "#1B2F3B"
-  home-dark-tint-3: "#233946"
+  sheet: "#FFFFFF"
+  frame: "#F0F1F7"
+  orbit-ink: "#0E1130"
+  ultramarine: "#2F3BFF"
+  on-ultramarine: "#FFFFFF"
+  ultramarine-soft: "#ECEDFF"
+  saffron: "#FFC21A"
+  on-saffron: "#0E1130"
+  muted: "#4D4F66"
+  faint: "#F1F1F3"
+  well: "#F6F7FA"
+  line: "#E2E2E6"
+  control-line: "#CFCFD6"
+  edge: "#7A7C8D"
+  field-ultra-muted: "#E2E4FF"
+  field-ultra-line: "#6972FF"
+  field-night-muted: "#CFCFD6"
+  field-night-line: "#393C55"
+  dark-frame: "#070919"
+  dark-sheet: "#0E112B"
+  dark-ink: "#E8EAF8"
+  dark-ultramarine: "#3D48FF"
+  dark-ultramarine-text: "#A3A9FF"
+  dark-ultramarine-soft: "#12163E"
+  dark-muted: "#B8BACB"
+  dark-faint: "#22253D"
+  dark-well: "#0A0D21"
+  dark-line: "#2F324A"
+  dark-control-line: "#3A3C54"
+  dark-edge: "#86889C"
+  dark-field-ultra: "#2A33D6"
 typography:
-  title:
-    fontFamily: "Hanken Grotesk, ui-sans-serif, system-ui, sans-serif"
-    fontSize: "1.75rem"
-    fontWeight: 600
-    lineHeight: 1.5
+  display:
+    fontFamily: "Archivo, ui-sans-serif, system-ui, sans-serif"
+    fontSize: "clamp(2.125rem, 1rem + 2.9vw, 3.25rem)"
+    fontWeight: 700
+    lineHeight: 1.02
+    letterSpacing: "-0.035em"
+    fontVariation: "\"wdth\" 125"
+  headline:
+    fontFamily: "Archivo, ui-sans-serif, system-ui, sans-serif"
+    fontSize: "clamp(1.875rem, 1.1rem + 2.4vw, 3.25rem)"
+    fontWeight: 700
+    lineHeight: 1.06
+    letterSpacing: "-0.03em"
+    fontVariation: "\"wdth\" 125"
+  page-title:
+    fontFamily: "Archivo, ui-sans-serif, system-ui, sans-serif"
+    fontSize: "1.875rem"
+    fontWeight: 700
+    lineHeight: 1.25
     letterSpacing: "-0.025em"
-  bay-title:
-    fontFamily: "Hanken Grotesk, ui-sans-serif, system-ui, sans-serif"
-    fontSize: "1.375rem"
-    fontWeight: 600
-    lineHeight: 1.5
+    fontVariation: "\"wdth\" 125"
+  lead:
+    fontFamily: "Archivo, ui-sans-serif, system-ui, sans-serif"
+    fontSize: "clamp(1.125rem, 1rem + 0.5vw, 1.375rem)"
+    fontWeight: 400
+    lineHeight: 1.4
+    letterSpacing: "-0.01em"
   panel-title:
-    fontFamily: "Hanken Grotesk, ui-sans-serif, system-ui, sans-serif"
+    fontFamily: "Archivo, ui-sans-serif, system-ui, sans-serif"
     fontSize: "1.125rem"
     fontWeight: 600
     lineHeight: 1.5
-  strip-name:
-    fontFamily: "Hanken Grotesk, ui-sans-serif, system-ui, sans-serif"
-    fontSize: "1rem"
+  figure-title:
+    fontFamily: "Archivo, ui-sans-serif, system-ui, sans-serif"
+    fontSize: "0.9375rem"
     fontWeight: 600
-    lineHeight: 1.5
+    lineHeight: 1.3
+  body-paper:
+    fontFamily: "Archivo, ui-sans-serif, system-ui, sans-serif"
+    fontSize: "1.0625rem"
+    fontWeight: 400
+    lineHeight: 1.6
   body:
-    fontFamily: "Hanken Grotesk, ui-sans-serif, system-ui, sans-serif"
+    fontFamily: "Archivo, ui-sans-serif, system-ui, sans-serif"
     fontSize: "0.875rem"
     fontWeight: 400
     lineHeight: 1.5
   label:
-    fontFamily: "Hanken Grotesk, ui-sans-serif, system-ui, sans-serif"
-    fontSize: "0.8125rem"
-    fontWeight: 500
-    lineHeight: 1.5
-  badge:
-    fontFamily: "Hanken Grotesk, ui-sans-serif, system-ui, sans-serif"
+    fontFamily: "Archivo, ui-sans-serif, system-ui, sans-serif"
     fontSize: "0.8125rem"
     fontWeight: 600
-    lineHeight: 1.5
+    lineHeight: 1.45
   data:
     fontFamily: "JetBrains Mono, ui-monospace, monospace"
     fontSize: "max(0.8125em, 13px)"
     fontWeight: 400
     lineHeight: 1.5
-  home-display:
-    fontFamily: "Hanken Grotesk, ui-sans-serif, system-ui, sans-serif"
-    fontSize: "clamp(3.25rem, 5.2vw, 5rem)"
-    fontWeight: 500
-    lineHeight: 0.95
-    letterSpacing: "-0.04em"
-  home-head:
-    fontFamily: "Hanken Grotesk, ui-sans-serif, system-ui, sans-serif"
-    fontSize: "clamp(2rem, 1.3rem + 3.2vw, 4rem)"
-    fontWeight: 500
-    lineHeight: 0.98
-    letterSpacing: "-0.04em"
-  home-lead:
-    fontFamily: "Hanken Grotesk, ui-sans-serif, system-ui, sans-serif"
-    fontSize: "clamp(1.25rem, 1.1rem + 0.7vw, 1.625rem)"
-    fontWeight: 500
-    lineHeight: 1.25
-    letterSpacing: "-0.01em"
-  home-body:
-    fontFamily: "Hanken Grotesk, ui-sans-serif, system-ui, sans-serif"
-    fontSize: "clamp(1.0625rem, 1rem + 0.25vw, 1.1875rem)"
-    fontWeight: 400
-    lineHeight: 1.45
-    letterSpacing: "-0.005em"
-  home-small:
-    fontFamily: "Hanken Grotesk, ui-sans-serif, system-ui, sans-serif"
-    fontSize: "clamp(0.8125rem, 0.79rem + 0.1vw, 0.875rem)"
-    fontWeight: 400
-    lineHeight: 1.4
-  home-poster:
-    fontFamily: "Hanken Grotesk, ui-sans-serif, system-ui, sans-serif"
-    fontSize: "clamp(6rem, 36vw, 34rem)"
-    fontWeight: 500
-    lineHeight: 0.8
-    letterSpacing: "-0.05em"
 rounded:
-  sm: "2px"
-  md: "4px"
-  sheet: "12px"
+  xs: "3px"
+  sm: "4px"
+  md: "6px"
+  lg: "8px"
+  figure: "10px"
+  sheet: "14px"
+  pill: "999px"
 spacing:
-  xs: "4px"
-  sm: "8px"
-  md: "12px"
-  strip: "16px"
-  lg: "20px"
-  xl: "32px"
-  rack: "40px"
-  seam: "6px"
+  wrap-mobile: "20px"
+  wrap-tablet: "32px"
+  wrap-desktop: "48px"
+  panel: "20px"
+  section: "96px"
+  section-wide: "128px"
+  content-max: "80rem"
+  console-max: "1400px"
 components:
-  frame:
-    backgroundColor: "{colors.frame}"
-    textColor: "{colors.ink}"
-  sheet:
-    backgroundColor: "{colors.ground}"
-    textColor: "{colors.ink}"
-    rounded: "{rounded.sheet}"
+  button-orb:
+    backgroundColor: "{colors.saffron}"
+    textColor: "{colors.on-saffron}"
+    rounded: "{rounded.pill}"
+    padding: "0 22px"
+    height: "48px"
   button-primary:
-    backgroundColor: "{colors.ink}"
-    textColor: "{colors.ground}"
+    backgroundColor: "{colors.ultramarine}"
+    textColor: "{colors.on-ultramarine}"
+    typography: "{typography.body}"
     rounded: "{rounded.md}"
-    height: "36px"
     padding: "0 16px"
-  button-accent:
-    backgroundColor: "{colors.accent}"
-    textColor: "{colors.on-accent}"
-    rounded: "{rounded.md}"
     height: "36px"
-    padding: "0 16px"
   button-secondary:
-    backgroundColor: "{colors.ground}"
-    textColor: "{colors.ink}"
+    backgroundColor: "{colors.sheet}"
+    textColor: "{colors.orbit-ink}"
+    typography: "{typography.body}"
     rounded: "{rounded.md}"
-    height: "36px"
     padding: "0 16px"
-  button-ghost-hover:
-    backgroundColor: "{colors.faint}"
-    textColor: "{colors.ink}"
+    height: "36px"
+  button-accent:
+    backgroundColor: "{colors.saffron}"
+    textColor: "{colors.on-saffron}"
+    typography: "{typography.body}"
+    rounded: "{rounded.md}"
+    padding: "0 16px"
+    height: "36px"
   input:
     backgroundColor: "{colors.well}"
-    textColor: "{colors.ink}"
+    textColor: "{colors.orbit-ink}"
+    typography: "{typography.body}"
     rounded: "{rounded.md}"
+    padding: "0 12px"
     height: "36px"
-    padding: "0 12px"
   panel:
-    backgroundColor: "{colors.ground}"
-    textColor: "{colors.ink}"
+    backgroundColor: "{colors.sheet}"
+    textColor: "{colors.orbit-ink}"
     rounded: "{rounded.md}"
-    padding: "20px"
-  nav-current:
-    backgroundColor: "{colors.ground}"
-    textColor: "{colors.ink}"
-    rounded: "{rounded.md}"
-    height: "44px"
-    padding: "0 12px"
-  strip:
-    backgroundColor: "{colors.ground}"
-    textColor: "{colors.ink}"
-    rounded: "{rounded.md}"
-    padding: "10px 16px"
-  strip-cell-failed:
-    backgroundColor: "{colors.accent}"
-    textColor: "{colors.on-accent}"
-    width: "40px"
-  strip-cell-active:
-    backgroundColor: "{colors.ink}"
-    textColor: "{colors.ground}"
-    width: "40px"
-  strip-cell-pale:
+    padding: "{spacing.panel}"
+  figure:
+    backgroundColor: "{colors.sheet}"
+    textColor: "{colors.orbit-ink}"
+    rounded: "{rounded.figure}"
+  state-badge:
     backgroundColor: "{colors.faint}"
-    textColor: "{colors.ink}"
-    width: "40px"
+    textColor: "{colors.orbit-ink}"
+    typography: "{typography.label}"
+    rounded: "{rounded.sm}"
+    padding: "2px 8px"
   state-badge-failed:
-    backgroundColor: "{colors.accent}"
-    textColor: "{colors.on-accent}"
+    backgroundColor: "{colors.saffron}"
+    textColor: "{colors.on-saffron}"
+    typography: "{typography.label}"
     rounded: "{rounded.sm}"
     padding: "2px 8px"
-  state-badge-active:
-    backgroundColor: "{colors.ink}"
-    textColor: "{colors.ground}"
-    rounded: "{rounded.sm}"
-    padding: "2px 8px"
-  state-badge-quiet:
-    backgroundColor: "{colors.faint}"
-    textColor: "{colors.ink}"
-    rounded: "{rounded.sm}"
-    padding: "2px 8px"
-  tab-current:
-    textColor: "{colors.ink}"
-    height: 44px
-    padding: "0 12px"
-  home-button:
-    backgroundColor: "{colors.home-night}"
-    textColor: "{colors.home-orange}"
-    height: "48px"
-    padding: "0 22px 0 26px"
-  home-button-dark:
-    backgroundColor: "{colors.home-orange}"
-    textColor: "{colors.home-night}"
-    height: "48px"
-    padding: "0 22px 0 26px"
-  home-chip:
-    textColor: "{colors.home-night}"
-    typography: "{typography.home-small}"
-    height: "44px"
-    padding: "0 14px 0 16px"
-  home-chip-chosen:
-    backgroundColor: "{colors.home-night}"
-    textColor: "{colors.home-orange}"
-    height: "44px"
-    padding: "0 14px 0 16px"
-  home-stage:
-    backgroundColor: "{colors.home-orange}"
-    textColor: "{colors.home-night}"
-  home-slip:
-    backgroundColor: "{colors.home-white}"
-    textColor: "{colors.home-night}"
-    padding: "28px 32px 40px"
-  home-start-band:
-    backgroundColor: "{colors.home-night}"
-    textColor: "{colors.home-orange}"
-    typography: "{typography.home-poster}"
-  home-start-band-hover:
-    backgroundColor: "{colors.home-orange}"
-    textColor: "{colors.home-night}"
+  field-ultra:
+    backgroundColor: "{colors.ultramarine}"
+    textColor: "{colors.on-ultramarine}"
+  field-night:
+    backgroundColor: "{colors.orbit-ink}"
+    textColor: "{colors.on-ultramarine}"
 ---
 
-# Design System: Object Storage
-
-Hex values above are resolved from `client/src/app/globals.css`, which stays the live source. Console tokens are the light theme with `color-mix()` tones resolved; dark-* entries are the console's dark overrides (`edge` is not overridden, so `dark-edge` is the same 55% mix recomputed on the dark sheet). Every `home-*` token is scoped to the `.home` block at the end of `globals.css` (`--h-*` custom properties) and exists only on the homepage.
-
-**Two surfaces, two worlds.** The signed-in console (`client/src/app/app/**` and `client/src/components/**` outside `components/home`) is "The Strip Board": a tinted frame holding the sidebar and top bar, a white work sheet, flat hairline surfaces, blue-black ink, and specimen orange only as a fill under ink on what needs the user. The homepage (`client/src/app/page.tsx`, `client/src/components/home/**`) is "The Accession Label": drenched specimen orange, blue-black ink and white, flat, with one cut-corner motif. They share Hanken Grotesk, JetBrains Mono for data, the outcome-mark shapes, and the orange hex itself (the console's `--accent` and the homepage's `--h-orange` are both #FF7A1F); the console spends it on small cells and pills, the homepage on whole fields. Neither world borrows the other's surface model or corner language: no orange fields or cut corners in the console, no frame, sheet or strips on the homepage. The homepage reuses the interactive flow diagrams from `client/src/components/landing/` (`flow-kit.tsx`, `diagram-kit.tsx`, `diagrams/*-flow.tsx`); inside `.home` they read the homepage palette through CSS variables. The rest of that folder (the old flat plum landing, its custody rail and sections) is no longer rendered and is not part of either system.
+# Design System: Orbidune
 
 ## Overview
 
-**Creative North Star (console): "The Strip Board"**
+**Creative North Star: "The Dataset Paper"**
 
-A tool for deciding whether a dataset is fit to use, laid out like an air-traffic strip board. Every job, dataset, connection and dead letter is a strip racked by its state, and what needs the user sits in the front bay as the biggest block. It never decorates a result; it separates what was checked from what was not, and makes "not checked" as visible as "passed". One tinted frame holds the sidebar and the top bar as a single L; the work sits on a white sheet inset from the window's right and bottom edges. Surfaces are flat and told apart by tone and a 1px hairline, never by shadow. Ink does the work; orange is rare and always means "look here".
+Orbidune is presented the way its readers already read evidence: as an ML research paper and a datasheet for a dataset. White paper, deep orbit ink, ultramarine as the figure colour, saffron as the one attention colour. Claims arrive as numbered figures in hairline frames, results as rule-only booktabs tables where "Not checked" is a first-class row, and a method that can be followed station by station. The homepage reads it at full Persuade strength: one full-strength ultramarine field for the abstract and Figure 1, one reading axis down the page, a night field for the close. The signed-in console and the auth pages render the same world in Operate register through the same tokens and primitives: a cool frame tint holding the sidebar and top bar, work on an inset white sheet, flat hairline panels, ultramarine for the one primary action.
 
-**Creative North Star (homepage): "The Accession Label"**
+Density is calm on the homepage (96 to 128px between sections, 17px paper body) and working-dense in the console (14px body, 36px controls, 20px panel padding). Everything except ultramarine and saffron is mixed from ink and the sheet, so the palette stays two colours plus paper in both themes. The world refuses the dark developer-platform hero with a neon accent and a feature-card grid, and the broadsheet-editorial costume (italic serif display, tracked mono labels).
 
-Datasets are handled the way a lab accessions specimens: received, tested and labelled before release, and the label says which tests were never run. Colour owns whole regions: full-width orange, white and blue-black fields meet at hard horizontal seams, with no gradients, cards or shadows. One motif comes from the subject and does all the shaping work: the accession label, a rectangle with its top-left corner cut, plus its barcode. It is the hero stage, every button, chip and segment, the readiness spines, the connection label, the closing Start band and the footer name. Product fragments (`data-ui`) are real console pieces enlarged in em, cropped by their tile edges.
+Brand mark ("Orbit O", chosen 2026-11-12 over two other concepts kept in `client/public/brand/`): an orbit ring drawn as the O of the name, two dunes inside it, and the saffron orb riding the ring as its satellite, drawn in code (`components/brand/logo.tsx`). The ring and the lower dune take the text colour; the upper dune reads `--logo-dune` (ultramarine text by default, white at 45% on the ultramarine field, #7C84FF on night) and the gap round the orb reads `--logo-gap` (the ground it sits on: sheet, frame, ultramarine field or night). The app icon (`src/app/icon.svg`) sets the mark on an orbit-ink tile with a white ring.
 
 **Key Characteristics:**
-- Console: frame, sheet and ink, with every other tone mixed from ink and the sheet; specimen orange only as a fill with ink on top; flat, with depth told by the frame-to-sheet step and hairlines.
-- Homepage: orange, blue-black and white fields with three orange tints; flat; the cut corner is the only shape idea.
-- Both: meaning is carried by shape and word, never hue alone; "Not checked" is shown as plainly as "Passed".
-- Both have light and dark themes. The console's dark frame and sheet are near-black blue-greys and its orange keeps ink on it; the homepage's dark rest field is the blue-black, and its orange fields stay orange.
+- White sheet, orbit ink text, ultramarine figures, saffron fills with ink on top.
+- Archivo in two widths: expanded (wdth 125) for display, section heads, page titles, figure numbers and the wordmark; normal width for text.
+- JetBrains Mono only for hashes, paths, object keys and code.
+- Numbered figures in hairline frames with the number and title as a heading above the drawing.
+- Booktabs tables: three rules, no verticals, tabular figures.
+- Flat surfaces; depth by tone (frame, sheet, well) and hairlines.
+- Status told by shape and word, never by hue alone.
 
 ## Colors
 
-### Console
-A grey-green frame, a white sheet, blue-black ink, and one specimen orange that marks only what needs the user. Everything else is ink mixed toward the sheet.
+Paper and ink with two committed colours: ultramarine carries figures, links and the primary action; saffron is the single attention fill.
 
-- **Board Frame** (`--frame`): the L that holds the sidebar and the top bar, with no rule between them; the theme colour in the browser chrome. Never a panel fill on the sheet.
-- **Sheet** (`--ground`): the work surface and every panel, strip, menu and dialog on it. White in light theme.
-- **Blue-Black Ink** (`--ink`): text, the primary button, the current tab, the in-motion strip cell and badge, meter fills, and the light-theme focus outline.
-- **Specimen Orange** (`--accent`, with `--on-accent` ink on top at 7:1): the failed strip cell, the failed badge, the "need you" count on the board line when above zero, the accent button for decisive or destructive actions, the orange core of stalled and warning marks, meters above 90%, text selection, and the dark-theme focus outline (about 6.7:1 on the dark sheet). Never text on the light sheet (2.6:1), never chrome, never the primary button.
-- **Muted Ink** (76% ink into the sheet; 80% in dark): secondary text, descriptions, nav items at rest, table headers, timestamps. 4.5:1 or better on the sheet, the frame and the faint fill in both themes.
-- **Faint** (8% ink; 10% in dark): pale strip cells, quiet badges, the zero-count pill, ghost hover, table rules.
-- **Well** (55% frame into the sheet; 50% in dark): one tone step toward the frame inside the sheet: inputs, meter tracks, skeletons, empty and error states.
-- **Hairline** (`--line`, 11% ink; 14% in dark): the 1px border on the sheet, panels, strips, the current nav item, and the activity log's rules. About 1.25:1; it separates, it does not carry meaning.
-- **Control Line** (22% ink): the resting border of secondary buttons.
-- **Form Edge** (`--edge`, 55% ink): input boundaries, the hover border of secondary buttons, and the dashed empty slot; 3:1 against the sheet.
+### Primary
+- **Orbit Ultramarine** (`ultramarine`): the figure colour. Figure numbers, the orbit line and its stops, focus rings, carets, the active nav marker, the console's primary button, and the one full-strength homepage field. As text it uses the ultramarine-text role, which equals ultramarine in light and lifts to `dark-ultramarine-text` in dark so it keeps contrast. White (`on-ultramarine`) is the only text pairing on its fill.
+- **Ultramarine Wash** (`ultramarine-soft`): ultramarine at 9% on the sheet; the dune wash inside Figure 1. Not a panel surface.
 
-### Homepage
-Saturated specimen-label orange against blue-black and white. Orange is a field, not an accent.
+### Secondary
+- **Signal Saffron** (`saffron`): the one attention colour. The homepage pill button, the console accent button, text selection, focus rings on coloured fields, the failed state badge, the orb in the logo, and the centre or fill of warning and failed outcome marks. Always a fill with orbit ink on top (`on-saffron`); identical in both themes.
 
-- **Specimen Orange** (primary, `--h-orange`): the drenched field (`field-a`), the hero stage, the footer name label, chosen chips on dark grounds, and button ink in light theme. It stays orange in both themes; it is the motif at large scale (`--h-mark`).
-- **Blue-Black** (`--h-night`): ink in light theme, the action fill in light theme, the `field-night` band and dark tiles, the Start band, and the rest field in dark theme. Orange on blue-black and blue-black on orange are the two loud pairings.
-- **White** (`--h-b` in light): the rest field (`field-b`), the accession slip, the connection label.
-- **Warm Paper Ink** (`--h-ink` in dark): body ink on the blue-black rest field.
-- **Orange Tints 1-3** (`--h-tint-1..3`): quieter label fills (feature tiles, readiness cards and spines, the second stage). In dark theme they become the three blue-black tints.
-- **Rust and Rust Ink**: the fourth stage cell only, the step between orange and blue-black in the stage bar.
-- Chip rest fills and dividers are `currentColor` at 14%, so they read on every field.
+### Neutral
+- **Sheet** (`sheet`): the page and every working surface: panels, figures, the console sheet, controls.
+- **Cool Frame** (`frame`): the console frame that holds the sidebar and top bar around the inset sheet.
+- **Orbit Ink** (`orbit-ink`): body text, headings, booktabs rules, the active tab underline, the night field, the code panel ground.
+- **Muted Ink** (`muted`): secondary text, descriptions, inactive nav. Ink at 74% on the sheet; 4.5:1 or better on sheet, frame and faint.
+- **Faint** (`faint`): ink at 6%; quiet badges, hover fills on ghost buttons, pressed secondary buttons.
+- **Well** (`well`): one tone step from the sheet toward the frame; input fills and recessed panels.
+- **Hairline** (`line`): ink at 12%; panel, figure and row borders, the console sheet edge, section dividers.
+- **Control Line** (`control-line`): ink at 20%; the border of secondary buttons and other controls on the sheet.
+- **Edge** (`edge`): ink at 55%; form control boundaries (3:1 against the sheet) and the scrollbar thumb.
+- **On-field tones** (`field-ultra-muted`, `field-ultra-line`, `field-night-muted`, `field-night-line`): white mixed into the field colour for secondary text and dividers on the ultramarine and night fields.
+
+### Dark theme
+The `dark-*` tokens replace their light counterparts under `data-theme="dark"` or the system dark preference (unless light is pinned). The sheet becomes a deep orbit blue (`dark-sheet`) inside a near-black frame (`dark-frame`); ink becomes a pale periwinkle (`dark-ink`). Ultramarine as a fill lifts slightly (`dark-ultramarine`) and as text lifts to `dark-ultramarine-text`. The ultramarine field darkens to `dark-field-ultra`; the night field drops to `dark-frame`. Saffron and on-saffron do not change.
 
 ### Named Rules
-**The Mixed From Ink Rule (console).** Frame, sheet, ink and orange are the only declared colours; every other console tone is `color-mix()` of ink with the sheet (or the frame with the sheet). A fifth hue, or a cool grey that is not ink, is a defect.
+**The Saffron Is A Fill Rule.** Saffron is never text on the sheet. It is a fill, and whatever sits on it is orbit ink.
 
-**The Orange Needs You Rule (console).** Orange is a fill with ink on top, and only on what needs the user. It is never text or a thin line on the light sheet, never navigation chrome, never the primary action. On the board, failed is the only fully orange strip cell.
+**The Two Colours Rule.** Ultramarine and saffron are the only hues. Every other tone is mixed from ink and the sheet; do not add a third hue for status, success or charts.
 
-**The Edge Rule (console).** Form controls carry `--edge` as their border so the boundary meets 3:1; the hairline alone is not enough for a control.
-
-**The Field Owns The Region Rule (homepage).** A colour fills a whole full-width section or a whole label, edge to edge. Sections change colour only at hard horizontal seams; no gradients, no colour washes, no accent specks.
-
-**The Orange Stays Rule (homepage).** Dark theme flips the rest field and the action, never the orange fields. The accession slip stays white with blue-black ink in both themes because it is a printed label sitting on the orange stage.
+**The One Field Rule.** A surface gets at most one full-strength ultramarine field (the homepage hero, the auth aside). The night field is reserved for the close and footer.
 
 ## Typography
 
-**Font:** Hanken Grotesk (with ui-sans-serif, system-ui) on both surfaces.
-**Mono:** JetBrains Mono, for IDs, keys, hashes, checksums and event names only (`mono-data`).
+**Display Font:** Archivo, expanded on its width axis (wdth 125), with ui-sans-serif, system-ui fallback
+**Body Font:** Archivo at normal width
+**Label/Mono Font:** JetBrains Mono, data only
 
-**Character:** One grotesque family on both surfaces; it was kept for the console over IBM Plex Sans so the console and the homepage share one voice. In the console it runs at 400, 500 and 600 with tabular figures, semibold for titles and strip names, plain at 14px. On the homepage it is medium weight throughout, set tight (-0.04em) at the large steps, so the type reads like a printed label rather than an editorial page.
+**Character:** One grotesque in two widths. Expanded bold Archivo gives headings the stance of a paper's title and figure labels; normal-width Archivo keeps reading text plain. Mono appears only where the content is literally machine text.
 
-### Console hierarchy
-The scale is fixed in `globals.css` (`--text-xs` to `--text-2xl`).
-- **Title** (600, 1.75rem, tracking-tight): console page titles.
-- **Bay title** (600, 1.375rem): the front-bay heading on the overview ("Needs you"), the one rack that outranks the rest.
-- **Panel title** (600, 1.125rem): rack headings, panel headings, the brand name.
-- **Strip name** (600, 1rem): front-bay strip names and sub-rack headings. Ordinary strips set their name at 600 in the body size.
-- **Body** (400 to 500, 0.875rem, 1.5): console default, nav items, buttons. Descriptions cap at prose width.
-- **Label** (500, 0.8125rem): field labels, breadcrumbs, table headers (muted), strip details and times, rack notes, nav group names.
-- **Badge** (600, 0.8125rem): state badges and the board-line count pill.
-- **Data** (JetBrains Mono, 0.8125em with a 13px floor, wraps anywhere, `translate="no"`): job IDs, permission keys, event names.
-
-### Homepage hierarchy
-Five fluid steps on `.home` (`h-display`, `h-head`, `h-lead`, `h-body`, `h-small`) plus one poster word. Nothing renders under 13px.
-- **Display**: the hero headline on two lines, and the footer name label. Balanced wrap.
-- **Head**: section headings, and the accession number on the slip.
-- **Lead**: the wordmark, stage names, provider names, readiness card titles.
-- **Body**: sentences, capped at 22ch to 46ch.
-- **Small**: links, legends, chips, slip rows, footer; set at 500 when it labels something.
-- **Poster**: the single word in the Start band, bottom-aligned, the only size outside the five steps.
+### Hierarchy
+- **Display** (700, `clamp(2.125rem, 1rem + 2.9vw, 3.25rem)`, 1.02, -0.035em, expanded, balanced): the homepage h1 on the ultramarine field.
+- **Headline** (700, `clamp(1.875rem, 1.1rem + 2.4vw, 3.25rem)`, 1.06, -0.03em, expanded, balanced): homepage section heads, the close, the auth aside claim.
+- **Page title** (700, 1.875rem, 1.25, -0.025em, expanded): the console page h1.
+- **Lead** (400, `clamp(1.125rem, 1rem + 0.5vw, 1.375rem)`, 1.4): the line under the display and close headings, about 34 to 38rem wide.
+- **Panel title** (600, 1.125rem): console panel and section headings, normal width.
+- **Figure title** (600, 0.9375rem, 1.3): figure and table titles, preceded by the number in expanded 700 ultramarine.
+- **Body paper** (400, 1.0625rem, 1.6): homepage prose, about 30 to 36rem wide.
+- **Body** (400, 0.875rem, 1.5): the console base size and controls.
+- **Label** (600, 0.8125rem): state badges, nav group names, small counts. Sentence case, no tracking.
+- **Data** (JetBrains Mono, `max(0.8125em, 13px)`): hashes, paths, keys, code; wraps anywhere.
 
 ### Named Rules
-**The Mono Is Data Rule.** JetBrains Mono for IDs, keys, hashes, checksums and event names, nothing else, on both surfaces.
+**The Two Widths Rule.** Expanded width is for display, headlines, page titles, figure numbers and the wordmark. Body, labels, panel titles and buttons stay at normal width.
 
-**The Fixed Scale Rule (console).** Console type comes from the named steps; no arbitrary pixel sizes.
+**The Thirteen Pixel Floor Rule.** Nothing renders under 13px.
 
-**The Five Steps Rule (homepage).** Homepage type uses only the five `h-*` steps and the one poster word. The exception is a `data-ui` product fragment, which may size its own controls in em so it scales as one piece.
+**The Mono Is Data Rule.** JetBrains Mono marks machine text only, never labels, kickers or decoration.
 
 ## Layout
 
-**Console:** a tinted frame in an L: a 15rem sidebar (brand, then nav groups; sticky, full height, hidden below `lg` and replaced by a modal menu) and a sticky top bar on the frame (48px at `lg`, 56px below; organization switcher left, command palette, theme toggle and account menu right). The work sheet fills the rest, inset 8px from the window's right and bottom edges at `lg` with a 1px hairline and 12px corners; below `lg` the sheet is the whole screen. Inside it the main column runs up to 1400px with 16/24/32px gutters, 24px above and 64px below. Page headers carry breadcrumbs, title, description and actions; sub-areas use route tabs. The overview is a strip board on a 2/3 and 1/3 grid: the board line under the title, the front bay ("Needs you") then "In motion and ready" in the wide column, Storage, Quota and dead letters in the narrow one, and the activity log full width beneath. Racks sit 40px apart, strips 8px apart, rack header 12px above its strips. Spacing follows a 4px base: 4, 8, 12, 16 (strip padding), 20 (panel padding), 24 (column gap), 32, 40. Every other console screen keeps its own layout and only takes these tokens.
+The homepage runs on one content width (`content-max`) with side padding of 20px, 32px from 640px and 48px from 1024px, and a 12-column grid from 1024px. The hero fills the viewport: text on columns 1 to 6, Figure 1 on columns 7 to 12; it stacks below 1024px. Sections sit 96px apart, 128px from 1024px, divided where needed by a hairline. Section heads take columns 1 to 4 or 1 to 6 with their intro beside or below; tables and figures take the remaining columns or the full width.
 
-**Homepage:** full-width fields stacked at hard seams, content in a 1440px container with 16px gutters (40px from `sm`) on a 12-column grid from `lg`. Sections are generous: 96px top and bottom, 128 to 144px at `lg`. The hero puts the statement in columns 1 to 5 and drops the orange stage into columns 5 to 12 from about a third of the way down, bleeding off the right and bottom edges (the page clips horizontal overflow). Labels and cells that sit side by side are separated by a 6px seam (stage bar, feature board, depth grid, depth segments, readiness spines), never by borders or gutters of white space alone. The feature board is a dense 12-column bento with no empty cell, two columns on phones. Below `lg`, the readiness spines become stacked cards and the depth control stacks vertically. Every interactive target is at least 44px.
+The orbit line is a 2px ultramarine rail in the left margin from 1024px, running from the end of the hero down into the close, with a 14px ringed stop beside every section heading (filled saffron on the night field). It is hidden below 1024px. The direction first asked for one line threading every figure. On 2026-11-12 the owner chose the margin rail instead: a line drawn through Figures 2 and 3 would cross their drawings and labels. The rail is the rule; do not route it through figures. Figures 1 and 3 keep their own arcs.
+
+The console is a 15rem sidebar plus a content column on the cool frame. The 48px top bar sits on the frame; the work sits on a white sheet with a hairline border and 14px radius, inset 8px from the window's right and bottom edges. Content runs to 1400px with 16, 24 and 32px side padding. Below 1024px the sheet is the screen and navigation moves into a modal. Touch targets are at least 44px on nav, links and header actions.
+
+Auth pages split 5:7 on wide screens: the ultramarine field with logo and claim on the left, the form on the sheet on the right (max 48rem). Below 1024px only the sheet column shows. The auth field's bottom row carries the orbit-and-dunes scene (`components/brand/orbit-dunes.tsx`: two orbits round the risen saffron orb, a white satellite, three translucent white dune layers). The close field carries the dune horizon (`components/brand/dune-horizon.tsx`) as a full-bleed band between the close and the footer links: the orb half-risen behind the far ridge, its orbit overhead, flat night-blue dune layers ending in the night field itself. Both are hand-drawn flat vector art (the owner asked for them crafted in code rather than generated), and both move slowly: the satellite rides its orbit (GSAP motion path, `components/brand/orbit-satellite.tsx`, 22 to 30 s a loop, paused off screen; in the close it sets behind the dunes), the orb breathes (the close uses thin saffron rings, because a saffron wash over navy turns brown), the dashed outer orbit's dashes travel, the dune layers sway at different speeds, wind lines drift and the close's stars twinkle (`components/brand/art.css`, loops of 4.5 to 24 s). Under reduced motion both scenes rest. The 1200x630 share image (`src/app/opengraph-image.png`, copied to `twitter-image.png`) repeats the ultramarine field, the mark, the headline and the orbit-and-dunes scene.
 
 ## Elevation & Depth
 
-**Console:** flat. No box-shadow anywhere at rest or on interaction. Depth has three levels and stops there: the frame, the sheet on it, and strips or panels on the sheet, each step told by tone and a 1px hairline. A well (inputs, meter track, empty and error states) is one tone step back toward the frame, not a pressed shadow. Menus, dialogs and toasts are sheet-coloured panels with a hairline over a dimmed overlay. The `neo`, `neo-sm`, `neo-in` and `neo-in-sm` utility names survive only so every screen took the new look; they are now flat surfaces.
-
-**Homepage:** flat. No shadows, no blur, no layering illusions. Depth is told by field colour and by the stage bleeding past the viewport edge. The only `box-shadow` on the homepage is a 3px inset ring that marks keyboard focus on cut-corner controls, because `clip-path` would cut an outline.
-
-### Surface Vocabulary (console)
-- **neo**: sheet fill, 1px hairline, 4px radius. Panels, menus, dialogs, toasts.
-- **neo-sm**: sheet fill, 1px control line, 4px radius. Secondary buttons, the skip link.
-- **neo-in**: well fill, 1px hairline, 4px radius. Recessed panels, empty and error states.
-- **neo-in-sm**: well fill, no border, 4px radius. Inputs (which add the edge), meter tracks, skeletons.
+Flat by default. Depth comes from tone (frame behind sheet, well inside sheet) and 1px hairlines, not shadows. The one shadow in the build is a soft ambient lift under Figure 1 where its white frame sits on the ultramarine field; it is a single instance, not a token for other surfaces. Overlays and menus separate by a scrim and their own border, entering with a short ease-out (200ms in, 140ms out; menus 160ms and 110ms, growing from the trigger).
 
 ### Named Rules
-**The Three Levels Rule (console).** Frame, sheet, strip, and nothing deeper. On the overview the strips are the cards: racks are not wrapped in panels, and a strip never holds a nested card.
-
-**The No Shadow Rule (console).** Surfaces separate by tone and hairline only. No box-shadow, drop shadow or neomorphic pair in the console.
-
-**The Flat Field Rule (homepage).** The homepage uses flat fills, type and the cut corner, never neo shadows or drop shadows. The inset focus ring is the one allowed shadow.
+**The Tone Not Shadow Rule.** A surface is raised by sitting on a darker tone (sheet on frame) or recessed by a well; it is not lifted with a shadow.
 
 ## Shapes
 
-**Console:** crisp. Every radius step resolves to 2px or 4px: 4px for buttons, panels, strips, inputs and nav items; 2px for badges, tabs and the count pill. The sheet alone is 12px. Status marks are squares (16px outcome marks, 12px state marks in badges, 16px state marks in strip cells), plus the play triangle for in motion; never circles. Table borders are 1px faint rules with a 2px faint header rule. An empty slot is a dashed edge-colour border so it never reads as a strip.
-
-**Homepage:** no radius anywhere. Square corners everywhere, except the one cut: the accession label is a four-point `clip-path` polygon with its top-left corner chamfered at 45 degrees (`--cut`). The cut scales with the label it belongs to:
-- controls: chip 8px, button 10px, depth segment 0.5em;
-- cards: readiness spine and card 16px, connection label 40px, accession slip 44px, fragment label 1.4em;
-- field scale: footer name label 56px (120px at `lg`), hero stage 72px (128px at `lg`), Start band 72px (160px at `lg`).
-
-The barcode is the motif's second part: vertical bars generated deterministically from a string, so the same text always draws the same bars. It appears on the slip beside the hash it encodes, in the audit fragment, under the footer line, and once as a full-width blue-black band that splits the page. It is always decorative (`aria-hidden`) and the text it stands for is printed nearby.
-
-### Named Rules
-**The One Soft Corner Rule (console).** Only the sheet takes 12px. Everything on it stays at 2px or 4px.
-
-**The One Cut Rule (homepage).** Only the top-left corner is ever cut, always at 45 degrees, always as a four-point polygon. No other corner, no rounding, no second shape idea.
+Gently rounded rectangles: 6px on panels, buttons, inputs and wells; 4px on state badges; 8px on nav items; 10px on figure frames; 14px on the console sheet. Pills are reserved for the homepage's saffron button, the homepage header links and the orbit stops. Status marks are square: filled, half-filled, ringed, crossed or dashed squares at 12 to 16px. Drawings share one ellipse geometry: Figures 1 and 3 place their stations on an orbit arc, and the logo crosses its orb with a tilted orbit ellipse over a dune curve.
 
 ## Components
 
-### Console
+### Buttons
+- **Shape:** gently rounded (6px) in the console; full pill for the homepage button.
+- **Saffron pill (homepage):** saffron with orbit ink, 48px tall (44px in the header), 22px side padding, 600 weight at 1rem. The only filled button on the homepage. Hover (fine pointers only) lifts 2px and lightens 12% toward white; press scales to 0.97; 160ms ease-out.
+- **Primary (console):** ultramarine with white, 36px tall, 16px padding, 500 weight. Hover darkens 12% toward black; press scales to 0.97. One per view.
+- **Secondary:** sheet with a 1px control line; hover takes the edge colour, press fills faint.
+- **Accent:** saffron with ink for a rare attention action in the console.
+- **Ghost:** no fill; hover and press fill faint.
+- **Text link (homepage):** 600 weight, 2px underline offset 6px, thickening to 3px on hover; at least 44px tall.
 
-#### Buttons
-- **Shape:** 36px high, 4px radius, 16px horizontal padding, 14px medium text, 8px icon gap. Transform, background and border change over 150ms on the console ease; every variant scales to 0.97 on press.
-- **Primary:** ink fill, sheet text. At most one per view (on the overview, "Upload files").
-- **Accent:** orange fill, ink text. Reserved for decisive or destructive confirmations (delete, archive, cancel, erase, decide).
-- **Secondary (default):** sheet fill with the 22% control line; hover darkens the border to the edge, press adds the faint fill.
-- **Ghost:** transparent, faint fill on hover and press.
-- **Loading and disabled:** spinner and `aria-busy`; disabled at 50% opacity and no pointer events.
+### Chips / State badges
+- **Style:** 4px radius, 2px 8px padding, label type, a 12px square mark before the word.
+- **State:** failed is a saffron fill with a crossed square; warning is faint with a ringed square holding a saffron centre; active is an ink fill with a play triangle; done is faint with a filled square; neutral is faint with no mark. Check outcomes use 16px marks: filled (passed), half-filled (partial), ringed with saffron centre (warning), saffron with a cross (failed), dashed (not checked).
 
-#### Inputs / Fields
-- **Style:** well fill, 1px `--edge` border, 36px high, 12px padding, muted placeholder, 4px radius. Checkboxes take the ink as their accent colour.
-- **Focus:** global 2px ink outline with 2px offset; orange outline in dark theme.
-- **Error:** a warning icon and message in `role="alert"`; the label always shows "(required)" in words.
+### Cards / Containers
+- **Corner Style:** 6px for panels, 10px for figures, 14px for the console sheet.
+- **Background:** sheet for raised panels, well for recessed panels.
+- **Shadow Strategy:** none (see Elevation & Depth).
+- **Border:** 1px hairline.
+- **Internal Padding:** 20px; the panel header has 20px top and sides, then 16px to content.
 
-#### Panel
-Flat sheet panel with a hairline, 20px padding, 18px semibold title, muted description, actions top right. Tone "in" gives a well for content inside a panel. Used on the other console screens; the overview has none.
+### Inputs / Fields
+- **Style:** well fill, 1px edge border (3:1), 6px radius, 36px tall, 12px padding, muted placeholder, ultramarine caret. Native selects use a chevron drawn in the theme's ink.
+- **Focus:** 2px ultramarine-text outline at 2px offset (the global focus ring).
+- **Error / Disabled:** invalid adds a 2px ink outline plus a message; disabled drops to 50% opacity. Fields with a max length show a tabular "42 / 200" counter that turns semibold near the limit.
 
-#### Navigation
-Sidebar items sit on the frame: 44px high, 4px radius, 20px Phosphor icon, 14px medium label, muted at rest and ink on hover. The current item is a small piece of sheet (sheet fill, hairline, ink text, fill icon weight). Group names are 13px semibold muted text above their items. Tabs sit on a hairline rule: muted 14px medium labels, 44px high, and the current tab in ink with a 2px ink underline laid over the rule. A row too long for the screen scrolls sideways, and the current tab is scrolled into view.
+### Navigation
+- **Console sidebar:** grouped list with group names in muted 600 label type; items 44px tall, 8px radius, 500 weight, Phosphor icon at 20px. Current item: sheet fill with hairline border, ink text, filled icon in ultramarine, a 4px ultramarine marker at the left edge. Others are muted and turn ink on hover.
+- **Tabs:** route tabs on a hairline row; the current tab is a 2px ink underline. Long rows scroll sideways.
+- **Homepage header:** logo left, four section links as pills in on-field muted turning white on hover, Sign in, then the saffron pill. On phones the header pill hides and the hero button is the one action.
 
-#### Strip (signature)
-The overview's unit. A strip is a sheet row with a 1px hairline and 4px corners, split into a 40px state cell on the left and the body. The cell is a filled block carrying a 16px drawn mark, never a coloured border:
-- **Failed:** orange cell, ink crossed square. The only fully orange cell.
-- **Stalled or partly published:** pale (faint) cell, ink-ringed square with an orange core, so failed stays the loudest.
-- **In motion:** ink cell, play triangle in sheet colour.
-- **Done:** pale cell, filled ink square. The filled square means a real pass (for a connection, a test that succeeded).
-- **Waiting or never tested:** pale cell with muted ink, hollow square.
+### Figure
+The signature container. A sheet with a 1px hairline frame and 10px radius. Its head is a row (14px 18px 12px padding, hairline below) holding the heading: the figure or table number in expanded 700 ultramarine, then the title at 600 0.9375rem. Optional controls (Replay figure, mode toggles) sit right. The drawing takes Archivo for labels and JetBrains Mono for file names and hashes, and draws in theme colours so it works on the sheet and on a field. Figures animate with reduced-motion fallbacks: Figure 1 moves a file from upload through verify, inspect, scan and catalog to a sealed snapshot along an orbit arc, the active station ringing once a beat; Figure 3 draws the method arc as the section scrolls on wide screens.
 
-The body holds the name (semibold; mono for job IDs and event names; a link underlined in the hairline colour that turns ink on hover) with a muted detail line under it, and on the right the state word in semibold over a muted tabular time. Front-bay strips are larger: 1rem names and 16px vertical padding against 10px.
+**Problem figures (Figures 2 and 3).** Problem and fix are shown side by side or in sequence, never behind a switch. Figure 2 sets each failure as a row: a neutral "Bucket and spreadsheet" panel, an ultramarine arrow, then a tinted "With Orbidune" panel, each drawing looping its story in 4 s. Figure 3 is four cards, each an 8 s loop that plays the problem, then the same moment with Orbidune, labelled in the drawing. Both are `LiveFigure` (`components/home/live-figure.tsx`): loops run only while on screen, a Pause animation control sits in the head, and the CSS in `components/home/figures.css` moves only transform and opacity. A part's panel visibility and its animation never share an element, since both set opacity. Under reduced motion, or before JavaScript runs, every drawing rests in its fixed state, and the two sentences above each drawing tell the whole story without motion.
 
-#### Racks, Board Line and Empty Slot
-- **Rack header:** heading (bay title for "Needs you", panel title elsewhere), optional muted note, and an underlined text link on the right. Sub-racks inside the bay use the strip-name size.
-- **Board line:** the description under the overview title counts the racks: a 2px-radius pill that is orange with ink ("N need you") above zero and faint ("Nothing needs you") at zero, then plain tabular counts for in motion, ready and completed.
-- **Short list:** a rack shows four strips and a ghost "Show N more" button.
-- **Empty slot:** a dashed edge-colour box with muted text saying what would appear and why it is empty. Permission gaps name the missing key in mono.
+### Booktabs table
+A table title in the figure-title style with its number, then three rules and no verticals: 2px ink above the header, 1px ink under it, hairlines between rows, 2px ink closing the body. Cells have 12px padding, tabular figures, row headers in 600. Outcomes are a square mark plus a word.
 
-#### Activity Log
-A plain list between hairline rules, newest first, time on the left: muted tabular time, the event name in mono with "by" and the actor muted, and a state badge on the right. No panel around it.
+### Fields (ultramarine and night)
+Full-bleed coloured grounds with white text. The ultramarine field holds the homepage hero and the auth aside; the night field holds the close and footer. Each carries its own muted and line tones and switches focus rings to saffron. Figures set on a field keep their white sheet.
 
-#### Outcome Marks and State Badges
-Check outcomes are told by shape and word: passed is a filled square; partial a half-filled square; warning a ringed square with an orange centre; failed an orange square with a cross; not checked a dashed empty square. State badges add a 12px mark to a 2px-radius pill: failed is orange with a crossed square, warning is faint with a ringed square and an orange core, active is ink with a play triangle, done is faint with a filled square, neutral is faint with no mark. The word always appears.
-
-#### Tables and Meters
-Tables sit in a faint-bordered scroll region with tabular numerals, muted semibold headers and faint rules. Usage meters state used and limit in text; the bar is a well track with an ink fill that turns orange with a 1px ink outline above 90%.
-
-#### Icons
-Phosphor only. Regular weight by default, fill weight for the current nav item. Icons support a word; they do not replace one.
-
-#### Motion
-- **UI transitions:** 150ms on `cubic-bezier(0.23, 1, 0.32, 1)` (the console's `ease-out`) for transform, background and border colour; press scales to 0.97.
-- **Overlays:** fade in over 200ms and out over 140ms; dialogs scale from 0.96; menus grow from their trigger from 0.96 over 160ms and leave in 110ms.
-- Reduced motion collapses every animation and transition.
-
-### Homepage
-
-#### Buttons
-- **Shape:** a small accession label: square with a 10px top-left cut, at least 48px high, 22px right and 26px left padding, medium weight, optional 16px drawn arrow.
-- **Fill:** blue-black with orange text in light theme; orange with blue-black text in dark theme.
-- **Hover / Press:** lifts 2px on fine-pointer hover; scales to 0.97 on press; 160ms on the homepage ease.
-- **Links:** underlined, 5px offset, 2px thick (1px in the header), 3px on hover. Sign in in the header is a link; in the footer it is the cut button at the small step.
-
-#### Chips and Segments
-- **Chip:** a radio label, 44px high, 8px cut, rest fill `currentColor` at 14%, chosen fill solid `currentColor` with the word in the field colour behind it (`--chip-on`). Focus is the 3px inset ring; a chosen chip under focus also underlines its word.
-- **Depth segments:** the same chip blown up in em (0.5em cut) as the single large control in the depth section; choosing one repaints the whole section field (white for metadata, orange for sampled, blue-black for full) over 200ms.
-
-#### Accession Stage and Slip (signature)
-The hero stage is an orange label with a 72 to 128px cut that opens like a shutter from its cut corner. On it sits the live slip: a white label (44px cut) with the example title, the accession number at the head step, file and size, a barcode beside the mono SHA-256, then check rows divided by 2px rules at 12% ink. Each row ends in an outcome mark and its word ("Passed", "Finding", "Failed", "Clean", "Not reached", "Not tested"). A bordered release stamp sits bottom right at -2 degrees; when rejected it fills blue-black with orange text. Picking a sample reprints the rows and re-stamps.
-
-#### Stage Bar
-Five equal cells joined by 6px seams, each a flat tone stepping from the rest field (with a 2px inset ink outline) through tint 2, orange, rust, to blue-black. Each cell carries the stage name at the lead step and what happens inside at the small step; the clause sits below the cell.
-
-#### Feature Board and Fragments
-Tiles on a dense 12-column board, each a flat tone (tint 1, tint 2, white, or blue-black with orange). A `data-ui` close-up sits top-left, sized in em and cropped by the tile; name and line sit bottom-left. Tags inside fragments are square: outlined in `currentColor` at 0.12em, or solid blue-black with orange text when emphasised. Example values are labelled as examples.
-
-#### Readiness Spines
-Desktop: one open label (560px) beside folded 76px spines, all with a 16px cut, cycling tints 1 to 3. A spine is a button with the dimension name and status set vertically, the outcome mark between. Opening animates `flex-basis` over 300ms; reduced motion snaps. Below `lg` every dimension is a stacked card.
-
-#### Connection Label
-A white label (40px cut) on the orange field listing each storage provider at the lead step with what a connection needs, divided by 2px rules at 14% `currentColor`. No logos.
-
-#### Start Band and Footer Label
-The Start band is the whole link: blue-black with an orange poster word bottom-aligned, a 72 to 160px cut, a sentence and a drawn arrow top right; hover and focus swap to orange with blue-black ink over 150ms, focus outline inset 6px. The footer opens with the name at the display step on an orange label (56 to 120px cut) with the footer line and its barcode, then link columns at the small step.
-
-#### Workflow map, fix chapters and feature index
-- **Workflow map:** nine stage boxes on a 1008-unit drawing that never renders below 1:1, so its 13px labels stay 13px. Arrive, Quarantine gate, Catalog, Snapshot, Readiness and Use sit on one wired row; Second copy, Governance and Evidence are rails the full width of the path. A stage chooser (cut-corner chips) fills the chosen box, and a tint-1 chamfered label beside the drawing (the map sits on a white field) says what that stage fixes and which features belong to it, with a link to its chapter. The token rests on the chosen box's top edge, walks the wire row to a new choice, and walks the whole path once when the map first scrolls into view. Below `md` the drawing is dropped and the label sits directly under the chips.
-- **Fix chapters:** one section per problem, alternating orange and white fields. The problem is the heading (head step, left), the fix is the paragraph (right), then the working flow diagram, then "Names and values in the diagram are examples." The problem always reads before the fix.
-- **Feature index:** a real table (feature, problem, fix) inside a tint-1 chamfered label on orange, grouped under the map's nine stage names, with stage filter chips and an "N of 29 features" count.
-- **Diagram variables (set per field inside `.home`):** `--fg` ink, `--box` box fill, `--mask` label ground. On orange fields `--box-end` and `--token` are blue-black and `--box-end-ink` orange, so a path's end and the token stand off the orange; on white they fall back to `--accent` orange. Boxes are solid when the chosen path reaches them, dashed when it does not, filled where it ends. `.home .choice` restyles the diagrams' chips as cut-corner labels (14% ink tint, filled with the field ink when chosen, inset 3px focus ring); switches keep the tint and show a tick.
-- **One stage vocabulary:** the stage bar (Upload, Verify, Inspect, Promote, Pin) is the first four map stages up close, and the map's intro names that section to say so; the index groups use the map's names.
-
-#### Navigation
-Wordmark at the lead step on the left; four in-page links (small, medium, 1px underline) shown from `lg`; the console's ghost theme toggle at 44px; Sign in as an underlined link.
-
-#### Motion
-GSAP, all inside `gsap.matchMedia("(prefers-reduced-motion: no-preference)")`; the page reads complete without script.
-- **Hero rise:** headline, sentence and button rise 24px and fade in reading order (700ms, power3.out, 80ms stagger).
-- **Shutter:** the stage reveals left to right by `clip-path` inset (1.1s, power3.inOut, 200ms delay) while its contents settle from 1.06 scale at the top-left corner. This is the one loud moment.
-- **Section reveals:** marked parts rise 24px and fade once at 92% of the viewport (600ms, power3.out, 70ms stagger, batched).
-- **Slip reprint:** on a pointer choice, rows print in (320ms, 40ms stagger) and the stamp lands from 1.12 scale (300ms). Arrow-key choices and reduced motion change instantly.
-- **UI transitions:** 150 to 160ms on `cubic-bezier(0.23, 1, 0.32, 1)` for transform, background and colour; press scales to 0.97.
-- Smooth scroll is the app-wide Lenis instance from the root layout, shared with the console.
+### Code panel
+In the integrations figure, code renders in JetBrains Mono 0.875rem on an orbit-ink ground with pale ink text in both themes, under a framework tab row.
 
 ## Do's and Don'ts
 
 ### Do:
-- **Do** treat the console and the homepage as separate worlds: console work uses the console tokens, homepage work uses the `home-*` tokens inside `.home`.
-- **Do** keep the console's three levels: the frame holds the sidebar and top bar, work sits on the sheet, strips and panels sit on the sheet, and nothing nests deeper.
-- **Do** separate console surfaces with tone and the 1px hairline, and put a well one tone step toward the frame.
-- **Do** keep orange in the console to fills with ink on top, on what needs the user only; ink is the primary action.
-- **Do** give every strip a filled 40px state cell with a drawn mark, and keep the filled square for a real pass: never-tested items stay hollow.
-- **Do** use `--edge` on every console form control boundary.
-- **Do** show status with a shape and a word together (OutcomeMark, StateBadge, Strip) on both surfaces.
-- **Do** show "Not checked" as plainly as "Passed".
-- **Do** keep console corners at 2px or 4px, with 12px for the sheet alone.
-- **Do** make every homepage button, chip, segment and label an accession label: square, with only the top-left corner cut, sized to the element.
-- **Do** let homepage colour own whole full-width fields and change only at hard horizontal seams; join adjacent cells with the 6px seam.
-- **Do** keep homepage type to the five `h-*` steps plus the Start poster word, at medium weight.
-- **Do** print the text a barcode stands for beside it, and keep the barcode `aria-hidden`.
-- **Do** use mono only for IDs, keys, hashes, checksums and event names.
-- **Do** respect reduced motion for GSAP (via `gsap.matchMedia`) and Lenis on both surfaces.
+- **Do** put the figure or table number above the drawing as part of its heading, in expanded ultramarine, followed by the title.
+- **Do** use booktabs rules (2px ink, 1px ink, hairlines, 2px ink) for every results or comparison table, with tabular figures.
+- **Do** keep "Not checked" visible as its own outcome, drawn as a dashed square.
+- **Do** tell status apart by shape and word: filled, half, ringed, crossed and dashed squares.
+- **Do** put orbit ink on saffron and white on ultramarine.
+- **Do** mix new neutral tones from ink and the sheet instead of introducing a grey.
+- **Do** keep one primary action per view: the saffron pill on the homepage, the ultramarine button in the console.
+- **Do** give every animation a reduced-motion path that shows the static, complete state.
 
 ### Don't:
-- **Don't** use gradients, glass or blur, glowing orbs, dot grids or neon on either surface.
-- **Don't** use any box-shadow in the console, and don't put any shadow on the homepage except the inset focus ring.
-- **Don't** wrap overview racks in cards: the strips are the cards.
-- **Don't** set orange as text or a thin line on the light console sheet, or use it for navigation chrome or the primary button.
-- **Don't** mark a strip with a coloured side border instead of the filled state cell.
-- **Don't** bring the frame, the sheet, strips or hairline panels onto the homepage, or orange fields and cut corners into the console.
-- **Don't** round a homepage corner or cut any corner other than the top-left.
-- **Don't** use side stripes or rows of identical feature cards on the homepage.
-- **Don't** use em dashes or emoji anywhere in copy or UI.
-- **Don't** use Lucide, or Inter, Geist or Space Grotesk. Phosphor (console icons), drawn SVG marks (homepage) and Hanken Grotesk are the set.
-- **Don't** tell status by hue alone.
-- **Don't** add a privacy policy page, fake testimonials, logos, invented customer numbers or any unbacked claim.
+- **Don't** set saffron as text or as a thin line on the sheet.
+- **Don't** caption figures below the drawing; the number and title head the figure.
+- **Don't** use JetBrains Mono for labels, kickers or decorative tags; it is for hashes, paths and code.
+- **Don't** add vertical rules or zebra fills to booktabs tables.
+- **Don't** lift panels with shadows; use the frame, sheet and well tones.
+- **Don't** build a dark developer-platform hero with a neon accent, or a grid of feature cards; features are a numbered table.
+- **Don't** use an italic serif display or tracked uppercase labels.
+- **Don't** add a third hue for success, warning or charts.

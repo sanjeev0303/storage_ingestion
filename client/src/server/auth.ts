@@ -3,8 +3,8 @@ import type { NextRequest, NextResponse } from "next/server";
 
 export const BACKEND_URL = (process.env.BACKEND_URL ?? "http://localhost:8080").replace(/\/$/, "");
 
-export const ACCESS_COOKIE = "osp_at";
-export const REFRESH_COOKIE = "osp_rt";
+export const ACCESS_COOKIE = "orb_at";
+export const REFRESH_COOKIE = "orb_rt";
 
 export type Tokens = {
   access_token: string;

@@ -25,8 +25,8 @@ test.describe("signing in", () => {
   test("keeps tokens out of script: only HttpOnly cookies, nothing in storage", async ({ page, context }) => {
     await signIn(page, "OWNER");
     const cookies = await context.cookies();
-    const session = cookies.filter((c) => c.name.startsWith("osp_"));
-    expect(session.map((c) => c.name).sort()).toEqual(["osp_at", "osp_rt"]);
+    const session = cookies.filter((c) => c.name.startsWith("orb_"));
+    expect(session.map((c) => c.name).sort()).toEqual(["orb_at", "orb_rt"]);
     for (const cookie of session) {
       expect(cookie.httpOnly).toBe(true);
       expect(cookie.sameSite).toBe("Strict");

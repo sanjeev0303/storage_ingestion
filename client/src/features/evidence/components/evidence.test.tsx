@@ -115,7 +115,7 @@ describe("ComplianceScreen", () => {
           controls: [{ id: "3.3.8", title: "Protect audit information", platform: "Hash chain, anchored", status: "MET", evidence: ["last anchor at entry 42"] }],
         })),
       http.post(`${API}/compliance/regulator-access`, () =>
-        HttpResponse.json({ id: "t1", name: "Regulator: FINRA", expires_at: "2026-11-06T00:00:00Z", token: "osp_pat_example" }, { status: 201 })),
+        HttpResponse.json({ id: "t1", name: "Regulator: FINRA", expires_at: "2026-11-06T00:00:00Z", token: "orb_pat_example" }, { status: 201 })),
     );
     renderWithProviders(<ComplianceScreen />, { permissions: ["audit.read", "org.manage"] });
     expect(await screen.findByText("Protect audit information")).toBeInTheDocument();
@@ -124,9 +124,9 @@ describe("ComplianceScreen", () => {
 
     await userEvent.type(screen.getByLabelText(/Examiner/), "FINRA");
     await userEvent.click(screen.getByRole("button", { name: "Issue token" }));
-    expect(await screen.findByText("osp_pat_example")).toBeInTheDocument();
+    expect(await screen.findByText("orb_pat_example")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Done" }));
-    expect(screen.queryByText("osp_pat_example")).not.toBeInTheDocument();
+    expect(screen.queryByText("orb_pat_example")).not.toBeInTheDocument();
   });
 
   it("hides regulator access from roles that cannot manage the organization", async () => {

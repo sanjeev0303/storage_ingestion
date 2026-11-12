@@ -39,7 +39,7 @@ describe("SAML assertion consumer service", () => {
     expect(sent).toEqual({ saml_response: "PHNhbWxwOlJlc3BvbnNlLz4=", relay_state: "state-1" });
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("/sso/done?org=org-1");
-    expect(res.headers.get("set-cookie")).toContain("osp_rt=srt_saml");
+    expect(res.headers.get("set-cookie")).toContain("orb_rt=srt_saml");
   });
 
   it("sends a refusal to the sign-in page without starting a session", async () => {
@@ -51,8 +51,8 @@ describe("SAML assertion consumer service", () => {
     const res = await post({ SAMLResponse: "eA==", RelayState: "state-1" });
     expect(await res.text()).toContain("/login?sso=refused");
     const cookies = res.headers.get("set-cookie") ?? "";
-    expect(cookies).toContain("osp_sso_error=");
-    expect(cookies).not.toContain("osp_rt=");
+    expect(cookies).toContain("orb_sso_error=");
+    expect(cookies).not.toContain("orb_rt=");
   });
 
   it("refuses an incomplete post before calling the API", async () => {

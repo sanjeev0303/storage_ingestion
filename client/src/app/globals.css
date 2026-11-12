@@ -1,55 +1,76 @@
 @import "tailwindcss";
 
 /*
-  Strip board palette. The frame #E9ECE8 holds the sidebar and top bar; work sits on
-  a white sheet; ink #10161B. Specimen orange #FF7A1F only marks what needs the user:
-  it is a fill with ink on top (7:1), never text on the sheet (2.6:1).
-  Everything else is mixed from ink and the sheet.
+  Orbidune. White paper, deep orbit ink #0E1130, ultramarine #2F3BFF as the
+  figure colour, saffron #FFC21A as the one attention colour (a fill with ink on
+  top, never text on white). The console frame is a cool tint of the ink; work
+  sits on a white sheet. Everything else is mixed from ink and the sheet.
 */
 :root {
-  --frame: #e9ece8;
+  --frame: #f0f1f7;
   --ground: #ffffff;
-  --ink: #10161b;
-  --accent: #ff7a1f;
-  --on-accent: #10161b;
+  --ink: #0e1130;
+  --accent: #ffc21a;
+  --on-accent: #0e1130;
+  /* Ultramarine as a fill (white text on it, 6.5:1) and as a line or text colour. */
+  --ultra: #2f3bff;
+  --on-ultra: #ffffff;
+  --ultra-text: #2f3bff;
+  --ultra-soft: color-mix(in srgb, var(--ultra) 9%, var(--ground));
   /* Secondary text: 4.5:1 or better on the sheet, the frame and the faint fill, in both themes. */
-  --muted: color-mix(in srgb, var(--ink) 76%, var(--ground));
-  --faint: color-mix(in srgb, var(--ink) 8%, var(--ground));
+  --muted: color-mix(in srgb, var(--ink) 74%, var(--ground));
+  --faint: color-mix(in srgb, var(--ink) 6%, var(--ground));
   /* A well inside the sheet: one tone step toward the frame. */
-  --well: color-mix(in srgb, var(--frame) 55%, var(--ground));
-  /* Hairlines on panels, strips and rows: about 1.25:1 on the sheet. */
-  --line: color-mix(in srgb, var(--ink) 11%, var(--ground));
+  --well: color-mix(in srgb, var(--frame) 60%, var(--ground));
+  /* Hairlines on panels, rows and figure frames. */
+  --line: color-mix(in srgb, var(--ink) 12%, var(--ground));
   /* Form control boundary: 3:1 against the sheet (WCAG 1.4.11). */
   --edge: color-mix(in srgb, var(--ink) 55%, var(--ground));
 
-  --radius: 4px;
-  --radius-sheet: 12px;
-  /* Width of the homepage container; full-width layouts align their text to its edge. */
+  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%230e1130' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
+  /* Saffron deep enough for a small mark on a light ground (3:1). */
+  --warn-mark: #a87700;
+  /* The hero field, also the header's colour while it sits over the hero. */
+  --field-ultra: #2f3bff;
+  --on-field-muted: color-mix(in srgb, #ffffff 86%, #2f3bff);
+  --on-field-line: color-mix(in srgb, #ffffff 28%, #2f3bff);
+  --radius: 6px;
+  --radius-sheet: 14px;
   --content-max: 80rem;
-  --radius-sm: 2px;
+  --radius-sm: 4px;
   color-scheme: light;
 }
 
 :root[data-theme="dark"] {
-  --frame: #0b1013;
-  --ground: #141b20;
-  --ink: #e4e9e5;
-  --faint: color-mix(in srgb, var(--ink) 10%, var(--ground));
-  --muted: color-mix(in srgb, var(--ink) 80%, var(--ground));
-  --well: color-mix(in srgb, var(--frame) 50%, var(--ground));
-  --line: color-mix(in srgb, var(--ink) 14%, var(--ground));
+  --warn-mark: #ffc21a;
+  --field-ultra: #2a33d6;
+  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23e8eaf8' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
+  --frame: #070919;
+  --ground: #0e112b;
+  --ink: #e8eaf8;
+  --ultra: #3d48ff;
+  --ultra-text: #a3a9ff;
+  --faint: color-mix(in srgb, var(--ink) 9%, var(--ground));
+  --muted: color-mix(in srgb, var(--ink) 78%, var(--ground));
+  --well: color-mix(in srgb, var(--frame) 55%, var(--ground));
+  --line: color-mix(in srgb, var(--ink) 15%, var(--ground));
   color-scheme: dark;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --frame: #0b1013;
-    --ground: #141b20;
-    --ink: #e4e9e5;
-    --faint: color-mix(in srgb, var(--ink) 10%, var(--ground));
-    --muted: color-mix(in srgb, var(--ink) 80%, var(--ground));
-    --well: color-mix(in srgb, var(--frame) 50%, var(--ground));
-    --line: color-mix(in srgb, var(--ink) 14%, var(--ground));
+    --warn-mark: #ffc21a;
+    --field-ultra: #2a33d6;
+    --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23e8eaf8' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
+    --frame: #070919;
+    --ground: #0e112b;
+    --ink: #e8eaf8;
+    --ultra: #3d48ff;
+    --ultra-text: #a3a9ff;
+    --faint: color-mix(in srgb, var(--ink) 9%, var(--ground));
+    --muted: color-mix(in srgb, var(--ink) 78%, var(--ground));
+    --well: color-mix(in srgb, var(--frame) 55%, var(--ground));
+    --line: color-mix(in srgb, var(--ink) 15%, var(--ground));
     color-scheme: dark;
   }
 }
@@ -59,23 +80,26 @@
   --color-ink: var(--ink);
   --color-accent: var(--accent);
   --color-on-accent: var(--on-accent);
+  --color-ultra: var(--ultra);
+  --color-on-ultra: var(--on-ultra);
+  --color-ultra-text: var(--ultra-text);
+  --color-ultra-soft: var(--ultra-soft);
   --color-muted: var(--muted);
   --color-faint: var(--faint);
   --color-edge: var(--edge);
   --color-frame: var(--frame);
   --color-well: var(--well);
   --color-line: var(--line);
-  --font-sans: var(--font-hanken), ui-sans-serif, system-ui, sans-serif;
+  --font-sans: var(--font-archivo), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-jetbrains), ui-monospace, monospace;
-  /* Corners stay crisp: every radius step resolves to 2px or 4px. */
-  --radius-xs: 2px;
-  --radius-sm: 2px;
-  --radius-md: 4px;
-  --radius-lg: 4px;
-  --radius-xl: 4px;
-  --radius-2xl: 4px;
-  /* A stronger ease-out than the built-in: starts fast, settles gently. */
+  --radius-xs: 3px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 10px;
+  --radius-2xl: 14px;
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
   --text-xs: 0.75rem;
   --text-sm: 0.8125rem;
   --text-base: 0.875rem;
@@ -88,7 +112,7 @@
 html {
   background: var(--ground);
   color: var(--ink);
-  scrollbar-color: var(--muted) var(--ground);
+  scrollbar-color: var(--edge) var(--ground);
 }
 
 body {
@@ -107,18 +131,8 @@ body {
 }
 
 :focus-visible {
-  outline: 2px solid var(--ink);
+  outline: 2px solid var(--ultra-text);
   outline-offset: 2px;
-}
-
-:root[data-theme="dark"] :focus-visible {
-  outline-color: var(--accent);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) :focus-visible {
-    outline-color: var(--accent);
-  }
 }
 
 button,
@@ -127,6 +141,8 @@ input,
 select,
 textarea {
   touch-action: manipulation;
+  /* Presses answer with their own :active state, not the grey tap flash. */
+  -webkit-tap-highlight-color: transparent;
 }
 
 table {
@@ -136,10 +152,16 @@ table {
 input,
 textarea,
 select {
-  caret-color: var(--ink);
+  caret-color: var(--ultra-text);
 }
 
-/* Flat surfaces, no shadows. The old names stay so every screen takes the new look:
+/* Expanded Archivo: headings, the wordmark and figure titles. */
+@utility font-wide {
+  font-stretch: 125%;
+  font-variation-settings: "wdth" 125;
+}
+
+/* Flat surfaces. The old names stay so every console screen takes the new look:
    neo is a panel on the sheet, neo-sm a control, neo-in a well, neo-in-sm a small well. */
 @utility neo {
   background: var(--ground);
@@ -149,7 +171,7 @@ select {
 
 @utility neo-sm {
   background: var(--ground);
-  border: 1px solid color-mix(in srgb, var(--ink) 22%, var(--ground));
+  border: 1px solid color-mix(in srgb, var(--ink) 20%, var(--ground));
   border-radius: var(--radius);
 }
 
@@ -179,15 +201,6 @@ select {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
-}
-
-/* Landing blocks wait unseen until they scroll into view. They fade with
-   opacity, not visibility, so Tab still reaches them; once focus is inside
-   one it shows at once, whatever the scroll position. */
-[data-reveal]:focus-within,
-[data-reveal-focus]:focus-within {
-  opacity: 1 !important;
-  transform: none !important;
 }
 
 /* Overlays and menus. Entering is a short ease-out; leaving is quicker still.
@@ -250,25 +263,29 @@ select {
   animation: menu-out 110ms var(--ease-out) forwards;
 }
 
-/* Homepage type: five steps, nothing under 13px. The console keeps its own fixed scale. */
+/* ---------- Homepage: the dataset paper ----------
+   Five type steps, nothing under 13px. Display and section heads are expanded Archivo. */
 @utility t-display {
-  font-size: clamp(2.5rem, 5.4vw, 4.75rem);
+  font-size: clamp(2.125rem, 1rem + 2.9vw, 3.25rem);
   line-height: 1.02;
-  letter-spacing: -0.03em;
-  font-weight: 600;
+  letter-spacing: -0.035em;
+  font-weight: 700;
+  font-stretch: 125%;
+  font-variation-settings: "wdth" 125;
   text-wrap: balance;
 }
 @utility t-h2 {
-  font-size: clamp(1.75rem, 3.2vw, 2.75rem);
-  line-height: 1.1;
-  letter-spacing: -0.02em;
-  font-weight: 600;
+  font-size: clamp(1.875rem, 1.1rem + 2.4vw, 3.25rem);
+  line-height: 1.06;
+  letter-spacing: -0.03em;
+  font-weight: 700;
+  font-stretch: 125%;
+  font-variation-settings: "wdth" 125;
   text-wrap: balance;
 }
 @utility t-lead {
-  font-size: clamp(1.25rem, 2vw, 1.875rem);
-  line-height: 1.25;
-  font-weight: 450;
+  font-size: clamp(1.125rem, 1rem + 0.5vw, 1.375rem);
+  line-height: 1.4;
   letter-spacing: -0.01em;
 }
 @utility t-body {
@@ -276,272 +293,269 @@ select {
   line-height: 1.6;
 }
 @utility t-small {
-  font-size: 0.8125rem;
+  font-size: 0.875rem;
   line-height: 1.45;
 }
 
-/* Diagram text and strokes follow the section's colour. Amber is the one accent. */
-.diagram text {
-  font-family: var(--font-hanken), ui-sans-serif, system-ui, sans-serif;
+/* A figure: hairline frame, its number and title as a heading above the drawing. */
+.figure {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--ground);
+  color: var(--ink);
+}
+.figure-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 18px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.figure-head h3,
+.figure-head h2 {
+  font-size: 0.9375rem;
+  line-height: 1.3;
+  font-weight: 600;
+}
+.fig-no {
+  font-weight: 700;
+  font-stretch: 125%;
+  font-variation-settings: "wdth" 125;
+  color: var(--ultra-text);
+  margin-right: 0.4em;
+}
+
+/* Drawings take their colours from the theme. */
+.drawing text {
+  font-family: var(--font-archivo), ui-sans-serif, system-ui, sans-serif;
   fill: currentColor;
 }
-.diagram .mono {
+.drawing .mono {
   font-family: var(--font-jetbrains), ui-monospace, monospace;
 }
 
-/* A homepage choice: a square chip in the section's ink, filled when chosen.
-   --fg and --mask come from the section, so it reads on every field. */
-.choice {
+/* Booktabs tables: three rules and no verticals. */
+.booktabs {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+.booktabs thead th {
+  text-align: left;
+  font-weight: 600;
+  padding: 10px 12px 8px;
+  border-top: 2px solid var(--ink);
+  border-bottom: 1px solid var(--ink);
+}
+.booktabs td,
+.booktabs tbody th {
+  padding: 12px;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+}
+.booktabs tbody tr:last-child td,
+.booktabs tbody tr:last-child th {
+  border-bottom: 2px solid var(--ink);
+}
+
+@layer components {
+/* The homepage's one button: saffron with ink, a small step up on hover, a press on click. */
+.btn-orb {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  min-height: 44px;
-  padding: 0 14px;
-  border: 1.5px solid var(--fg, currentColor);
-  font-weight: 500;
-  cursor: pointer;
-  user-select: none;
-  touch-action: manipulation;
-  -webkit-tap-highlight-color: transparent;
-  transition:
-    transform 150ms var(--ease-out),
-    background-color 150ms var(--ease-out),
-    color 150ms var(--ease-out);
-}
-.choice:has(:checked) {
-  background-color: var(--fg, currentColor);
-  color: var(--mask, var(--ground));
-}
-/* A switch shows its state in its box, not by filling. */
-.choice.switch:has(:checked) {
-  background-color: transparent;
-  color: inherit;
-}
-.choice:has(:focus-visible) {
-  outline: 2px solid var(--fg, currentColor);
-  outline-offset: 2px;
-}
-.choice:active {
-  transform: scale(0.97);
-}
-@media (hover: hover) and (pointer: fine) {
-  .choice:not(:has(:checked)):hover {
-    background-color: color-mix(in srgb, var(--fg, currentColor) 12%, transparent);
-  }
-}
-
-/* ---------- Homepage: specimen accession ----------
-   Scoped to .home so the console keeps its own world. Light: drenched
-   specimen-label orange and white fields with blue-black ink. Dark: blue-black
-   fields with orange as the large-scale motif. */
-.home {
-  --h-orange: #ff7a1f;
-  --h-night: #050f16;
-  --h-a: var(--h-orange); /* the drenched field */
-  --h-b: #ffffff; /* the rest field */
-  --h-ink: var(--h-night);
-  --h-mark: var(--h-orange); /* the accession label at large scale */
-  --h-mark-ink: var(--h-night);
-  --h-action: var(--h-night);
-  --h-action-ink: var(--h-orange);
-  --h-tint-1: #ffe6d4;
-  --h-tint-2: #ffc9a3;
-  --h-tint-3: #ffad75;
-  --h-ease: cubic-bezier(0.23, 1, 0.32, 1);
-  /* The console's outcome marks fill with --accent; here it is the orange. */
-  --accent: var(--h-orange);
-  --on-accent: var(--h-night);
-  background: var(--h-b);
-  color: var(--h-ink);
-  font-family: var(--font-hanken), ui-sans-serif, system-ui, sans-serif;
-}
-:root[data-theme="dark"] .home {
-  --h-b: var(--h-night);
-  --h-ink: #f3ebe3;
-  --h-action: var(--h-orange);
-  --h-action-ink: var(--h-night);
-  --h-tint-1: #13242f;
-  --h-tint-2: #1b2f3b;
-  --h-tint-3: #233946;
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .home {
-    --h-b: var(--h-night);
-    --h-ink: #f3ebe3;
-    --h-action: var(--h-orange);
-    --h-action-ink: var(--h-night);
-    --h-tint-1: #13242f;
-    --h-tint-2: #1b2f3b;
-    --h-tint-3: #233946;
-  }
-}
-.home ::selection {
-  background: var(--h-night);
-  color: var(--h-orange);
-}
-.home :focus-visible {
-  outline: 3px solid var(--h-ink);
-  outline-offset: 3px;
-}
-.home .field-a {
-  background: var(--h-orange);
-  color: var(--h-night);
-}
-.home .field-b {
-  background: var(--h-b);
-  color: var(--h-ink);
-}
-.home .field-mark {
-  background: var(--h-mark);
-  color: var(--h-mark-ink);
-}
-.home .field-night {
-  background: var(--h-night);
-  color: var(--h-orange);
-}
-/* The motif: an accession label, its top-left corner cut. Four points only. */
-.home .label-cut {
-  clip-path: polygon(var(--cut, 12px) 0, 100% 0, 100% 100%, 0 100%, 0 var(--cut, 12px));
-}
-
-/* Five type steps; nothing under 13px. */
-.home .h-display {
-  font-size: clamp(3.25rem, 5.2vw, 5rem);
-  line-height: 0.95;
-  letter-spacing: -0.04em;
-  font-weight: 500;
-  text-wrap: balance;
-}
-.home .h-head {
-  font-size: clamp(2rem, 1.3rem + 3.2vw, 4rem);
-  line-height: 0.98;
-  letter-spacing: -0.04em;
-  font-weight: 500;
-  text-wrap: balance;
-}
-.home .h-lead {
-  font-size: clamp(1.25rem, 1.1rem + 0.7vw, 1.625rem);
-  line-height: 1.25;
-  letter-spacing: -0.01em;
-  font-weight: 500;
-}
-.home .h-body {
-  font-size: clamp(1.0625rem, 1rem + 0.25vw, 1.1875rem);
-  line-height: 1.45;
-  letter-spacing: -0.005em;
-}
-.home .h-small {
-  font-size: clamp(0.8125rem, 0.79rem + 0.1vw, 0.875rem);
-  line-height: 1.4;
-}
-
-/* The one button shape: a small label, cut corner, flat fill. */
-.home .h-button {
-  --cut: 10px;
-  display: inline-flex;
-  align-items: center;
+  justify-content: center;
   gap: 10px;
   min-height: 48px;
-  padding: 0 22px 0 26px;
-  background: var(--h-action);
-  color: var(--h-action-ink);
-  font-weight: 500;
-  clip-path: polygon(var(--cut) 0, 100% 0, 100% 100%, 0 100%, 0 var(--cut));
-  transition: transform 160ms var(--h-ease), background-color 160ms var(--h-ease);
-  touch-action: manipulation;
+  padding: 0 22px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+  font-size: 1rem;
+  white-space: nowrap;
+  transition:
+    transform 160ms var(--ease-out),
+    background-color 160ms var(--ease-out);
 }
-.home .h-button:active {
+.btn-orb:active {
   transform: scale(0.97);
 }
-.home .h-link {
+.link-orb {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  font-weight: 600;
   text-decoration: underline;
-  text-underline-offset: 5px;
   text-decoration-thickness: 2px;
+  text-underline-offset: 6px;
+  transition: text-decoration-thickness 160ms var(--ease-out);
 }
 @media (hover: hover) and (pointer: fine) {
-  .home .h-button:hover {
+  .btn-orb:hover {
     transform: translateY(-2px);
+    background: color-mix(in srgb, var(--accent) 88%, white);
   }
-  .home .h-link:hover {
+  .link-orb:hover {
     text-decoration-thickness: 3px;
   }
 }
-
-/* Chips in product fragments and controls: square, chosen ones filled. */
-.home .h-chip {
-  --cut: 8px;
-  display: inline-flex;
-  align-items: center;
-  min-height: 44px;
-  padding: 0 14px 0 16px;
-  background: color-mix(in srgb, currentColor 14%, transparent);
-  clip-path: polygon(var(--cut) 0, 100% 0, 100% 100%, 0 100%, 0 var(--cut));
-  font-weight: 500;
-  cursor: pointer;
-  user-select: none;
-  touch-action: manipulation;
-  -webkit-tap-highlight-color: transparent;
-  transition: transform 150ms var(--h-ease), background-color 150ms var(--h-ease), color 150ms var(--h-ease);
-}
-.home .h-chip:active {
-  transform: scale(0.97);
-}
-.home .h-chip:has(:checked) {
-  background: currentColor;
-}
-.home .h-chip:has(:checked) > span {
-  color: var(--chip-on, var(--h-b));
-}
-.home .h-chip:has(:focus-visible) {
-  /* clip-path would cut an outline, so focus shows as an inset ring. */
-  box-shadow: inset 0 0 0 3px currentColor;
-}
-.home .h-chip:has(:checked:focus-visible) > span {
-  text-decoration: underline;
-  text-underline-offset: 4px;
 }
 
-/* The flow diagrams and outcome marks are shared with the console; inside the
-   homepage they read the home palette. Each chapter sets --fg (its ink), --box
-   (box fill) and --mask (label ground) for its field. */
-.home {
-  --ground: var(--h-b);
-  --ink: var(--h-ink);
-  --faint: var(--h-tint-1);
-  --muted: color-mix(in srgb, var(--h-ink) 76%, var(--h-b));
-  --edge: color-mix(in srgb, var(--h-ink) 55%, var(--h-b));
+/* The ultramarine abstract field: white text, saffron focus. It keeps the page's
+   tokens, so a figure set on it still draws in the theme's own colours. */
+.field-ultra {
+  --on-field-muted: color-mix(in srgb, #ffffff 86%, #2f3bff);
+  --on-field-line: color-mix(in srgb, #ffffff 28%, #2f3bff);
+  --logo-dune: rgb(255 255 255 / 0.45);
+  --logo-gap: var(--field-ultra);
+  background: var(--field-ultra);
+  color: #ffffff;
 }
-.home .field-a {
-  --fg: var(--h-night);
-  --box: #ffffff;
-  --mask: var(--h-orange);
-  --faint: #ffffff;
-  /* On an orange field the end of a path and the token are blue-black. */
-  --box-end: var(--h-night);
-  --box-end-ink: var(--h-orange);
-  --token: var(--h-night);
+.field-ultra :focus-visible {
+  outline-color: var(--accent);
 }
-.home .field-b {
-  --fg: var(--h-ink);
-  --box: var(--h-tint-1);
-  --mask: var(--h-b);
+
+
+/* The active station in Figure 1 rings once a beat while the file is there. */
+@keyframes orb-ping {
+  from {
+    opacity: 0.9;
+    transform: scale(0.7);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1.35);
+  }
 }
-.home .choice {
-  --cut: 8px;
-  border: 0;
-  padding: 0 14px 0 16px;
-  background: color-mix(in srgb, var(--fg, currentColor) 14%, transparent);
-  clip-path: polygon(var(--cut) 0, 100% 0, 100% 100%, 0 100%, 0 var(--cut));
+.orb-ping {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: orb-ping 900ms var(--ease-out) infinite;
 }
-.home .choice:has(:checked) {
-  background: var(--fg, currentColor);
-  color: var(--mask, var(--ground));
+
+/* The orbit-night field under the close and the footer. */
+.field-night {
+  --on-field-muted: color-mix(in srgb, #ffffff 80%, #0e1130);
+  --on-field-line: color-mix(in srgb, #ffffff 18%, #0e1130);
+  --night: #0e1130;
+  --logo-dune: #7c84ff;
+  --logo-gap: var(--night);
+  background: var(--night);
+  color: #ffffff;
 }
-.home .choice:has(:focus-visible) {
-  outline: none;
-  box-shadow: inset 0 0 0 3px var(--fg, currentColor);
+.field-night :focus-visible {
+  outline-color: var(--accent);
 }
-.home .choice.switch:has(:checked) {
-  background: color-mix(in srgb, var(--fg, currentColor) 14%, transparent);
-  color: var(--fg, currentColor);
+:root[data-theme="dark"] .field-night {
+  --night: #070919;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .field-night {
+    --night: #070919;
+  }
+}
+
+/* The hero enters once on load: text first, the figure a beat later. */
+@keyframes enter {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+    filter: blur(4px);
+  }
+}
+[data-enter] {
+  animation: enter 700ms var(--ease-out) both;
+}
+[data-enter] + [data-enter] {
+  animation-delay: 140ms;
+}
+
+/* Figures on a phone: the drawings scale down, so their words scale up or step aside. */
+@media (max-width: 639px) {
+  .fig1-note,
+  .fig3-label {
+    display: none;
+  }
+  .fig1-name {
+    font-size: 22px;
+  }
+  .fig1-card {
+    display: none;
+  }
+  .fig3-rail {
+    display: none;
+  }
+  .fig3-title {
+    font-size: 44px;
+  }
+}
+@media (min-width: 640px) {
+  .fig3-num {
+    display: none;
+  }
+}
+
+/* Native selects: the browser's chevron replaced by one in the theme's ink. */
+.select-orb {
+  appearance: none;
+  background-image: var(--chevron);
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 16px;
+  padding-right: 2.25rem;
+}
+
+/* The orbit line: one stroke down the page's left margin from the end of the
+   hero to the close, with a stop beside every section heading. Wide screens only. */
+.orbit-page {
+  position: relative;
+}
+.orbit-line {
+  display: none;
+}
+@media (min-width: 1024px) {
+  .orbit-line {
+    display: block;
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    left: calc(max(0px, (100% - var(--content-max)) / 2) + 16px);
+    background: var(--ultra-text);
+    pointer-events: none;
+    z-index: 2;
+  }
+  .orbit-stop {
+    position: relative;
+  }
+  .orbit-stop::before {
+    content: "";
+    position: absolute;
+    left: -38px;
+    top: 0.32em;
+    width: 14px;
+    height: 14px;
+    border-radius: 999px;
+    background: var(--ground);
+    border: 3px solid var(--ultra-text);
+    z-index: 3;
+  }
+  .orbit-tail {
+    bottom: auto;
+    height: calc(8rem + 0.6em);
+    font-size: clamp(1.875rem, 1.1rem + 2.4vw, 3.25rem);
+  }
+  .field-night .orbit-stop::before {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+}
+
+/* Paper tables: a title line, then three rules and no frame. */
+.table-title {
+  padding-bottom: 12px;
+  font-size: 0.9375rem;
+  line-height: 1.35;
+  font-weight: 600;
 }

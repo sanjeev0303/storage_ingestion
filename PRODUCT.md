@@ -16,7 +16,7 @@ Data and ML platform engineers working inside an organization. They connect stor
 
 ## Product Purpose
 
-A management console for a multi-tenant object storage platform. It exposes real backend capabilities: storage connections (platform-managed, AWS S3, Cloudflare R2, GCS, Azure Blob, S3-compatible), multipart uploads, bulk ingestion by manifest, the object catalog and versions, managed datasets with immutable snapshots, validation and readiness reports, lineage, lifecycle and audit. Success is that an engineer can trust what the screen says: nothing is shown as done until the backend confirms it.
+Orbidune (renamed from Object Storage on 2026-11-12): a management console for a multi-tenant object storage platform. API tokens start with `orb_pat_`; tokens issued earlier as `osp_pat_` still work. The SDK package names (`osp`) are unchanged. It exposes real backend capabilities: storage connections (platform-managed, AWS S3, Cloudflare R2, GCS, Azure Blob, S3-compatible), multipart uploads, bulk ingestion by manifest, the object catalog and versions, managed datasets with immutable snapshots, validation and readiness reports, lineage, lifecycle and audit. Success is that an engineer can trust what the screen says: nothing is shown as done until the backend confirms it.
 
 ## Positioning
 

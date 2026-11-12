@@ -48,7 +48,7 @@ describe("EdgeScreen", () => {
     server.use(
       http.post(`${API}/edge-devices`, async ({ request }) => {
         body = await request.json();
-        return HttpResponse.json({ device: device({ name: "rig" }), token: "osp_pat_example" }, { status: 201 });
+        return HttpResponse.json({ device: device({ name: "rig" }), token: "orb_pat_example" }, { status: 201 });
       }),
     );
     renderWithProviders(<EdgeScreen />, { permissions: ["org.read", "org.manage"] });
@@ -56,9 +56,9 @@ describe("EdgeScreen", () => {
     await userEvent.type(screen.getByLabelText(/^Name/), "rig");
     await userEvent.selectOptions(screen.getByLabelText(/^Dataset/), "ds1");
     await userEvent.click(screen.getByRole("button", { name: "Register device" }));
-    expect(await screen.findByText("osp_pat_example")).toBeInTheDocument();
+    expect(await screen.findByText("orb_pat_example")).toBeInTheDocument();
     await waitFor(() => expect(body).toEqual({ name: "rig", dataset_id: "ds1", path_prefix: "" }));
     await userEvent.click(screen.getByRole("button", { name: "Done" }));
-    expect(screen.queryByText("osp_pat_example")).not.toBeInTheDocument();
+    expect(screen.queryByText("orb_pat_example")).not.toBeInTheDocument();
   });
 });

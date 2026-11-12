@@ -32,7 +32,7 @@ export function ThemeToggle({ variant = "secondary", className }: { variant?: "s
     const next: Theme = theme === "dark" ? "light" : "dark";
     document.documentElement.dataset.theme = next;
     try {
-      localStorage.setItem("osp.theme", next);
+      localStorage.setItem("orb.theme", next);
     } catch {
       // the choice then lasts until reload
     }

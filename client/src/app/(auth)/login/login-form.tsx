@@ -70,7 +70,7 @@ export function LoginForm({ ssoError }: { ssoError?: string }) {
 
   return (
     <Panel as="div" className="w-full max-w-md" padded>
-      <h1 className="text-2xl font-semibold tracking-tight">Sign in</h1>
+      <h1 className="font-wide text-[1.875rem] leading-tight font-bold tracking-[-0.025em]">Sign in</h1>
       <p className="mt-1 text-base text-muted">Use the account your organization gave you.</p>
 
       <form onSubmit={handleSubmit(onSubmit)} noValidate className="mt-6 flex flex-col gap-5">

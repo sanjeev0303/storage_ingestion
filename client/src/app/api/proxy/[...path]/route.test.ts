@@ -40,7 +40,7 @@ describe("API proxy", () => {
       }),
     );
     const res = await call(GET, "catalog/objects", {
-      cookie: "osp_at=sat_one; osp_rt=srt_one",
+      cookie: "orb_at=sat_one; orb_rt=srt_one",
       headers: { "x-organization-id": "org-1" },
     });
     expect(res.status).toBe(200);
@@ -60,7 +60,7 @@ describe("API proxy", () => {
     const res = await call(POST, "uploads", {
       method: "POST",
       body: "{}",
-      cookie: "osp_at=sat_x; osp_rt=srt_x",
+      cookie: "orb_at=sat_x; orb_rt=srt_x",
       headers: { origin: "http://evil.example" },
     });
     expect(res.status).toBe(403);
@@ -105,12 +105,12 @@ describe("API proxy", () => {
         return HttpResponse.json({ objects: [] });
       }),
     );
-    const res = await call(GET, "catalog/objects", { cookie: "osp_rt=srt_expired_access" });
+    const res = await call(GET, "catalog/objects", { cookie: "orb_rt=srt_expired_access" });
     expect(res.status).toBe(200);
     expect(bearer).toBe("Bearer sat_renewed");
     const cookies = res.headers.getSetCookie().join("\n");
-    expect(cookies).toContain("osp_at=sat_renewed");
-    expect(cookies).toContain("osp_rt=srt_renewed");
+    expect(cookies).toContain("orb_at=sat_renewed");
+    expect(cookies).toContain("orb_rt=srt_renewed");
     expect(cookies).toMatch(/HttpOnly/i);
     expect(cookies).toMatch(/SameSite=strict/i);
   });
@@ -130,23 +130,23 @@ describe("API proxy", () => {
     const res = await call(POST, "uploads", {
       method: "POST",
       body: '{"file_name":"a.bin"}',
-      cookie: "osp_at=sat_stale; osp_rt=srt_for_retry",
+      cookie: "orb_at=sat_stale; orb_rt=srt_for_retry",
       headers: { origin: "http://localhost:3100", "content-type": "application/json" },
     });
     expect(res.status).toBe(201);
     expect(received).toEqual(['{"file_name":"a.bin"}']);
-    expect(res.headers.getSetCookie().join("\n")).toContain("osp_at=sat_second");
+    expect(res.headers.getSetCookie().join("\n")).toContain("orb_at=sat_second");
   });
 
   it("ends the session when the refresh token is refused", async () => {
     server.use(
       http.post(`${BACKEND}/auth/refresh`, () => HttpResponse.json({ error: "no", code: "refresh_reused" }, { status: 401 })),
     );
-    const res = await call(GET, "catalog/objects", { cookie: "osp_rt=srt_revoked" });
+    const res = await call(GET, "catalog/objects", { cookie: "orb_rt=srt_revoked" });
     expect(res.status).toBe(401);
     const cookies = res.headers.getSetCookie().join("\n");
-    expect(cookies).toContain("osp_at=;");
-    expect(cookies).toContain("osp_rt=;");
+    expect(cookies).toContain("orb_at=;");
+    expect(cookies).toContain("orb_rt=;");
   });
 
   it("answers 401, not a broken response, when a revoked session cannot be refreshed", async () => {
@@ -154,10 +154,10 @@ describe("API proxy", () => {
       http.get(`${BACKEND}/auth/sessions`, () => HttpResponse.json({ error: "session revoked", code: "unauthenticated" }, { status: 401 })),
       http.post(`${BACKEND}/auth/refresh`, () => HttpResponse.json({ error: "no", code: "unauthenticated" }, { status: 401 })),
     );
-    const res = await call(GET, "auth/sessions", { cookie: "osp_at=sat_revoked; osp_rt=srt_revoked" });
+    const res = await call(GET, "auth/sessions", { cookie: "orb_at=sat_revoked; orb_rt=srt_revoked" });
     expect(res.status).toBe(401);
     expect(await res.json()).toMatchObject({ code: "unauthenticated" });
-    expect(res.headers.getSetCookie().join(" ")).toContain("osp_rt=;");
+    expect(res.headers.getSetCookie().join(" ")).toContain("orb_rt=;");
   });
 
   it("passes download headers and the body through", async () => {
@@ -175,7 +175,7 @@ describe("API proxy", () => {
       ),
     );
     const res = await call(GET, "assets/a1/content", {
-      cookie: "osp_at=sat_dl; osp_rt=srt_dl",
+      cookie: "orb_at=sat_dl; orb_rt=srt_dl",
       headers: { range: "bytes=0-4" },
     });
     expect(res.status).toBe(206);
@@ -189,7 +189,7 @@ describe("API proxy", () => {
     server.use(http.delete(`${BACKEND}/auth/sessions/s9`, () => new HttpResponse(null, { status: 204 })));
     const res = await call(DELETE, "auth/sessions/s9", {
       method: "DELETE",
-      cookie: "osp_at=sat_d; osp_rt=srt_d",
+      cookie: "orb_at=sat_d; orb_rt=srt_d",
       headers: { origin: "http://localhost:3100" },
     });
     expect(res.status).toBe(204);
@@ -206,13 +206,13 @@ describe("API proxy", () => {
     // With no proxy in front, the last entry is the connection's address;
     // anything the caller wrote before it is dropped.
     await call(GET, "catalog/objects", {
-      cookie: "osp_at=sat_ip; osp_rt=srt_ip",
+      cookie: "orb_at=sat_ip; orb_rt=srt_ip",
       headers: { "x-forwarded-for": "10.9.9.9, 203.0.113.5" },
     });
     expect(forwarded).toBe("203.0.113.5");
     // Something that is not an address is not forwarded at all.
     await call(GET, "catalog/objects", {
-      cookie: "osp_at=sat_ip; osp_rt=srt_ip",
+      cookie: "orb_at=sat_ip; orb_rt=srt_ip",
       headers: { "x-forwarded-for": "not-an-address" },
     });
     expect(forwarded).toBeNull();
@@ -227,7 +227,7 @@ describe("API proxy", () => {
       }),
       http.get(`${BACKEND}/catalog/objects`, () => HttpResponse.json({ objects: [] })),
     );
-    const res = await call(GET, "catalog/objects", { cookie: "osp_rt=srt_ip_refresh", headers: { "x-forwarded-for": "198.51.100.7" } });
+    const res = await call(GET, "catalog/objects", { cookie: "orb_rt=srt_ip_refresh", headers: { "x-forwarded-for": "198.51.100.7" } });
     expect(res.status).toBe(200);
     expect(refreshFrom).toBe("198.51.100.7");
   });
@@ -245,7 +245,7 @@ describe("API proxy", () => {
 
     const tooLarge = await call(POST, "uploads", {
       method: "POST",
-      cookie: "osp_at=sat_big; osp_rt=srt_big",
+      cookie: "orb_at=sat_big; orb_rt=srt_big",
       headers: { origin: "http://localhost:3100", "content-length": String(18 * 1024 * 1024) },
       body: "{}",
     });
@@ -262,7 +262,7 @@ describe("API proxy", () => {
       }),
     );
     const req = new NextRequest("http://localhost:3100/api/proxy/auth/login%3Fx", {
-      headers: { cookie: "osp_at=sat_q; osp_rt=srt_q" },
+      headers: { cookie: "orb_at=sat_q; orb_rt=srt_q" },
     });
     await GET(req, { params: Promise.resolve({ path: ["auth", "login?x"] }) });
     expect(seenPath).toBe("/api/v1/auth/login%3Fx");

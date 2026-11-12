@@ -11,7 +11,7 @@ const base =
   "disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50";
 
 const variants: Record<ButtonVariant, string> = {
-  primary: "bg-ink text-ground active:scale-[0.97]",
+  primary: "bg-ultra text-on-ultra hover:bg-[color-mix(in_srgb,var(--ultra)_88%,black)] active:scale-[0.97]",
   secondary: "neo-sm hover:border-edge active:scale-[0.97] active:bg-faint",
   accent: "bg-accent text-on-accent active:scale-[0.97]",
   ghost: "hover:bg-faint active:scale-[0.97] active:bg-faint",
