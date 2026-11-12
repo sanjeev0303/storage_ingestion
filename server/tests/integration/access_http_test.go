@@ -36,7 +36,7 @@ func TestHTTPAccessGovernance(t *testing.T) {
 	}
 	s.expect(t, dev, "", http.MethodPost, "/api/v1/api-tokens",
 		`{"name":"vendor","permissions":["assets.read","assets.download"],"datasets":["scans"]}`, http.StatusCreated, &vendor)
-	if !strings.HasPrefix(vendor.Token, "osp_pat_") || strings.Contains(vendor.Hint, vendor.Token) {
+	if !strings.HasPrefix(vendor.Token, "orb_pat_") || strings.Contains(vendor.Hint, vendor.Token) {
 		t.Fatalf("token: %+v", vendor)
 	}
 	var mine struct {

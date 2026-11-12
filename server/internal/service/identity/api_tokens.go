@@ -12,7 +12,11 @@ import (
 
 // APITokenPrefix starts every API token, so it is told from a session's
 // access token at a glance (and by secret scanners).
-const APITokenPrefix = "osp_pat_"
+const APITokenPrefix = "orb_pat_"
+
+// legacyAPITokenPrefix started tokens issued before the Orbidune rename.
+// They still authenticate; only the prefix changed, and it is the same length.
+const legacyAPITokenPrefix = "osp_pat_"
 
 // TokenStore finds API tokens (postgres.AccessRepository).
 type TokenStore interface {
@@ -65,4 +69,6 @@ func tokenPrincipal(p model.Principal, token *model.APIToken) model.Principal {
 	return p
 }
 
-func isAPIToken(raw string) bool { return strings.HasPrefix(raw, APITokenPrefix) }
+func isAPIToken(raw string) bool {
+	return strings.HasPrefix(raw, APITokenPrefix) || strings.HasPrefix(raw, legacyAPITokenPrefix)
+}

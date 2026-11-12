@@ -2,11 +2,11 @@ import type { ReactNode } from "react";
 import { cn } from "@/lib/utils/cn";
 
 // Check outcomes are told apart by shape and by word, never by hue alone.
-// The palette is ink, the sheet and one orange, so the shapes carry the meaning:
+// The palette is ink, the sheet and one saffron, so the shapes carry the meaning:
 //   passed        filled square
 //   partial       half-filled square (sampled or incomplete evidence)
-//   warning       square ring with an orange centre
-//   failed        orange square with a cross
+//   warning       square ring with a saffron centre
+//   failed        saffron square with a cross
 //   not assessed  dashed empty square
 export type Outcome = "passed" | "partial" | "warning" | "failed" | "not_assessed";
 
@@ -69,7 +69,7 @@ export function Outcome({ outcome, label }: { outcome: Outcome; label?: ReactNod
 // A generic state word (job state, connection status, audit outcome). Like the
 // check outcomes, it carries a shape as well as a word, so states that share a
 // fill still differ:
-//   failed     orange pill with a crossed square
+//   failed     saffron pill with a crossed square
 //   warning    quiet pill with a ringed square (needs a look, not broken)
 //   active     ink pill with a play triangle (in progress)
 //   done       quiet pill with a filled square

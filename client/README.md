@@ -1,4 +1,4 @@
-# Object Storage console
+# Orbidune console
 
 The management console for the Go API in `../server`: storage connections (bring your own storage), uploads and bulk ingestion, the object catalog, datasets with immutable snapshots, validation and readiness reports, lineage, lifecycle and audit.
 

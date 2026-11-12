@@ -1,39 +1,34 @@
 import Link from "next/link";
-import { AccessionSlip } from "./accession-slip";
-import { hero } from "./home-copy";
+import { actions, hero } from "./copy";
+import { FigureOne } from "./figure-one";
+import { Wrap } from "./wrap";
 
-// First viewport: the statement left, and the accession stage, a large label
-// with its corner cut, bleeding off the right and bottom edges.
 export function Hero() {
-  const [first, second] = hero.title.split(" checks ");
   return (
-    <section id="accession" aria-labelledby="hero-title" className="field-b relative overflow-hidden">
-      <div className="mx-auto max-w-[1440px] px-4 sm:px-10 lg:grid lg:grid-cols-12 lg:gap-x-6">
-        <div className="pt-14 lg:col-span-5 lg:col-start-1 lg:row-start-1 lg:pt-24 lg:pb-16">
-          <h1 id="hero-title" data-hero className="h-display">
-            <span className="block">{first}</span>
-            <span className="block">checks {second}</span>
+    // pt-20 keeps the content clear of the fixed header that sits over the hero.
+    <section id="hero" className="field-ultra relative flex min-h-svh flex-col overflow-hidden pt-20" aria-labelledby="hero-title">
+      <Wrap className="grid flex-1 items-center gap-x-10 gap-y-12 pt-8 pb-16 lg:grid-cols-12 lg:pt-4 lg:pb-20">
+        <div className="lg:col-span-6" data-enter>
+          <h1 id="hero-title" className="t-display">
+            {hero.title}
           </h1>
-          <p data-hero className="h-body mt-8 max-w-[40ch]">
-            {hero.sentence}
-          </p>
-          <div data-hero className="mt-8">
-            <Link href="/login" className="h-button">
-              {hero.action}
-              <svg viewBox="0 0 16 16" className="size-4" aria-hidden>
-                <path d="M3 13L13 3M6 3h7v7" fill="none" stroke="currentColor" strokeWidth="2" />
-              </svg>
+          <p className="t-lead mt-6 max-w-[34rem] text-[var(--on-field-muted)]">{hero.lead}</p>
+          <div className="mt-9 flex flex-wrap items-center gap-x-6 gap-y-3">
+            <Link href={actions.primary.href} className="btn-orb">
+              {actions.primary.label}
             </Link>
+            <a href={hero.secondary.href} className="link-orb text-white">
+              {hero.secondary.label}
+            </a>
           </div>
+          <p className="t-small mt-10 max-w-[30rem] border-t border-[var(--on-field-line)] pt-4 text-[var(--on-field-muted)]">
+            {hero.fact}
+          </p>
         </div>
-
-        <div data-shutter className="relative mt-14 lg:col-span-8 lg:col-start-5 lg:row-start-1 lg:mt-[34vh]">
-          <div className="field-mark label-cut absolute inset-y-0 -left-4 -right-[100vw] [--cut:72px] sm:-left-10 lg:left-0 lg:[--cut:128px]" />
-          <div data-settle className="relative px-0 pt-20 pb-16 text-[var(--h-mark-ink)] lg:px-14 lg:pt-[92px]">
-            <AccessionSlip />
-          </div>
+        <div className="lg:col-span-6 xl:pl-4" data-enter>
+          <FigureOne />
         </div>
-      </div>
+      </Wrap>
     </section>
   );
 }

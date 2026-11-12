@@ -100,7 +100,7 @@ export const Select = forwardRef<HTMLSelectElement, SelectHTMLAttributes<HTMLSel
   ref,
 ) {
   return (
-    <select ref={ref} className={cn(control, "h-9 appearance-auto", className)} {...rest}>
+    <select ref={ref} className={cn(control, "select-orb h-9", className)} {...rest}>
       {children}
     </select>
   );

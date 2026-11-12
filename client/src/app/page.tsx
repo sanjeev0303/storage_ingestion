@@ -1,39 +1,32 @@
-import { BarcodeBand } from "@/components/home/barcode-band";
-import { DepthSwitch } from "@/components/home/depth-switch";
-import { FeatureBoard } from "@/components/home/feature-board";
-import { FeatureIndex } from "@/components/home/feature-index";
-import { FixChapters } from "@/components/home/fix-chapters";
-import { FooterMark } from "@/components/home/footer-mark";
+import { Closing } from "@/components/home/closing";
+import { Features } from "@/components/home/features";
 import { Hero } from "@/components/home/hero";
 import { HomeHeader } from "@/components/home/home-header";
-import { HomeMotion } from "@/components/home/home-motion";
-import { MapSection } from "@/components/home/map-section";
-import { ReadinessDeck } from "@/components/home/readiness-deck";
-import { StageBar } from "@/components/home/stage-bar";
-import { StartBand } from "@/components/home/start-band";
-import { StorageTiles } from "@/components/home/storage-tiles";
+import { Integrations } from "@/components/home/integrations";
+import { Method } from "@/components/home/method";
+import { Problem } from "@/components/home/problem";
+import { Report } from "@/components/home/report";
+import { Solved } from "@/components/home/solved";
 
-// Datasets handled the way a lab accessions specimens: received, tested,
-// labelled, and released or rejected, with the label saying what was never
-// tested. One motif runs the page: the accession label with its cut corner.
+// Orbidune presented the way its readers read evidence: an abstract with a live
+// figure, the failures it removes, the method, a results table, then the details.
 export default function Home() {
   return (
-    <HomeMotion>
+    <>
       <HomeHeader />
-      <main id="main">
-        <Hero />
-        <DepthSwitch />
-        <StageBar />
-        <FeatureBoard />
-        <MapSection />
-        <BarcodeBand />
-        <FixChapters />
-        <FeatureIndex />
-        <ReadinessDeck />
-        <StorageTiles />
-        <StartBand />
-      </main>
-      <FooterMark />
-    </HomeMotion>
+      <Hero />
+      <div className="orbit-page">
+        <span aria-hidden className="orbit-line" />
+        <main id="main">
+          <Problem />
+          <Solved />
+          <Method />
+          <Report />
+          <Features />
+          <Integrations />
+        </main>
+      </div>
+      <Closing />
+    </>
   );
 }

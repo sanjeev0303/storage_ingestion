@@ -45,7 +45,7 @@ describe("AccessScreen", () => {
     server.use(
       http.post(`${API}/api-tokens`, async ({ request }) => {
         sent = (await request.json()) as Record<string, unknown>;
-        return HttpResponse.json({ id: "t1", name: "vendor-acme", token: "osp_pat_abc123", hint: "osp_pat_abc…", permissions: [],
+        return HttpResponse.json({ id: "t1", name: "vendor-acme", token: "orb_pat_abc123", hint: "orb_pat_abc…", permissions: [],
           datasets: ["scans"], networks: [], allow_links: false, expires_at: "2027-01-28T00:00:00Z", created_at: "2026-10-30T00:00:00Z" },
           { status: 201 });
       }),
@@ -60,7 +60,7 @@ describe("AccessScreen", () => {
     expect(within(dialog).getByLabelText(/Share links are never allowed/)).toBeDisabled();
     await userEvent.click(within(dialog).getByRole("button", { name: "Create token" }));
 
-    expect(await screen.findByText("osp_pat_abc123")).toBeInTheDocument();
+    expect(await screen.findByText("orb_pat_abc123")).toBeInTheDocument();
     expect(sent).toEqual({ name: "vendor-acme", permissions: ["assets.read", "assets.download"], datasets: ["scans"], networks: [],
       expires_in: "2160h", allow_links: false });
   });

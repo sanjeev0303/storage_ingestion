@@ -9,7 +9,7 @@ import type { Permission } from "@/lib/permissions";
 import { accountKey, orgKey } from "@/lib/query/keys";
 import { safeNext } from "./redirect";
 
-const ORG_STORAGE_KEY = "osp.organization";
+const ORG_STORAGE_KEY = "orb.organization";
 
 // The chosen organization is per tab, so two tabs can work in different ones.
 // It is an id, not a secret.

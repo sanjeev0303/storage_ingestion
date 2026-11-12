@@ -35,9 +35,9 @@ describe("sign-out", () => {
       }),
     );
 
-    const res = await logout("osp_rt=srt_late");
+    const res = await logout("orb_rt=srt_late");
     expect(res.status).toBe(204);
     expect(endedWith).toBe("Bearer sat_late");
-    expect(res.headers.get("set-cookie")).toContain("osp_rt=;");
+    expect(res.headers.get("set-cookie")).toContain("orb_rt=;");
   });
 });

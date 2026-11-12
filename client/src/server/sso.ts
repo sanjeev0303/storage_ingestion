@@ -11,7 +11,7 @@ export function ssoCallbackUrl(req: NextRequest) {
 
 // A refused sign-in's reason travels to the sign-in page in a short-lived
 // cookie, never in the URL: it can name the person's email address.
-export const SSO_ERROR_COOKIE = "osp_sso_error";
+export const SSO_ERROR_COOKIE = "orb_sso_error";
 
 // A page that moves on by itself rather than a redirect: the session
 // cookies are SameSite=Strict, and a redirect chain that began at the

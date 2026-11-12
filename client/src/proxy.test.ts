@@ -17,12 +17,12 @@ describe("route guard", () => {
   });
 
   it("lets a session through to the console", () => {
-    const res = proxy(request("/app/overview", "osp_rt=srt_x"));
+    const res = proxy(request("/app/overview", "orb_rt=srt_x"));
     expect(res.headers.get("location")).toBeNull();
   });
 
   it("sends a signed-in visitor on from the sign-in page", () => {
-    const res = proxy(request("/login", "osp_rt=srt_x"));
+    const res = proxy(request("/login", "orb_rt=srt_x"));
     expect(new URL(res.headers.get("location")!).pathname).toBe("/app/overview");
   });
 

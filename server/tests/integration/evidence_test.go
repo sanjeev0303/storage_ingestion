@@ -236,7 +236,7 @@ func TestEvidenceAndAttestation(t *testing.T) {
 		t.Fatalf("undertaking: %v", err)
 	}
 	tok, secret, err := ev.RegulatorAccess(ctx, acme.owner, "FINRA examiner", 7, nil)
-	if err != nil || !strings.HasPrefix(secret, "osp_pat_") || !strings.HasPrefix(tok.Name, "Regulator: ") {
+	if err != nil || !strings.HasPrefix(secret, "orb_pat_") || !strings.HasPrefix(tok.Name, "Regulator: ") {
 		t.Fatalf("regulator access: %+v %v", tok, err)
 	}
 	if _, _, err := ev.RegulatorAccess(ctx, acme.auditor, "FINRA examiner", 7, nil); !errors.Is(err, model.ErrForbidden) {

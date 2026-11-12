@@ -27,7 +27,7 @@ func TestEdgeDevices(t *testing.T) {
 		t.Fatalf("registering needs org.manage: %v", err)
 	}
 	dev, token, err := svc.Register(ctx, owner, "novaseq 1", ds.ID, "")
-	if err != nil || !strings.HasPrefix(token, "osp_pat_") || dev.PathPrefix != "devices/novaseq-1/" {
+	if err != nil || !strings.HasPrefix(token, "orb_pat_") || dev.PathPrefix != "devices/novaseq-1/" {
 		t.Fatalf("register: %+v %v", dev, err)
 	}
 	if _, _, err := svc.Register(ctx, owner, "novaseq 1", ds.ID, ""); !errors.Is(err, model.ErrInvalidEdge) {

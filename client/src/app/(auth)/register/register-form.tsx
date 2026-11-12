@@ -74,7 +74,7 @@ export function RegisterForm() {
 
   return (
     <Panel as="div" className="w-full max-w-md" padded>
-      <h1 className="text-2xl font-semibold tracking-tight">Create an account</h1>
+      <h1 className="font-wide text-[1.875rem] leading-tight font-bold tracking-[-0.025em]">Create an account</h1>
       <p className="mt-1 text-base text-muted">You become the owner of a new organization and can invite others to it.</p>
 
       <form onSubmit={handleSubmit(onSubmit)} noValidate className="mt-6 flex flex-col gap-5">
