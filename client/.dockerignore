@@ -1,0 +1,12 @@
+node_modules
+.next
+.env*
+!.env.example
+.taste-skill
+.impeccable
+test-results
+playwright-report
+shots
+coverage
+*.tsbuildinfo
+public/duckdb

@@ -1,0 +1,39 @@
+# syntax=docker/dockerfile:1
+# Every Go binary the platform runs, in one image, so one release tag means
+# the same code in the API, every worker and the one-off tasks. Each ECS
+# task picks its binary with entryPoint (/usr/local/bin/<name>).
+#
+# Build from server/:
+#   docker build -f infrastructure/docker/Dockerfile.server -t server:<tag> .
+
+FROM golang:1.25 AS build
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/ \
+    ./cmd/api \
+    ./cmd/upload-worker \
+    ./cmd/processing-worker \
+    ./cmd/outbox-worker \
+    ./cmd/dataset-worker \
+    ./cmd/cleanup-worker \
+    ./cmd/compaction-worker \
+    ./cmd/reconciliation-worker \
+    ./cmd/pack-worker \
+    ./cmd/webhook-worker \
+    ./cmd/migrate \
+    ./cmd/identity-admin \
+    ./cmd/credential-admin \
+    ./cmd/event-admin \
+    ./cmd/lifecycle-admin \
+    ./cmd/catalog-admin
+
+# Static binaries need no libc; nonroot runs them as UID 65532, and the
+# image has CA certificates for TLS to AWS and customer storage.
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /out/ /usr/local/bin/
+USER nonroot:nonroot
+ENTRYPOINT ["/usr/local/bin/api"]

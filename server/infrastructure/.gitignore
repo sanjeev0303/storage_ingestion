@@ -1,0 +1,12 @@
+# Terraform working files and anything that may hold secrets or state.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+terraform.tfvars
+*.auto.tfvars
+backend.hcl
+# The dependency lock files are committed.
+!.terraform.lock.hcl
