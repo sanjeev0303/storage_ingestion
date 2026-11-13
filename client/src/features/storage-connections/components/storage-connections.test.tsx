@@ -211,6 +211,31 @@ describe("create form", () => {
     expect(document.body.innerHTML).not.toContain("AKIAEXAMPLE");
   });
 
+  it("shows the new connection as Active once its test passes", async () => {
+    useCatalog();
+    server.use(
+      http.post(`${API}/storage-connections`, () => HttpResponse.json(connection({ status: "PENDING", name: "Team bucket" }), { status: 201 })),
+      http.post(`${API}/storage-connections/sc_1/test`, () =>
+        HttpResponse.json({ ok: true, checks: [{ name: "endpoint", ok: true }], tested_at: "2026-02-01T10:00:00Z" }),
+      ),
+    );
+    renderWithProviders(<CreateConnection />);
+    const user = userEvent.setup();
+    await pick(/^provider/i, "S3_COMPATIBLE");
+    await user.type(await screen.findByLabelText(/^name/i), "Team bucket");
+    await user.type(screen.getByLabelText(/^bucket/i), "team-bucket");
+    await user.type(screen.getByLabelText(/^endpoint/i), "https://s3.example.com");
+    await user.type(screen.getByLabelText(/^access key id/i), "AKIAEXAMPLE");
+    await user.type(screen.getByLabelText(/^secret access key/i), "super-secret-value");
+    await user.click(screen.getByRole("button", { name: /create connection/i }));
+    expect(await screen.findByText("Pending")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Test connection" }));
+    expect(await screen.findByText(/now Active/)).toBeInTheDocument();
+    expect(screen.getByText("Active")).toBeInTheDocument();
+    expect(screen.queryByText("Pending")).not.toBeInTheDocument();
+  });
+
   it("clears the secret fields when the backend refuses the connection", async () => {
     useCatalog();
     server.use(
@@ -417,6 +442,33 @@ describe("detail", () => {
     await waitFor(() => expect(reads).toBeGreaterThan(1));
   });
 
+  it("keeps edits when the connection is refetched in the background, and saves against the revision the edit started from", async () => {
+    let revision = 7;
+    let body: Record<string, unknown> | null = null;
+    server.use(
+      http.get(`${API}/storage-connections/sc_1`, () => HttpResponse.json(connection({ status: "PENDING", revision }))),
+      http.patch(`${API}/storage-connections/sc_1`, async ({ request }) => {
+        body = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json({ error: "the connection changed", code: "revision_conflict" }, { status: 412 });
+      }),
+    );
+    const { client } = renderWithProviders(<ConnectionDetail id="sc_1" />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    const dialog = await screen.findByRole("dialog");
+    const name = within(dialog).getByLabelText(/^name/i);
+    await user.clear(name);
+    await user.type(name, "Renamed");
+
+    revision = 8;
+    await client.invalidateQueries();
+    expect(await within(dialog).findByText(/changed this connection after you started editing/i)).toBeInTheDocument();
+    expect(within(dialog).getByLabelText(/^name/i)).toHaveValue("Renamed");
+
+    await user.click(within(dialog).getByRole("button", { name: /save changes/i }));
+    await waitFor(() => expect(body).toEqual({ revision: 7, name: "Renamed" }));
+  });
+
   it("shows the refused settings when an edit fails the re-test, and says nothing was stored", async () => {
     serve(connection({ status: "ACTIVE" }));
     let body: Record<string, unknown> | null = null;
@@ -437,6 +489,25 @@ describe("detail", () => {
     await user.click(within(dialog).getByRole("button", { name: /save changes/i }));
     expect(await within(dialog).findByText(/nothing was stored/i)).toBeInTheDocument();
     expect(body).toEqual({ revision: 7, endpoint: "https://other.example.com" });
+  });
+
+  it("names a deleted connection's state and explains it", async () => {
+    serve(connection({ status: "DELETED" }));
+    renderWithProviders(<ConnectionDetail id="sc_1" />);
+    expect(await screen.findByText("Deleted")).toBeInTheDocument();
+    expect(screen.getByText(/stored credentials are erased/)).toBeInTheDocument();
+  });
+
+  it("calls the last test failed when it did not pass, even with no category recorded", async () => {
+    serve(connection({ status: "ACTIVE", last_tested_at: "2026-02-02T10:00:00Z", last_test_ok_at: "2026-02-01T10:00:00Z" }));
+    renderWithProviders(<ConnectionDetail id="sc_1" />);
+    expect(await screen.findByText("Last test failed")).toBeInTheDocument();
+  });
+
+  it("does not offer a direct rotation while new credentials are staged", async () => {
+    serve(connection({ status: "ACTIVE", staged_credential: { rotation: 3, staged_at: "2026-02-01T10:00:00Z" } }));
+    renderWithProviders(<ConnectionDetail id="sc_1" />);
+    expect(await screen.findByRole("button", { name: "Rotate credentials" })).toBeDisabled();
   });
 
   it("hides management actions without storage.manage", async () => {

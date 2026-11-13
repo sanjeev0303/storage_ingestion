@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { BACKEND_URL, clientAddress, isSameOrigin } from "@/server/auth";
 import { logServerError } from "@/server/log";
-import { ssoCallbackUrl } from "@/server/sso";
+import { bindState, ssoCallbackUrl } from "@/server/sso";
 import { hideServerFailure } from "@/server/upstream";
 
 // Starts a single sign-on: the API answers with the identity provider's
@@ -37,8 +37,18 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "the storage API could not be reached", code: "upstream_unreachable" }, { status: 502 });
   }
   if (upstream.status >= 500) return hideServerFailure(upstream, "sso start");
-  return new NextResponse(await upstream.text(), {
+  const text = await upstream.text();
+  const res = new NextResponse(text, {
     status: upstream.status,
     headers: { "content-type": upstream.headers.get("content-type") ?? "application/json", "cache-control": "no-store" },
   });
+  if (upstream.ok) {
+    try {
+      const answer = JSON.parse(text) as { authorization_url?: string };
+      bindState(res, answer.authorization_url ?? "");
+    } catch {
+      // not JSON: there is no sign-in to bind
+    }
+  }
+  return res;
 }

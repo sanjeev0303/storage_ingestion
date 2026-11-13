@@ -12,9 +12,11 @@ POST /api/v1/api-tokens
  "datasets": ["scans"], "networks": ["203.0.113.0/24"], "expires_in": "720h", "allow_links": false}
 ```
 
-- The response carries `token` (`orb_pat_…`) once. Only its SHA-256 is stored. Send it as `Authorization: Bearer orb_pat_…`.
+- The response carries `token` (`orb_pat_…`) once; no later response, log line or audit event holds it. Send it as `Authorization: Bearer orb_pat_…`. Lists show only `hint`, its last four characters.
+- **How it is stored.** With `API_TOKEN_PEPPER` set (the base64 of 32 or more random bytes, kept with the other server secrets, never in the database), only an HMAC-SHA-256 of the token under that pepper is stored. Someone who can read or write the `api_tokens` table but not the server's settings can neither check a token against it nor plant a working one. Without a pepper, the plain SHA-256 is stored, as before.
+- **Turning the pepper on.** Tokens issued before it still work: a token not found by its HMAC is looked up by its SHA-256, and that stored hash is replaced by the HMAC on its first use. Tokens are found by an index on the hash and never compared in the server, so there is no timing to measure. Changing the pepper later invalidates every token issued under the old one; there is no versioned pepper.
 - `permissions` must be ones the member holds (403 `escalation` otherwise). Each request also intersects them with the member's current role, so a demotion or removal narrows every token at once.
-- `datasets` confines the token to those dataset namespaces: any other asset answers 404, as if it did not exist. This is a vendor workspace. A dataset-confined token can never create share links.
+- `datasets` confines the token to those dataset namespaces: any other asset answers 404, as if it did not exist. This is a vendor workspace. A dataset-confined token can never create share links. Catalog listings with such a token must name one of its datasets, and it cannot start ingestion jobs in other datasets. A token confined to a path prefix uploads directly; ingestion jobs refuse it.
 - `networks` (CIDRs) binds it to source addresses; from anywhere else it answers 401. Behind the console proxy set `AUTH_TRUST_PROXY_HEADERS=true` so the real client address is used.
 - `expires_in` is 1h to 8760h, 90 days by default. Last use (time and address) is recorded at most once a minute.
 - A token is pinned to its organization and never carries platform roles. It cannot mint tokens, change the access policy or reach SSO and SCIM settings.
@@ -59,7 +61,7 @@ The cleanup worker runs the detector every five minutes. Each member is compared
 - `NEW_NETWORK`: reads from a /24 (IPv6 /48) the member has not used in 30 days.
 - `EGRESS_BUDGET`: a budget was exceeded.
 
-An alert is raised once per member, kind and hour. `GET /api/v1/security/alerts` (`audit.read`, `?state=OPEN`) and `POST /api/v1/security/alerts/{id}/acknowledge`. Each alert is also the webhook `security.alert`.
+An alert is raised once per member, kind and hour. `GET /api/v1/security/alerts` (`audit.read`, `?state=OPEN`) and `POST /api/v1/security/alerts/{id}/acknowledge`. Acknowledging an alert acknowledged already answers it unchanged: the first acknowledgement is kept. Each alert is also the webhook `security.alert`.
 
 ## SDK and CLI
 

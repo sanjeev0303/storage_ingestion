@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	nethttp "net/http"
+	"slices"
 	"time"
 
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
@@ -47,5 +48,53 @@ func (h *OperationsHandler) Status(w nethttp.ResponseWriter, r *nethttp.Request)
 		"validations": map[string]any{"queued": s.ValidationsQueued, "running": s.ValidationsRunning},
 		"deletions":   map[string]any{"pending": s.DeletionsScheduled},
 		"storage":     map[string]any{"shared_assets": s.SharedAssets, "shared_bytes": s.SharedBytes},
+		"workers":     workerHealth(s.Workers, s.At, p.PlatformRole == model.PlatformAdmin),
 	})
+}
+
+// workerHealth says, per kind of worker, whether any process of it has
+// written a heartbeat recently. Workers are shared by every organization,
+// so a member sees only the state; host names and process IDs are for
+// platform administrators.
+func workerHealth(beats []model.WorkerHeartbeat, now time.Time, detailed bool) []map[string]any {
+	byKind := map[string][]model.WorkerHeartbeat{}
+	kinds := append([]string(nil), model.WorkerKinds...)
+	for _, b := range beats {
+		if !slices.Contains(kinds, b.Kind) {
+			kinds = append(kinds, b.Kind)
+		}
+		byKind[b.Kind] = append(byKind[b.Kind], b)
+	}
+
+	out := make([]map[string]any, 0, len(kinds))
+	for _, kind := range kinds {
+		entry := map[string]any{"kind": kind, "state": "NOT_SEEN"}
+		var latest time.Time
+		live := 0
+		instances := []map[string]any{}
+		for _, b := range byKind[kind] {
+			stale := now.Sub(b.LastSeenAt) > model.WorkerStaleAfter
+			if !stale {
+				live++
+			}
+			if b.LastSeenAt.After(latest) {
+				latest = b.LastSeenAt
+			}
+			instances = append(instances, map[string]any{
+				"instance": b.Instance, "started_at": b.StartedAt, "last_seen_at": b.LastSeenAt, "stale": stale,
+			})
+		}
+		if !latest.IsZero() {
+			entry["last_seen_at"] = latest
+			entry["state"] = "STALE"
+		}
+		if live > 0 {
+			entry["state"] = "RUNNING"
+		}
+		if detailed {
+			entry["instances"] = instances
+		}
+		out = append(out, entry)
+	}
+	return out
 }

@@ -22,10 +22,10 @@ func (r *StorageConnectionRepository) StageCredential(ctx context.Context, tenan
 	c, err := scanConnection(r.db.Pool.QueryRow(ctx, `
 		UPDATE storage_connections SET
 		    staged_credential_version = $3, staged_key_version = $4, staged_nonce = $5, staged_ciphertext = $6,
-		    staged_at = $8, staged_by = $7, revision = revision + 1, updated_by = $7, updated_at = $8
+		    staged_wrapped_key = $9, staged_at = $8, staged_by = $7, revision = revision + 1, updated_by = $7, updated_at = $8
 		WHERE tenant_id = $1 AND id = $2 AND status <> 'DELETED' AND credential_version < $3
 		RETURNING `+connectionColumns,
-		tenantID, connectionID, sealed.Version, sealed.KeyVersion, sealed.Nonce, sealed.Ciphertext, actor, at))
+		tenantID, connectionID, sealed.Version, sealed.KeyVersion, sealed.Nonce, sealed.Ciphertext, actor, at, sealed.WrappedKey))
 	if errors.Is(err, model.ErrConnectionNotFound) {
 		return c, r.missed(ctx, tenantID, connectionID)
 	}
@@ -39,9 +39,9 @@ func (r *StorageConnectionRepository) StageCredential(ctx context.Context, tenan
 func (r *StorageConnectionRepository) StagedCredential(ctx context.Context, tenantID, connectionID string) (interfaces.SealedCredential, error) {
 	var sealed interfaces.SealedCredential
 	err := r.db.Pool.QueryRow(ctx, `
-		SELECT staged_credential_version, staged_key_version, staged_nonce, staged_ciphertext FROM storage_connections
+		SELECT staged_credential_version, staged_key_version, staged_nonce, staged_ciphertext, staged_wrapped_key FROM storage_connections
 		WHERE tenant_id = $1 AND id = $2 AND staged_ciphertext IS NOT NULL AND status <> 'DELETED'`,
-		tenantID, connectionID).Scan(&sealed.Version, &sealed.KeyVersion, &sealed.Nonce, &sealed.Ciphertext)
+		tenantID, connectionID).Scan(&sealed.Version, &sealed.KeyVersion, &sealed.Nonce, &sealed.Ciphertext, &sealed.WrappedKey)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return sealed, model.ErrNoStagedCredential
 	}
@@ -53,23 +53,38 @@ func (r *StorageConnectionRepository) StagedCredential(ctx context.Context, tena
 
 // PromoteCredential makes the staged credential current and keeps the one
 // it replaces until keepUntil, for a rollback. Every SET reads the row as
-// it was, so the two swap in one statement.
-func (r *StorageConnectionRepository) PromoteCredential(ctx context.Context, tenantID, connectionID, actor string, keepUntil, at time.Time) (model.StorageConnection, error) {
+// it was, so the two swap in one statement. Only the staged version the
+// caller tested is promoted (model.ErrCredentialChanged when another was
+// staged since). A staged credential no newer than the current one is
+// refused (model.ErrStaleStagedCredential): it would put back a credential
+// already replaced.
+func (r *StorageConnectionRepository) PromoteCredential(ctx context.Context, tenantID, connectionID string, stagedVersion int, actor string, keepUntil, at time.Time) (model.StorageConnection, error) {
 	c, err := scanConnection(r.db.Pool.QueryRow(ctx, `
 		UPDATE storage_connections SET
 		    previous_credential_version = credential_version, previous_key_version = credential_key_version,
-		    previous_nonce = credential_nonce, previous_ciphertext = credential_ciphertext, previous_until = $4,
+		    previous_nonce = credential_nonce, previous_ciphertext = credential_ciphertext,
+		    previous_wrapped_key = credential_wrapped_key, previous_until = $4,
 		    credential_version = staged_credential_version, credential_key_version = staged_key_version,
-		    credential_nonce = staged_nonce, credential_ciphertext = staged_ciphertext, credential_rotated_at = $5,
+		    credential_nonce = staged_nonce, credential_ciphertext = staged_ciphertext,
+		    credential_wrapped_key = staged_wrapped_key, credential_rotated_at = $5,
 		    staged_credential_version = NULL, staged_key_version = NULL, staged_nonce = NULL, staged_ciphertext = NULL,
-		    staged_at = NULL, staged_by = NULL,
+		    staged_wrapped_key = NULL, staged_at = NULL, staged_by = NULL,
 		    revision = revision + 1, updated_by = $3, updated_at = $5
 		WHERE tenant_id = $1 AND id = $2 AND staged_ciphertext IS NOT NULL AND status <> 'DELETED'
+		  AND staged_credential_version > credential_version AND staged_credential_version = $6
 		RETURNING `+connectionColumns,
-		tenantID, connectionID, actor, keepUntil, at))
+		tenantID, connectionID, actor, keepUntil, at, stagedVersion))
 	if errors.Is(err, model.ErrConnectionNotFound) {
 		if missing := r.missed(ctx, tenantID, connectionID); !errors.Is(missing, model.ErrConnectionNotFound) {
-			return c, model.ErrNoStagedCredential
+			staged, stagedErr := r.StagedCredential(ctx, tenantID, connectionID)
+			switch {
+			case stagedErr != nil:
+				return c, model.ErrNoStagedCredential
+			case staged.Version != stagedVersion:
+				return c, model.ErrCredentialChanged
+			default:
+				return c, model.ErrStaleStagedCredential
+			}
 		}
 	}
 	if err != nil {
@@ -79,20 +94,26 @@ func (r *StorageConnectionRepository) PromoteCredential(ctx context.Context, ten
 }
 
 // RollbackCredential puts back the credential the last promotion
-// replaced, while it is kept.
-func (r *StorageConnectionRepository) RollbackCredential(ctx context.Context, tenantID, connectionID, actor string, at time.Time) (model.StorageConnection, error) {
+// replaced, while it is kept, if the current one is still the version the
+// caller read (model.ErrCredentialChanged otherwise).
+func (r *StorageConnectionRepository) RollbackCredential(ctx context.Context, tenantID, connectionID string, currentVersion int, actor string, at time.Time) (model.StorageConnection, error) {
 	c, err := scanConnection(r.db.Pool.QueryRow(ctx, `
 		UPDATE storage_connections SET
 		    credential_version = previous_credential_version, credential_key_version = previous_key_version,
-		    credential_nonce = previous_nonce, credential_ciphertext = previous_ciphertext, credential_rotated_at = $4,
+		    credential_nonce = previous_nonce, credential_ciphertext = previous_ciphertext,
+		    credential_wrapped_key = previous_wrapped_key, credential_rotated_at = $4,
 		    previous_credential_version = NULL, previous_key_version = NULL, previous_nonce = NULL,
-		    previous_ciphertext = NULL, previous_until = NULL,
+		    previous_ciphertext = NULL, previous_wrapped_key = NULL, previous_until = NULL,
 		    revision = revision + 1, updated_by = $3, updated_at = $4
 		WHERE tenant_id = $1 AND id = $2 AND previous_ciphertext IS NOT NULL AND previous_until > $4 AND status <> 'DELETED'
+		  AND credential_version = $5
 		RETURNING `+connectionColumns,
-		tenantID, connectionID, actor, at))
+		tenantID, connectionID, actor, at, currentVersion))
 	if errors.Is(err, model.ErrConnectionNotFound) {
 		if missing := r.missed(ctx, tenantID, connectionID); !errors.Is(missing, model.ErrConnectionNotFound) {
+			if latest, getErr := r.GetConnection(ctx, tenantID, connectionID); getErr == nil && latest.CredentialVersion != currentVersion {
+				return c, model.ErrCredentialChanged
+			}
 			return c, model.ErrNoPreviousCredential
 		}
 	}
@@ -102,17 +123,21 @@ func (r *StorageConnectionRepository) RollbackCredential(ctx context.Context, te
 	return c, nil
 }
 
-// DiscardStaged drops a staged credential without using it.
-func (r *StorageConnectionRepository) DiscardStaged(ctx context.Context, tenantID, connectionID, actor string, at time.Time) (model.StorageConnection, error) {
+// DiscardStaged drops the staged credential the caller read, without
+// using it (model.ErrCredentialChanged when another was staged since).
+func (r *StorageConnectionRepository) DiscardStaged(ctx context.Context, tenantID, connectionID string, stagedVersion int, actor string, at time.Time) (model.StorageConnection, error) {
 	c, err := scanConnection(r.db.Pool.QueryRow(ctx, `
 		UPDATE storage_connections SET
 		    staged_credential_version = NULL, staged_key_version = NULL, staged_nonce = NULL, staged_ciphertext = NULL,
-		    staged_at = NULL, staged_by = NULL, revision = revision + 1, updated_by = $3, updated_at = $4
-		WHERE tenant_id = $1 AND id = $2 AND staged_ciphertext IS NOT NULL AND status <> 'DELETED'
+		    staged_wrapped_key = NULL, staged_at = NULL, staged_by = NULL, revision = revision + 1, updated_by = $3, updated_at = $4
+		WHERE tenant_id = $1 AND id = $2 AND staged_ciphertext IS NOT NULL AND status <> 'DELETED' AND staged_credential_version = $5
 		RETURNING `+connectionColumns,
-		tenantID, connectionID, actor, at))
+		tenantID, connectionID, actor, at, stagedVersion))
 	if errors.Is(err, model.ErrConnectionNotFound) {
 		if missing := r.missed(ctx, tenantID, connectionID); !errors.Is(missing, model.ErrConnectionNotFound) {
+			if _, stagedErr := r.StagedCredential(ctx, tenantID, connectionID); stagedErr == nil {
+				return c, model.ErrCredentialChanged
+			}
 			return c, model.ErrNoStagedCredential
 		}
 	}
@@ -126,7 +151,7 @@ func (r *StorageConnectionRepository) DiscardStaged(ctx context.Context, tenantI
 func (r *StorageConnectionRepository) ExpirePrevious(ctx context.Context, now time.Time) (int64, error) {
 	tag, err := r.db.Pool.Exec(ctx, `
 		UPDATE storage_connections SET previous_credential_version = NULL, previous_key_version = NULL,
-		    previous_nonce = NULL, previous_ciphertext = NULL, previous_until = NULL
+		    previous_nonce = NULL, previous_ciphertext = NULL, previous_wrapped_key = NULL, previous_until = NULL
 		WHERE previous_ciphertext IS NOT NULL AND previous_until <= $1`, now)
 	if err != nil {
 		return 0, fmt.Errorf("expire previous credentials: %w", err)

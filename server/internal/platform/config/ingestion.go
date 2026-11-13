@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -64,12 +65,25 @@ type Ingestion struct {
 	ReconcileInterval time.Duration
 	StorageTimeout    time.Duration
 
+	// NoBatchReservation turns off the batch quota reservation of a claim's
+	// grants (INGESTION_BATCH_RESERVATION=false): each grant then reserves on
+	// its own, as before. The switch to roll it back, and to measure it.
+	NoBatchReservation bool
+	// NoGroupCommit writes each completed or published entry in its own
+	// transaction (INGESTION_GROUP_COMMIT=false) instead of sharing one with
+	// the changes that arrive at the same time.
+	NoGroupCommit bool
+
 	MetricsAddr string
 }
 
 // LoadIngestion reads the bulk-ingestion settings.
 func LoadIngestion() (Ingestion, error) {
-	cfg := Ingestion{MetricsAddr: getEnv("METRICS_ADDR", "")}
+	cfg := Ingestion{
+		MetricsAddr:        getEnv("METRICS_ADDR", ""),
+		NoBatchReservation: strings.EqualFold(getEnv("INGESTION_BATCH_RESERVATION", "true"), "false"),
+		NoGroupCommit:      strings.EqualFold(getEnv("INGESTION_GROUP_COMMIT", "true"), "false"),
+	}
 
 	var err error
 	sizes := []struct {

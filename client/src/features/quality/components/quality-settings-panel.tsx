@@ -2,6 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
+import { ChangedElsewhere } from "@/components/ui/changed-elsewhere";
 import { Checkbox, Field, Input } from "@/components/ui/field";
 import { Panel } from "@/components/ui/panel";
 import { ErrorState, SkeletonRows } from "@/components/ui/states";
@@ -15,6 +16,9 @@ import { getSettings, putSettings, type QualitySettings } from "../api";
 // its subject for leakage checks.
 export function QualitySettingsPanel({ datasetId }: { datasetId: string }) {
   const organizationId = useOrganizationId();
+  // The form restarts with the latest settings after a save or when asked. A
+  // background refetch alone must not wipe what the user typed.
+  const [reloads, setReloads] = useState(0);
   const settings = useQuery({
     queryKey: orgKey(organizationId, "quality", "settings", datasetId),
     queryFn: ({ signal }) => getSettings(datasetId, signal),
@@ -27,16 +31,18 @@ export function QualitySettingsPanel({ datasetId }: { datasetId: string }) {
       ) : settings.isError ? (
         <ErrorState error={settings.error} onRetry={() => settings.refetch()} />
       ) : (
-        <SettingsForm key={settings.data.updated_at ?? "default"} datasetId={datasetId} initial={settings.data} />
+        <SettingsForm key={reloads} datasetId={datasetId} latest={settings.data} onReload={() => setReloads((n) => n + 1)} />
       )}
     </Panel>
   );
 }
 
-function SettingsForm({ datasetId, initial }: { datasetId: string; initial: QualitySettings }) {
+function SettingsForm({ datasetId, latest, onReload }: { datasetId: string; latest: QualitySettings; onReload: () => void }) {
   const organizationId = useOrganizationId();
   const { can } = useSession();
   const client = useQueryClient();
+  // The settings as they were when editing started.
+  const [initial] = useState(latest);
   const [draft, setDraft] = useState({
     profile_snapshots: initial.profile_snapshots,
     max_psi: String(initial.max_psi),
@@ -55,12 +61,15 @@ function SettingsForm({ datasetId, initial }: { datasetId: string; initial: Qual
         subject_key: draft.subject === "key" ? draft.subject_value.trim() : "",
         subject_pattern: draft.subject === "pattern" ? draft.subject_value.trim() : "",
       }),
-    onSuccess: () => {
+    onSuccess: async () => {
+      await client.invalidateQueries({ queryKey: orgKey(organizationId, "quality", "settings", datasetId) });
       notify.success("Quality settings saved");
-      client.invalidateQueries({ queryKey: orgKey(organizationId, "quality", "settings", datasetId) });
+      onReload();
     },
     onError: notify.error,
   });
+  // Our own save also moves updated_at; that is not a change made elsewhere.
+  const changedElsewhere = !save.isSuccess && latest.updated_at !== initial.updated_at;
   const psi = Number(draft.max_psi);
   const nulls = Number(draft.max_null_change);
   const rows = Number(draft.max_row_change);
@@ -77,6 +86,7 @@ function SettingsForm({ datasetId, initial }: { datasetId: string; initial: Qual
 
   return (
     <form onSubmit={submit} className="flex flex-col gap-4">
+      {changedElsewhere && <ChangedElsewhere subject="the quality settings" onReload={onReload} />}
       <fieldset disabled={!editable} className="flex flex-col gap-4">
         <Checkbox
           label="Profile every snapshot"

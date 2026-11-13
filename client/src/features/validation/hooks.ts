@@ -128,6 +128,8 @@ export function useJob(jobId: string) {
     queryFn: ({ signal }) => getJob(jobId, signal),
     refetchInterval: (query) => {
       const job = query.state.data;
+      // A first load that failed shows an error with a retry; polling it would only repeat the failure.
+      if (query.state.status === "error" && !job) return false;
       return job && isTerminal(job.state) ? false : POLL_MS;
     },
   });

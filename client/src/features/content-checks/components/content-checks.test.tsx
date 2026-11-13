@@ -100,6 +100,34 @@ describe("ContentPolicyScreen", () => {
     });
   });
 
+  it("adds the exception on Enter in the finding code, without saving the policy", async () => {
+    let saved = false;
+    server.use(
+      http.get(`${API}/content-policy`, () => HttpResponse.json({ policy: empty, finding_families: FAMILIES })),
+      http.put(`${API}/content-policy`, () => {
+        saved = true;
+        return HttpResponse.json({ policy: empty });
+      }),
+    );
+    renderWithProviders(<ContentPolicyScreen />, { permissions: ["org.manage", "org.read"] });
+    await userEvent.type(await screen.findByLabelText("Finding code"), "model.pickle_imports{Enter}");
+    expect(await screen.findByText("model.pickle_imports")).toBeInTheDocument();
+    expect(screen.getByLabelText("Finding code")).toHaveValue("");
+    expect(saved).toBe(false);
+  });
+
+  it("keeps unsaved policy edits through a refetch and says someone else changed it", async () => {
+    let current = empty;
+    server.use(http.get(`${API}/content-policy`, () => HttpResponse.json({ policy: current, finding_families: FAMILIES })));
+    const { client } = renderWithProviders(<ContentPolicyScreen />, { permissions: ["org.manage", "org.read"] });
+    await userEvent.type(await screen.findByLabelText("Refused types"), "application/x-tar");
+
+    current = { ...empty, unknown_type_action: "reject" };
+    await client.invalidateQueries();
+    expect(await screen.findByText(/Someone else changed the content policy after you started editing/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Refused types")).toHaveValue("application/x-tar");
+  });
+
   it("refuses a malware exception and is read-only without org.manage", async () => {
     server.use(http.get(`${API}/content-policy`, () => HttpResponse.json({ policy: empty, finding_families: FAMILIES })));
     const { unmount } = renderWithProviders(<ContentPolicyScreen />, { permissions: ["org.manage"] });

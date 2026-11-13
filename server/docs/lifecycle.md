@@ -2,7 +2,7 @@
 
 | Piece | Where | What it does |
 |---|---|---|
-| Member routes | API | `DELETE /api/v1/assets/{id}` (soft delete) and `POST /api/v1/assets/{id}/restore` with `assets.delete`, `GET /api/v1/assets/{id}/lifecycle` with `assets.read`; `PUT /api/v1/retention/policies`, `POST /api/v1/legal-holds`, `DELETE /api/v1/legal-holds/{id}` with `retention.manage` (`docs/security.md`) |
+| Member routes | API | `DELETE /api/v1/assets/{id}` (soft delete) and `POST /api/v1/assets/{id}/restore` with `assets.delete`, `GET /api/v1/assets/{id}/lifecycle` with `assets.read`; `PUT /api/v1/retention/policies`, `POST /api/v1/legal-holds`, `GET /api/v1/legal-holds` (paged, see `docs/governance.md`), `DELETE /api/v1/legal-holds/{id}` with `retention.manage` (`docs/security.md`) |
 | `cleanup-worker` | `cmd/cleanup-worker` | retention evaluation, the deletion workflow, inventory scans and orphan sweeps, missing-object checks |
 | `compaction-worker` | `cmd/compaction-worker` | metadata compaction in bounded batches |
 | `lifecycle-admin` | `cmd/lifecycle-admin` | operator CLI: policies, legal holds, deletions, restore, inspection, requeue, scan and candidate reports |
@@ -56,7 +56,7 @@ A hold covers a tenant, a dataset or one asset until it is released. It:
 - stops orphan sweeps in its scope;
 - stops the processing worker's quarantine purge.
 
-A hold placed after removal has started (`IN_PROGRESS`) cannot stop that deletion: objects are already going. Owners never learn about holds. A protected deletion is shown to them as `SCHEDULED`.
+A hold placed after removal has started (`IN_PROGRESS`) cannot stop that deletion: objects are already going. A started deletion waiting to retry (`RETRY_WAIT`) that finds a hold or another blocker waits in `RETRY_WAIT` until it clears, then finishes. It never becomes `PROTECTED`, so it can never be restored or cancelled. Owners never learn about holds. A protected deletion is shown to them as `SCHEDULED`.
 
 ## The deletion workflow
 
@@ -67,10 +67,15 @@ A hold placed after removal has started (`IN_PROGRESS`) cannot stop that deletio
 | Pending permanent deletion | `SCHEDULED` until `purge_after` |
 | Protected by retention or legal hold | `PROTECTED`, with the reason and the next check (`next_attempt_at`, at most `LIFECYCLE_RECHECK_INTERVAL` away) |
 | Deletion in progress | `IN_PROGRESS` (claimed under a lease, attempt counted) |
-| Deletion failed / awaiting retry | `RETRY_WAIT` (backoff with jitter), then `FAILED` after `LIFECYCLE_MAX_ATTEMPTS` or a permanent error; `lifecycle-admin requeue` restarts it |
+| Deletion failed / awaiting retry | `RETRY_WAIT` (backoff with jitter; only once removal has started), then `FAILED` after `LIFECYCLE_MAX_ATTEMPTS` or a permanent error; `lifecycle-admin requeue` restarts it (see below) |
 | Storage deletion confirmed / metadata cleanup pending | `STORAGE_DELETED` (`storage_deleted_at` set) |
 | Fully deleted | `COMPLETED`: one transaction tombstones the asset (`DELETED`), revokes its download links and records `deletion_completed` |
 | Restored | `CANCELLED`: only from `SCHEDULED`/`PROTECTED`, never once removal started |
+
+**An asset left `SOFT_DELETED` with a `FAILED` operation** is not delivered and holds its pending bytes until an operator acts. `lifecycle-admin events` and `inspect` show the error. Then:
+
+- the operation never started removing objects (no attempt counted, no `storage_deleted_at`): `lifecycle-admin requeue` puts it back to `SCHEDULED`, so the owner (or `lifecycle-admin restore`) can still restore the asset, and otherwise it runs again at once;
+- it had started: `requeue` puts it in `RETRY_WAIT`, and it finishes the removal; it can no longer be restored or cancelled, because some objects may already be gone. If the asset is no longer `SOFT_DELETED` (changed outside the workflow), the deletion fails again with that reason rather than cancel: compare the asset's objects in storage with its record before requeueing.
 
 **Before anything is removed**, a fresh check runs on the current state, never on what the request saw:
 
@@ -284,7 +289,7 @@ TEST_CLAMAV_ADDRESS=127.0.0.1:3310 go test ./tests/integration/
 
 On a bucket created with S3 Object Lock, retention and legal holds are also set on each asset's stored version. The provider itself then refuses to delete it early, whoever holds the bucket's keys: a leaked key, a careless script or a lifecycle rule in the customer's own account.
 
-- **When:** a new policy, a placed hold and a released hold queue their scope (`lock_sync_requests`, migration `000028_lock_sync.sql`). The cleanup worker applies the queued scopes first each cycle, up to ten batches of assets, so a change reaches S3 within about a minute (measured on AWS S3: a hold on in 49 s, off in 61 s). Retention evaluation also applies them to every `AVAILABLE` asset whose delivery copy has a recorded version, as the fallback for anything a lost request missed. It sets the retention date (`created_at + min_retention`, or counted from a metadata date: docs/governance.md) in the policy's mode, GOVERNANCE unless a policy asks for COMPLIANCE, and a legal hold while any hold covers the asset. The bucket's setting is read once per ten minutes per connection.
+- **When:** a new policy, a placed hold and a released hold queue their scope (`lock_sync_requests`, migration `000028_lock_sync.sql`). The cleanup worker applies the queued scopes first each cycle, up to ten batches of assets (a request's position only moves forward and a finished request stays finished, so two workers on one request do no harm), so a change reaches S3 within about a minute (measured on AWS S3: a hold on in 49 s, off in 61 s). Retention evaluation also applies them to every `AVAILABLE` asset whose delivery copy has a recorded version, as the fallback for anything a lost request missed. It sets the retention date (`created_at + min_retention`, or counted from a metadata date: docs/governance.md) in the policy's mode, GOVERNANCE unless a policy asks for COMPLIANCE, and a legal hold while any hold covers the asset. The bucket's setting is read once per ten minutes per connection.
 - **What is recorded:** applied settings go to `object_locks` (migration `000023_object_lock.sql`). An unchanged lock is not sent again.
 - **Retention only grows:** a lock's date is extended, never shortened. A deletion waits (`PROTECTED`, "object lock until …") for the lock's date even when the policy was lowered since.
 - **Holds:** a hold that is no longer active is taken off the version before its deletion, so a soft-deleted asset is not stuck behind its own lock.

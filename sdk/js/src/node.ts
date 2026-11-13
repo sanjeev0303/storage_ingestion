@@ -24,6 +24,16 @@ export async function fileSource(path: string, type?: string): Promise<Source> {
   };
 }
 
+// Each journal file's reads and writes, one at a time: two at once would both
+// read the old file, and the second write would drop the first one's entry.
+const queues = new Map<string, Promise<unknown>>();
+
+function inTurn<T>(path: string, work: () => Promise<T>): Promise<T> {
+  const turn = (queues.get(path) ?? Promise.resolve()).then(work);
+  queues.set(path, turn.catch(() => undefined));
+  return turn;
+}
+
 export function fileJournal(path: string): Journal {
   async function load(): Promise<Record<string, JournalEntry>> {
     try {
@@ -38,18 +48,22 @@ export function fileJournal(path: string): Journal {
     await rename(`${path}.tmp`, path);
   }
   return {
-    async get(key) {
-      return (await load())[key];
+    get(key) {
+      return inTurn(path, async () => (await load())[key]);
     },
-    async set(key, entry) {
-      const entries = await load();
-      entries[key] = entry;
-      await save(entries);
+    set(key, entry) {
+      return inTurn(path, async () => {
+        const entries = await load();
+        entries[key] = entry;
+        await save(entries);
+      });
     },
-    async remove(key) {
-      const entries = await load();
-      delete entries[key];
-      await save(entries);
+    remove(key) {
+      return inTurn(path, async () => {
+        const entries = await load();
+        delete entries[key];
+        await save(entries);
+      });
     },
   };
 }

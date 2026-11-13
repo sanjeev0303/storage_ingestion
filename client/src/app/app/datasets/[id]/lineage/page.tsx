@@ -8,5 +8,5 @@ type Props = { params: Promise<{ id: string }>; searchParams: Promise<{ version?
 export default async function DatasetLineagePage({ params, searchParams }: Props) {
   const { id } = await params;
   const { version } = await searchParams;
-  return <LineageScreen datasetId={id} versionId={version} />;
+  return <LineageScreen key={version ?? ""} datasetId={id} versionId={version} />;
 }

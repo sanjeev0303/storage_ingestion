@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -437,8 +438,17 @@ func (s *Service) lfsUpload(ctx context.Context, p model.Principal, dataset, bas
 	}
 	res, err := s.deps.Uploads.CreateFor(ctx, p, request.CreateUploadRequest{FileName: o.OID, ContentType: "application/octet-stream", SizeBytes: o.Size,
 		ChecksumSHA256: o.OID, IdempotencyKey: "lfs-" + dataset + "-" + o.OID, Dataset: dataset, Path: lfsPath(o.OID)})
+	if errors.Is(err, uploadservice.ErrSessionEnded) {
+		// The key is the object's, so an earlier session for it that ended
+		// unused holds it until the session is compacted.
+		o.Error = &LFSError{Code: 409, Message: "an earlier upload of this object ended unfinished; push it again later"}
+		return nil
+	}
 	if err != nil {
 		return err
+	}
+	if res.Plan.UploadURL == "" {
+		return nil // these bytes were uploaded already and are being checked
 	}
 	header := map[string]string{"Content-Type": "application/octet-stream"}
 	for k, v := range res.Plan.Headers {
@@ -475,7 +485,7 @@ func (s *Service) LFSVerify(ctx context.Context, p model.Principal, dataset, upl
 		if found && status == string(model.AssetStatusAvailable) {
 			return nil
 		}
-		if found && status == string(model.AssetStatusRejected) {
+		if found && (status == string(model.AssetStatusRejected) || status == string(model.AssetStatusBlocked)) {
 			return invalid("the object was rejected by its checks")
 		}
 		select {

@@ -91,6 +91,63 @@ describe("AccessScreen", () => {
     await waitFor(() => expect(calls).toEqual(['{"link_ids":["l1"]}', "ack"]));
   });
 
+  it("keeps the new token dialog open while the token is being made, so its secret is always shown", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let started = false;
+    base();
+    server.use(
+      http.post(`${API}/api-tokens`, async () => {
+        started = true;
+        await gate;
+        return HttpResponse.json({ id: "t1", name: "ci", token: "orb_pat_abc123", hint: "orb_pat_abcâ€¦", permissions: [],
+          datasets: [], networks: [], allow_links: false, expires_at: "2027-01-28T00:00:00Z", created_at: "2026-10-30T00:00:00Z" },
+          { status: 201 });
+      }),
+    );
+    renderWithProviders(<AccessScreen />, { permissions: ["assets.read", "org.read"] });
+
+    await userEvent.click(await screen.findByRole("button", { name: "New token" }));
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText(/^Name/), "ci");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create token" }));
+    await waitFor(() => expect(started).toBe(true));
+    await userEvent.keyboard("{Escape}");
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    release();
+    expect(await screen.findByText("orb_pat_abc123")).toBeInTheDocument();
+  });
+
+  it("refuses a download budget that is not a number instead of removing it", async () => {
+    base();
+    renderWithProviders(<AccessScreen />, { permissions: ["assets.read", "org.read", "org.manage"] });
+    const monthly = await screen.findByLabelText(/Monthly budget, GB/);
+    await userEvent.type(monthly, "1,5");
+    await userEvent.tab();
+    expect(screen.getByRole("button", { name: "Save access policy" })).toBeDisabled();
+    expect(screen.getByText("A number of GB, or empty for none.")).toBeInTheDocument();
+  });
+
+  it("keeps unsaved policy edits through a refetch and says someone else changed it", async () => {
+    let current = { ...policy, updated_at: "2026-10-30T09:00:00Z" };
+    base();
+    server.use(http.get(`${API}/access-policy`, () => HttpResponse.json(current)));
+    const { client } = renderWithProviders(<AccessScreen />, { permissions: ["assets.read", "org.read", "org.manage"] });
+    const threshold = await screen.findByLabelText(/Share links in five minutes/);
+    await userEvent.clear(threshold);
+    await userEvent.type(threshold, "500");
+
+    current = { ...current, anomaly_action: "REVOKE_LINKS", updated_at: "2026-10-30T10:00:00Z" };
+    await client.invalidateQueries();
+    expect(await screen.findByText(/Someone else changed the access policy after you started editing/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Share links in five minutes/)).toHaveValue("500");
+
+    await userEvent.click(screen.getByRole("button", { name: "Load the latest values" }));
+    expect(screen.getByLabelText(/Share links in five minutes/)).toHaveValue("300");
+    expect(screen.getByLabelText("On an anomaly")).toHaveValue("REVOKE_LINKS");
+  });
+
   it("shows the policy read-only without org.manage", async () => {
     base();
     renderWithProviders(<AccessScreen />, { permissions: ["assets.read", "org.read"] });

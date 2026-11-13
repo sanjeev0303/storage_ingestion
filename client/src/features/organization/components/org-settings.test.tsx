@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
@@ -40,12 +40,29 @@ describe("OrgSettings", () => {
     await userEvent.type(name, "Acme Labs");
     await userEvent.click(screen.getByRole("button", { name: "Save settings" }));
 
-    await screen.findByDisplayValue("Acme Labs");
+    await waitFor(() => expect(sent.body).toBeDefined());
     expect(sent.body).toEqual({
       name: "Acme Labs",
       allowed_email_domains: ["acme.test", "acme.example"],
       invitation_ttl_hours: 72,
     });
+  });
+
+  it("keeps an unsaved name through a refetch and says someone else changed the settings", async () => {
+    let current = org;
+    server.use(
+      http.get(`${API}/organization`, () => HttpResponse.json(current)),
+      http.get(`${API}/organization/roles`, () => HttpResponse.json({ roles: [] })),
+    );
+    const { client } = renderWithProviders(<OrgSettings />);
+    const name = await screen.findByLabelText(/^Name/);
+    await userEvent.clear(name);
+    await userEvent.type(name, "Acme Labs");
+
+    current = { ...org, invitation_ttl_hours: 24 };
+    await client.invalidateQueries();
+    expect(await screen.findByText(/Someone else changed the organization settings after you started editing/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Name/)).toHaveValue("Acme Labs");
   });
 
   it("says plainly that saving replaces every setting", async () => {

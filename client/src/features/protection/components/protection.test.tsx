@@ -4,6 +4,7 @@ import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import { renderWithProviders } from "@/test/render";
 import { API, server } from "@/test/server";
+import { ExportPanel } from "./export-panel";
 import { ProtectionScreen } from "./protection-screen";
 
 const dataset = {
@@ -57,7 +58,7 @@ describe("ProtectionScreen", () => {
   });
 
   it("estimates a migration before starting it", async () => {
-    let asked: Record<string, unknown>[] = [];
+    const asked: Record<string, unknown>[] = [];
     base();
     server.use(http.post(`${API}/datasets/ds1/migrations`, async ({ request }) => {
       const body = (await request.json()) as Record<string, unknown>;
@@ -73,5 +74,90 @@ describe("ProtectionScreen", () => {
     await userEvent.click(screen.getByRole("button", { name: "Migrate 3 objects" }));
     await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Start migration" }));
     await waitFor(() => expect(asked).toEqual([{ target_connection_id: "sc_b", dry_run: true }, { target_connection_id: "sc_b" }]));
+  });
+
+  it("drops an estimate that comes back for a target no longer chosen", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let asked = false;
+    base();
+    server.use(
+      http.get(`${API}/storage-connections`, () => HttpResponse.json({ default_connection_id: "sc_a", connections: [
+        { id: "sc_a", name: "Primary", status: "ACTIVE" }, { id: "sc_b", name: "Second provider", status: "ACTIVE" },
+        { id: "sc_c", name: "Third provider", status: "ACTIVE" }] })),
+      http.post(`${API}/datasets/ds1/migrations`, async () => {
+        asked = true;
+        await gate;
+        return HttpResponse.json({ plan: { objects: 3, bytes: 3072, already_there: 0, egress_estimate_usd: 0.27, egress_note: "list prices" } });
+      }),
+    );
+    renderWithProviders(<ProtectionScreen id="ds1" />, { permissions: ["datasets.read", "datasets.manage", "storage.manage"] });
+    await userEvent.click(await screen.findByRole("button", { name: "Migrate" }));
+    await within(screen.getByLabelText("Target connection")).findByRole("option", { name: "Third provider" });
+    await userEvent.selectOptions(screen.getByLabelText("Target connection"), "sc_b");
+    await userEvent.click(screen.getByRole("button", { name: "Estimate" }));
+    await waitFor(() => expect(asked).toBe(true));
+    await userEvent.selectOptions(screen.getByLabelText("Target connection"), "sc_c");
+
+    release();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Estimate" })).not.toHaveAttribute("aria-busy"));
+    expect(screen.queryByText("$0.27")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Migrate \d/ })).not.toBeInTheDocument();
+  });
+
+  it("shows what changed since the clean point as soon as it is set", async () => {
+    let clean = "";
+    base();
+    server.use(
+      http.get(`${API}/datasets/ds1`, () => HttpResponse.json({ ...dataset, ...(clean && { clean_version_id: clean }) })),
+      http.put(`${API}/datasets/ds1/clean-point`, async ({ request }) => {
+        clean = ((await request.json()) as { version_id: string }).version_id;
+        return new HttpResponse(null, { status: 204 });
+      }),
+      http.get(`${API}/datasets/ds1/clean-point/diff`, () =>
+        HttpResponse.json({ clean_version_id: "v1", changes: [{ path: "scans/new.dcm", change: "ADDED", uploaded_by: "u2", uploaded_at: "2026-10-31T09:00:00Z" }] })),
+    );
+    renderWithProviders(<ProtectionScreen id="ds1" />, { permissions: ["datasets.read", "datasets.manage"] });
+    expect(await screen.findByText("No clean point")).toBeInTheDocument();
+    await screen.findByRole("option", { name: "Version 1" });
+    await userEvent.selectOptions(screen.getByLabelText("Known-good version"), "v1");
+    await userEvent.click(screen.getByRole("button", { name: "Mark clean" }));
+    expect(await screen.findByText("scans/new.dcm")).toBeInTheDocument();
+  });
+
+  it("keeps unsaved protection edits through a refetch and says the dataset changed elsewhere", async () => {
+    let current = dataset;
+    base();
+    server.use(http.get(`${API}/datasets/ds1`, () => HttpResponse.json(current)));
+    const { client } = renderWithProviders(<ProtectionScreen id="ds1" />, { permissions: ["datasets.read", "datasets.manage"] });
+    const scrub = await screen.findByLabelText(/Scrub every, days/);
+    await userEvent.clear(scrub);
+    await userEvent.type(scrub, "30");
+
+    current = { ...dataset, revision: 8, escrow: true };
+    await client.invalidateQueries();
+    expect(await screen.findByText(/Someone else changed this dataset after you started editing/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Scrub every, days/)).toHaveValue("30");
+  });
+});
+
+describe("ExportPanel", () => {
+  it("shows a stopped schedule as 0 hours, not the 24 suggested for a new one", async () => {
+    server.use(
+      http.get(`${API}/export-schedule`, () => HttpResponse.json({ connection_id: "sc_b", interval_hours: 0 })),
+      http.get(`${API}/storage-connections`, () => HttpResponse.json({ connections: [{ id: "sc_b", name: "Second provider", status: "ACTIVE" }] })),
+    );
+    renderWithProviders(<ExportPanel />, { permissions: ["audit.read", "org.manage"] });
+    expect(await screen.findByLabelText(/Every, hours/)).toHaveValue("0");
+  });
+
+  it("shows the error instead of an empty form when the schedule cannot be read", async () => {
+    server.use(
+      http.get(`${API}/export-schedule`, () => HttpResponse.json({ error: "boom" }, { status: 500 })),
+      http.get(`${API}/storage-connections`, () => HttpResponse.json({ connections: [] })),
+    );
+    renderWithProviders(<ExportPanel />, { permissions: ["audit.read", "org.manage"] });
+    expect(await screen.findByRole("button", { name: "Try again" })).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Every, hours/)).not.toBeInTheDocument();
   });
 });

@@ -29,4 +29,27 @@ type OperationsStatus struct {
 	// copies of them would have taken.
 	SharedAssets int64
 	SharedBytes  int64
+
+	// Workers are the heartbeats written in the last day, by every worker
+	// process of the platform: they are shared by all organizations.
+	Workers []WorkerHeartbeat
 }
+
+// WorkerHeartbeat is one worker process's last sign of life.
+type WorkerHeartbeat struct {
+	Kind       string
+	Instance   string
+	StartedAt  time.Time
+	LastSeenAt time.Time
+}
+
+// Worker heartbeats are written every WorkerBeatInterval; a process silent
+// for WorkerStaleAfter is taken as stopped.
+const (
+	WorkerBeatInterval = 30 * time.Second
+	WorkerStaleAfter   = 2 * time.Minute
+)
+
+// WorkerKinds are the workers that write heartbeats, in the order a status
+// page lists them. A kind with no live process is still reported.
+var WorkerKinds = []string{"upload", "processing", "packing", "dataset", "outbox", "cleanup", "reconciliation", "compaction", "webhook"}

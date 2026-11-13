@@ -56,6 +56,11 @@ func (r *AccessRepository) TokenByHash(ctx context.Context, hash string) (model.
 	return scanToken(r.db.Pool.QueryRow(ctx, `SELECT `+tokenColumns+` FROM api_tokens WHERE token_hash = $1`, hash))
 }
 
+func (r *AccessRepository) RehashToken(ctx context.Context, id, oldHash, newHash string) error {
+	_, err := r.db.Pool.Exec(ctx, `UPDATE api_tokens SET token_hash = $3 WHERE id = $1 AND token_hash = $2`, id, oldHash, newHash)
+	return err
+}
+
 func (r *AccessRepository) TouchToken(ctx context.Context, id, ip string, at time.Time) error {
 	_, err := r.db.Pool.Exec(ctx, `UPDATE api_tokens SET last_used_at = $2, last_used_ip = NULLIF($3, '') WHERE id = $1`, id, at, ip)
 	return err
@@ -270,10 +275,16 @@ func (r *AccessRepository) Alerts(ctx context.Context, tenantID, state string, l
 	return collect(rows, scanAlert)
 }
 
+// Acknowledge records who acknowledged an open alert. One acknowledged
+// already is answered as it is: the first acknowledgement stays.
 func (r *AccessRepository) Acknowledge(ctx context.Context, tenantID, id, by string, at time.Time) (model.SecurityAlert, error) {
-	return scanAlert(r.db.Pool.QueryRow(ctx, `
+	a, err := scanAlert(r.db.Pool.QueryRow(ctx, `
 		UPDATE security_alerts SET state = 'ACKNOWLEDGED', acknowledged_by = $3, acknowledged_at = $4
-		WHERE tenant_id = $1 AND id = $2 RETURNING `+alertColumns, tenantID, id, by, at))
+		WHERE tenant_id = $1 AND id = $2 AND state = 'OPEN' RETURNING `+alertColumns, tenantID, id, by, at))
+	if errors.Is(err, model.ErrAlertNotFound) {
+		return scanAlert(r.db.Pool.QueryRow(ctx, `SELECT `+alertColumns+` FROM security_alerts WHERE tenant_id = $1 AND id = $2`, tenantID, id))
+	}
+	return a, err
 }
 
 // ─── Read statistics, for anomaly detection ──────────────────────────

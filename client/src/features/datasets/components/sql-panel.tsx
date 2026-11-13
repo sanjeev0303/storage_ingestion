@@ -1,7 +1,7 @@
 "use client";
 
 import type { AsyncDuckDBConnection } from "@duckdb/duckdb-wasm";
-import { useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox, Field, Select, Textarea } from "@/components/ui/field";
 import { Panel } from "@/components/ui/panel";
@@ -70,13 +70,24 @@ export function SqlPanel({
   const [groupKind, setGroupKind] = useState<Group>("csv");
   const [groupSplit, setGroupSplit] = useState("");
   const [inPlace, setInPlace] = useState(false);
+  const unmounted = useRef(false);
+
+  useEffect(() => {
+    unmounted.current = false;
+    return () => {
+      unmounted.current = true;
+      void conn.current?.close();
+      conn.current = null;
+    };
+  }, []);
 
   async function start() {
     setBusy("Starting DuckDB and reading the members");
     setError(null);
+    let c: AsyncDuckDBConnection | null = null;
     try {
       const db = await openDuckDB();
-      const c = await db.connect();
+      c = await db.connect();
       const all: VersionMember[] = [];
       let after: number | undefined;
       do {
@@ -96,7 +107,14 @@ export function SqlPanel({
         metadata: JSON.stringify(m.metadata ?? {}),
       }));
       await db.registerFileText("members.json", JSON.stringify(rows));
+      // The tab shares one DuckDB catalog, so tables an earlier panel made are
+      // still there; this panel's members replace theirs.
+      await c.query(`DROP TABLE IF EXISTS "members"`);
       await c.insertJSONFromPath("members.json", { name: "members" });
+      if (unmounted.current) {
+        void c.close();
+        return;
+      }
       conn.current = c;
       setMembers(all);
       setTruncated(Boolean(after));
@@ -104,6 +122,7 @@ export function SqlPanel({
         { name: "members", path: "the snapshot's members", rows: rows.length },
       ]);
     } catch (e) {
+      void c?.close();
       setError(`DuckDB could not start: ${describeError(e)}`);
     } finally {
       setBusy(null);
@@ -137,7 +156,7 @@ export function SqlPanel({
       await db.registerFileBuffer(file, bytes);
       setBusy(`Reading ${member.path} into the table ${name}`);
       await c.query(
-        `CREATE TABLE "${name}" AS SELECT * FROM ${reader(kind, file)}`,
+        `CREATE OR REPLACE TABLE "${name}" AS SELECT * FROM ${reader(kind, file)}`,
       );
       const count = await c.query(`SELECT count(*) AS n FROM "${name}"`);
       const rows = Number(count.toArray()[0]?.n ?? 0);
@@ -202,7 +221,7 @@ export function SqlPanel({
         selects.push(`SELECT *, ${sqlString(member.path)} AS _file FROM ${reader(kind, file)}`);
       }
       setBusy(`Reading ${groupFiles.length} files into the table ${name}`);
-      await c.query(`CREATE TABLE "${name}" AS ${selects.join(" UNION ALL BY NAME ")}`);
+      await c.query(`CREATE OR REPLACE TABLE "${name}" AS ${selects.join(" UNION ALL BY NAME ")}`);
       const count = await c.query(`SELECT count(*) AS n FROM "${name}"`);
       const rows = Number(count.toArray()[0]?.n ?? 0);
       const what = `${formatNumber(groupFiles.length)} ${GROUP_TEXT[groupKind]} files${groupSplit ? ` of ${groupSplit}` : ""}`;

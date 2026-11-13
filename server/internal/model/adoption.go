@@ -41,6 +41,17 @@ const (
 	AdoptSkipped  = "SKIPPED"
 )
 
+// AdoptionFrom lists, for each state a worker moves a job to, the states it
+// may come from: QUEUED -> READING -> RUNNING -> COMPLETED, and FAILED from
+// any of them. READING is entered again after a crash mid-read. CANCELLED
+// is reached only through a cancel, never a worker.
+var AdoptionFrom = map[string][]string{
+	AdoptionReading:   {AdoptionQueued, AdoptionReading},
+	AdoptionRunning:   {AdoptionReading},
+	AdoptionCompleted: {AdoptionRunning},
+	AdoptionFailed:    {AdoptionQueued, AdoptionReading, AdoptionRunning},
+}
+
 var (
 	ErrAdoptionNotFound = errors.New("adoption job not found")
 	ErrInvalidAdoption  = errors.New("invalid adoption")

@@ -23,6 +23,7 @@ Runbooks, each with its local commands and limits:
 | Object catalog, versions and listing | `docs/catalog.md` |
 | Datasets, snapshots, validation, readiness and lineage | `docs/datasets.md` |
 | Storage connections, bring your own storage, providers, credentials | `docs/storage-connections.md` |
+| Testing against Floci (AWS, Azure and GCP emulators) | `docs/testing-with-floci.md` |
 
 Migrations: `scripts/migrate.ps1` (see `docs/security.md`). Commands live in
 `cmd/`: the API and one binary per worker. Tests: `go test ./internal/...

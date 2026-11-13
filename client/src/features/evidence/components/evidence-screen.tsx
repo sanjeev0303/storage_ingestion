@@ -3,6 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
+import { ChangedElsewhere } from "@/components/ui/changed-elsewhere";
 import { Checkbox, Field, Input, Select } from "@/components/ui/field";
 import { PageHeader } from "@/components/ui/page";
 import { Panel } from "@/components/ui/panel";
@@ -126,16 +127,17 @@ function AnchorsPanel() {
 function ExportPanel() {
   const [format, setFormat] = useState<"jsonl" | "cef">("jsonl");
   const [afterSeq, setAfterSeq] = useState("");
+  // The format travels with the call, so the file is named after the one clicked.
   const save = useMutation({
-    mutationFn: () => fetchFile("/organization/audit/export", { format, after_seq: afterSeq.trim() || undefined }),
-    onSuccess: (blob) => saveBlob(blob, `audit-export.${format === "cef" ? "cef" : "jsonl"}`),
+    mutationFn: (chosen: "jsonl" | "cef") => fetchFile("/organization/audit/export", { format: chosen, after_seq: afterSeq.trim() || undefined }),
+    onSuccess: (blob, chosen) => saveBlob(blob, `audit-export.${chosen === "cef" ? "cef" : "jsonl"}`),
     onError: notify.error,
   });
   const afterError = afterSeq.trim() !== "" && !/^\d+$/.test(afterSeq.trim()) ? "Enter an entry number." : undefined;
 
   function submit(e: FormEvent) {
     e.preventDefault();
-    if (!afterError) save.mutate();
+    if (!afterError) save.mutate(format);
   }
 
   return (
@@ -172,6 +174,9 @@ function ExportPanel() {
 
 function SettingsPanel() {
   const organizationId = useOrganizationId();
+  // The form restarts with the latest settings after a save or when asked. A
+  // background refetch alone must not wipe what the user typed.
+  const [reloads, setReloads] = useState(0);
   const settings = useQuery({
     queryKey: orgKey(organizationId, "evidence", "settings"),
     queryFn: ({ signal }) => getSettings(signal),
@@ -184,27 +189,32 @@ function SettingsPanel() {
       ) : settings.isError ? (
         <ErrorState error={settings.error} onRetry={() => settings.refetch()} />
       ) : (
-        <SettingsForm key={settings.data.updated_at} initial={settings.data} />
+        <SettingsForm key={reloads} latest={settings.data} onReload={() => setReloads((n) => n + 1)} />
       )}
     </Panel>
   );
 }
 
-function SettingsForm({ initial }: { initial: EvidenceSettings }) {
+function SettingsForm({ latest, onReload }: { latest: EvidenceSettings; onReload: () => void }) {
   const organizationId = useOrganizationId();
   const { can } = useSession();
   const client = useQueryClient();
   const connections = useStorageConnections();
+  // The settings as they were when editing started.
+  const [initial] = useState(latest);
   const [draft, setDraft] = useState(initial);
   const save = useMutation({
     mutationFn: () => putSettings(draft),
-    onSuccess: () => {
+    onSuccess: async () => {
       notify.success("Evidence settings saved");
-      client.invalidateQueries({ queryKey: orgKey(organizationId, "evidence") });
+      await client.invalidateQueries({ queryKey: orgKey(organizationId, "evidence") });
+      onReload();
     },
     onError: notify.error,
   });
   const editable = can("org.manage");
+  // Our own save also moves updated_at; that is not a change made elsewhere.
+  const changedElsewhere = !save.isSuccess && latest.updated_at !== initial.updated_at;
 
   function set<K extends keyof EvidenceSettings>(key: K, value: EvidenceSettings[K]) {
     setDraft((d) => ({ ...d, [key]: value }));
@@ -227,6 +237,7 @@ function SettingsForm({ initial }: { initial: EvidenceSettings }) {
 
   return (
     <form onSubmit={submit} className="flex flex-col gap-4">
+      {changedElsewhere && <ChangedElsewhere subject="the evidence settings" onReload={onReload} />}
       <fieldset disabled={!editable} className="flex flex-col gap-4">
         <Field label="Anchor connection" hint="Best a bucket with Object Lock. None keeps anchors in the database only.">
           {(props) => (

@@ -79,6 +79,34 @@ services:
     ports:
       - "127.0.0.1:10000:10000"
 
+  # Floci: one emulator per cloud, for AWS-, Azure- and GCP-shaped tests
+  # beyond MinIO, Azurite and fake-gcs-server (STS AssumeRole, KMS, SQS, Object
+  # Lock, signed GCS XML part uploads). Opt-in: `docker compose --profile floci
+  # up -d`, then `scripts/floci-setup.sh`. See docs/testing-with-floci.md.
+  floci-aws:
+    image: floci/floci:2.4.0
+    container_name: object-storage-floci-aws
+    profiles: ["floci"]
+    environment:
+      # Without it any signature passes, so signed-URL and wrong-key tests prove nothing.
+      FLOCI_SERVICES_S3_ENFORCE_AUTH: "true"
+    ports:
+      - "127.0.0.1:4566:4566"
+
+  floci-az:
+    image: floci/floci-az:0.16.0
+    container_name: object-storage-floci-az
+    profiles: ["floci"]
+    ports:
+      - "127.0.0.1:4577:4577"
+
+  floci-gcp:
+    image: floci/floci-gcp:0.12.0
+    container_name: object-storage-floci-gcp
+    profiles: ["floci"]
+    ports:
+      - "127.0.0.1:4588:4588"
+
 volumes:
   postgres_data:
   minio_data:

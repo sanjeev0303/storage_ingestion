@@ -11,5 +11,5 @@ export async function GET(req: NextRequest) {
   const code = params.get("code") ?? "";
   const state = params.get("state") ?? "";
   if (!code || !state) return refused("The identity provider's answer was incomplete. Start again.");
-  return finishSignIn(req, "/api/v1/auth/sso/callback", { code, state });
+  return finishSignIn(req, "/api/v1/auth/sso/callback", { code, state }, state);
 }

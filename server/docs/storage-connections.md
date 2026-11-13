@@ -99,18 +99,34 @@ Signing uses the key's private key locally; no `iam.serviceAccounts.signBlob` is
 
 ## Credential encryption and rotation
 
-- **Encryption.** Credentials are accepted only on create and rotate, and stored only as AES-256-GCM ciphertext (`internal/platform/secretbox`). The ciphertext is sealed with a dedicated 32-byte key from `STORAGE_CREDENTIAL_KEYS`. With BYOS on, a missing, malformed, all-zero or reused key (the database password, `S3_SECRET_ACCESS_KEY` and so on) stops the process at startup.
-- **Associated data.** Each ciphertext's associated data is `storage-credential/v1|<tenant>|<connection>|<provider>|<credential version>`. A ciphertext copied to another row, tenant, provider or version does not open.
-- **Where plaintext lives.** Plaintext exists only while a provider client is built; the buffer is cleared after decoding. `model.StorageSecrets` prints, logs and JSON-encodes as `[redacted credentials]`. No API response, audit event, log line, error, metric or queue message carries a credential. Provider error messages are reduced to categories.
+- **Envelope encryption.** Credentials are accepted only on create, rotate and stage, and stored only as ciphertext (`internal/platform/secretbox`, migration `000051_credential_envelope.sql`). Each credential is sealed with AES-256-GCM under a **data key of its own**, 32 random bytes made for it. Only that data key is sealed by a **master key** from `STORAGE_CREDENTIAL_KEYS`, and kept next to the credential (`credential_wrapped_key`, and `staged_wrapped_key` and `previous_wrapped_key` for the second credential and the rollback one). `credential_key_version` names the master key. With BYOS on, a missing, malformed, all-zero or reused master key (the database password, `S3_SECRET_ACCESS_KEY` and so on) stops the process at startup.
+- **Associated data.** The credential's ciphertext is bound to `storage-credential/v1|<tenant>|<connection>|<provider>|<credential version>`, and its wrapped data key to the same string under a prefix of its own. A ciphertext or a wrapped key copied to another row, tenant, provider or version does not open, and a wrapped key can never be opened as if it were a credential.
+- **Credentials sealed before envelopes** (a NULL wrapped key) were sealed by the master key directly. They still open. Each moves into an envelope when it is next written (rotated, staged and promoted), or all at once with `credential-admin reseal` (below).
+- **Where plaintext lives.** Plaintext exists only while a provider client is built or a credential is sealed. The JSON buffer, the data key and the opened data key are cleared as soon as they are used. The provider SDKs keep credentials as Go strings inside the clients they build, which Go cannot clear; the client cache (`STORAGE_CLIENT_CACHE_TTL`, at most 24 h) bounds how long. `model.StorageSecrets` and the request DTO `request.StorageCredentials` print, log and (the model) JSON-encode as `[redacted credentials]`. No API response, audit event, log line, error, metric or queue message carries a credential. A failing test answers a category; the provider's own message, which may echo a key, is never returned, stored or logged.
+- **Deleted connections** keep no credential: deleting one erases its current, staged and rollback credentials together. `credential-admin reseal` also erases staged and rollback credentials that connections deleted before this change kept.
 - **Credential rotation.** `POST /{id}/rotate-credentials` tests the new credentials first and stores them only if the test passes. It then bumps the credential version and drops cached clients in this process; other processes rebuild when their connection cache expires (`STORAGE_CONNECTION_CACHE_TTL`, 10 s). Only the newest credential is stored, so a process that needs a new client while its cached row still names the old version re-reads the row instead of failing; clients it already holds keep working with the old secret until they are rebuilt. The old secret is never returned.
-- **Key rotation.**
-  1. Add a new key version (`STORAGE_CREDENTIAL_KEYS=1:<old>,2:<new>`, `STORAGE_CREDENTIAL_KEY_VERSION=2`) on every process. New credentials are then sealed with version 2, and old ciphertexts still open with version 1.
-  2. Rotate each connection's credentials to re-seal them.
-  3. Remove version 1 once no row uses it:
-     ```sql
-     SELECT count(*) FROM storage_connections WHERE credential_key_version = 1;
-     ```
-- **KMS.** `secretbox.Sealer` (`Seal` / `Open` with associated data) is the seam for a KMS-backed envelope implementation. None is deployed in this phase.
+- **Who can touch credentials.** Creating, testing, rotating, staging, promoting, rolling back and deleting all need `storage.manage` (owners and admins), checked and audited (`storage_connection.create`, `.test`, `.rotate`, `.credentials.stage`, `.credentials.promote`, `.credentials.rollback`, `.delete`, and every refusal). No audit detail holds credential material: only names, statuses, categories and version numbers. A connection is identified to people by its rotation number (`credential_rotation`); no part of a secret is returned.
+- **KMS.** The master key is anything that implements `secretbox.Sealer`: today the local keyring. A KMS (AWS KMS `Encrypt`/`Decrypt` with the associated data as encryption context, for one) fits the same interface and would wrap only the small data keys, one call per credential opened. None is built: it would add the KMS SDK as a dependency for a deployment that does not use one yet.
+
+### Rotating the master key (`STORAGE_CREDENTIAL_KEYS`)
+
+The master key only wraps data keys, so a rotation re-wraps 32-byte keys. Only a credential sealed before envelopes is opened, and then sealed again in one.
+
+1. **Add the new key on every process.** Generate 32 random bytes (`openssl rand -base64 32`) and append them under the next version, keeping the old one: `STORAGE_CREDENTIAL_KEYS=1:<old>,2:<new>`. Set `STORAGE_CREDENTIAL_KEY_VERSION=2` (or leave it unset: the highest version is the current one). Restart or redeploy every process that has `STORAGE_CREDENTIAL_KEYS` (the API and the workers). From now on new credentials are wrapped by version 2, and everything under version 1 still opens.
+2. **Check before writing anything.**
+   ```bash
+   go run ./cmd/credential-admin status            # counts by key version and envelope
+   go run ./cmd/credential-admin reseal -dry-run   # opens every credential, writes nothing
+   ```
+   A dry run lists any connection whose credentials do not open (a key version that is not configured). Fix that first: the credentials of such a connection must be rotated by its owner.
+3. **Re-seal.**
+   ```bash
+   go run ./cmd/credential-admin reseal            # -batch 100 connections per transaction
+   ```
+   Each batch is one short transaction that locks only its own rows, so connections keep working and rotating meanwhile. The revision is not bumped and cached clients stay valid: the secrets do not change. The run can be stopped at any time and started again; it picks up whatever is still not under the newest key (`-after <connection ID>` skips ahead explicitly). Running it twice changes nothing the second time.
+4. **Confirm and remove the old key.** When `credential-admin status` shows nothing under version 1 (deleted connections included), remove it from `STORAGE_CREDENTIAL_KEYS` on every process and restart them.
+
+The webhook signing secrets, SSO client secrets and chat integration URLs are sealed with the same keyring but not in envelopes, and `credential-admin` does not re-seal them: keep their key version until those are re-entered.
 
 ## Endpoint and network policy
 
@@ -126,7 +142,7 @@ Endpoints are a security boundary (`internal/platform/netguard`, `registry.Endpo
 - **Generic S3-compatible endpoints.** Any public host.
 - **Checked on every connection.** Every dial checks the address it actually connects to, so a name that later resolves to loopback, link-local (`169.254.169.254`), private, carrier-grade NAT or reserved space is refused when the connection is made. This defeats DNS rebinding. A connection test also resolves the name first and reports `ENDPOINT_REJECTED`.
 - **HTTP client.** No redirects are followed and no proxy is used. TLS is 1.2 or newer. Dial, TLS-handshake and response-header timeouts apply, and each metadata call is bounded by `STORAGE_OPERATION_TIMEOUT`.
-- **Abuse limits.** Connection tests and rotations are rate limited per organization (`RATE_LIMIT_STORAGE_TEST`, 10/min by default) and need `storage.manage`, so a test cannot be used as a network scanner.
+- **Abuse limits.** Connection tests and rotations are rate limited per organization (`RATE_LIMIT_STORAGE_TEST`, 10/min by default) and need `storage.manage`, so a test cannot be used as a network scanner. The connection service counts every test against the same per-organization budget, whichever route asks for it: tests, rotations and enabling, and also staging and promoting credentials, edits that are tested and posture checks. Over it, the answer is 429 with `Retry-After`.
 
 ## Connection API
 
@@ -140,7 +156,7 @@ Every route needs a signed-in member of the organization. The `storage.*` permis
 | `GET /api/v1/storage-connections` | `storage.read` | the platform connection, the organization's own, `default_connection_id` |
 | `GET /api/v1/storage-connections/{id}` | `storage.read` | `ETag` is the revision |
 | `PATCH /api/v1/storage-connections/{id}` | `storage.manage` | name, region, endpoint, path style, staging mode; `If-Match` or `revision`; on an `ACTIVE` or `DISABLED` connection a new endpoint, region or path style is tested first and refused with 422 and the test result if it fails (see below) |
-| `POST /api/v1/storage-connections/{id}/test` | `storage.manage` | `{"write_probe": true}` also writes, reads back and deletes one small object of its own under the ready prefix; also reads the metadata of one published object the connection holds, if any; a pass activates a `PENDING` connection. Testing a `PENDING` connection, and rotating credentials, always runs the write probe, so a read-only key cannot be activated |
+| `POST /api/v1/storage-connections/{id}/test` | `storage.manage` | `{"write_probe": true}` also writes, reads back and deletes one small object of its own under the ready prefix; also reads the metadata of one published object the connection holds, if any; a pass activates a `PENDING` connection. Testing a `PENDING` connection, and rotating credentials, always runs the write probe, so a read-only key cannot be activated. A test of credentials replaced while it ran is not recorded: the answer is the test, and the connection as it now is |
 | `POST /api/v1/storage-connections/{id}/rotate-credentials` | `storage.manage` | tested before stored; 422 with the test result when refused |
 | `POST /api/v1/storage-connections/{id}/set-default` | `storage.manage` | `ACTIVE` connections or `platform` |
 | `POST /api/v1/storage-connections/{id}/disable` | `storage.manage` | not the default; existing work keeps draining |
@@ -306,8 +322,9 @@ docker compose --profile emulators up -d fake-gcs azurite
 Tests:
 
 ```bash
-# Unit (no services): registry, sealing, connection service, routing of
-# upload, processing, promotion, delivery, cleanup; endpoint policy
+# Unit (no services): registry, sealing and envelopes, the re-seal tool,
+# connection service, routing of upload, processing, promotion, delivery,
+# cleanup; endpoint policy
 go test ./internal/... ./cmd/... ./tests/unit/...
 
 # Adapters against MinIO and the emulators
@@ -319,7 +336,7 @@ go test ./internal/infrastructure/storage/azure/
 
 # PostgreSQL and the end-to-end BYOS flow over HTTP (with the TEST_S3_COMPATIBLE_* above)
 TEST_DATABASE_URL=postgres://storage_app:...@127.0.0.1:5435/object_storage_test?sslmode=disable \
-go test ./tests/integration/ -run 'StorageConnections|BringYourOwnStorage'
+go test ./tests/integration/ -run 'StorageConnections|BringYourOwnStorage|Reseal'
 ```
 
 Without their variables the adapter and end-to-end tests skip and say so.

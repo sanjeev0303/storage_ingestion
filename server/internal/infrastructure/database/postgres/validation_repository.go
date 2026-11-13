@@ -334,13 +334,14 @@ func (r *DatasetRepository) ExtendValidation(ctx context.Context, jobID, owner s
 
 // MemberEvidence reads a page of a version's members with what is known
 // about each object version now: whether its object and asset still exist,
-// the asset's state and records, and its processing evidence.
+// the asset's state (BLOCKED for a blocked one) and records, and its
+// processing evidence.
 func (r *DatasetRepository) MemberEvidence(ctx context.Context, tenantID, versionID string, after int64, limit int) ([]model.MemberEvidence, error) {
 	rows, err := r.db.Pool.Query(ctx, `
 		SELECT vm.ordinal, vm.object_id, vm.asset_id, vm.object_version, vm.path, COALESCE(vm.label, ''), COALESCE(vm.split, ''),
 		       vm.size_bytes, vm.content_type, COALESCE(vm.checksum_sha256, ''), vm.metadata,
 		       o.id IS NOT NULL, COALESCE(o.deleted_at IS NOT NULL, false),
-		       COALESCE(a.status, ''), COALESCE(a.size_bytes, 0), COALESCE(a.checksum_sha256, ''), COALESCE(a.object_key, ''),
+		       COALESCE(`+assetUsableStatus+`, ''), COALESCE(a.size_bytes, 0), COALESCE(a.checksum_sha256, ''), COALESCE(a.object_key, ''),
 		       COALESCE(pj.verification_status, CASE WHEN pj.checksum_verified_at IS NOT NULL THEN 'PASSED' END, ''),
 		       COALESCE(pj.checksum_source, ''), COALESCE(pj.scan_result, ''), COALESCE(a.storage_connection_id, ''),
 		       COALESCE(a.storage_version_id, ''), COALESCE(pj.content_checks, ''),
@@ -608,8 +609,12 @@ func (r *DatasetRepository) Aggregates(ctx context.Context, tenantID, versionID 
 // that ended: outcome itself when the validated version is still current
 // and the draft still matches it, DRAFT otherwise. While another
 // validation of the current version is unfinished the dataset stays
-// VALIDATING.
+// VALIDATING. The row must be VALIDATING, and both possible targets are
+// moves the lifecycle table allows from it.
 func settleDataset(ctx context.Context, tx pgx.Tx, tenantID, datasetID, versionID, jobID string, outcome model.DatasetLifecycle, now time.Time) error {
+	if !model.CanTransitionDataset(model.LifecycleValidating, outcome) {
+		return fmt.Errorf("%w: a validation cannot settle a dataset to %s", model.ErrDatasetTransition, outcome)
+	}
 	_, err := tx.Exec(ctx, `
 		UPDATE datasets AS d SET
 		    lifecycle_status = CASE WHEN d.current_version_id = $3
@@ -760,6 +765,20 @@ func (r *DatasetRepository) RetryValidation(ctx context.Context, jobID, owner st
 	return nil
 }
 
+// ReleaseValidation gives up owner's lease on a job that shutdown cut
+// short, due again now, keeping the checkpoint and not counting the attempt.
+func (r *DatasetRepository) ReleaseValidation(ctx context.Context, jobID, owner string, now time.Time) error {
+	_, err := r.db.Pool.Exec(ctx, `
+		UPDATE validation_jobs SET lease_owner = NULL, lease_expires_at = NULL, next_attempt_at = $3,
+		                           attempts = GREATEST(attempts - 1, 0), updated_at = $3
+		WHERE id = $1 AND lease_owner = $2 AND state = 'RUNNING'
+	`, jobID, owner, now)
+	if err != nil {
+		return fmt.Errorf("release validation: %w", err)
+	}
+	return nil
+}
+
 // CancelValidation cancels a job no worker holds at once; a worker holding
 // one stops at its next batch.
 func (r *DatasetRepository) CancelValidation(ctx context.Context, tenantID, jobID string, now time.Time) (model.ValidationJob, error) {
@@ -874,9 +893,9 @@ func (r *DatasetRepository) ListFindings(ctx context.Context, tenantID, jobID st
 // ─── Recovery and gauges ──────────────────────────────────────────────
 
 // ReleaseStuckDatasets returns datasets VALIDATING with no unfinished
-// validation to DRAFT. Ending a job settles its dataset in the same
-// transaction, so this only repairs what an operator's direct change or
-// an older bug left behind.
+// validation to DRAFT, a move the lifecycle table allows. Ending a job
+// settles its dataset in the same transaction, so this only repairs what an
+// operator's direct change or an older bug left behind.
 func (r *DatasetRepository) ReleaseStuckDatasets(ctx context.Context, now time.Time) (int64, error) {
 	tag, err := r.db.Pool.Exec(ctx, `
 		UPDATE datasets AS d SET lifecycle_status = 'DRAFT', revision = d.revision + 1, updated_at = $1

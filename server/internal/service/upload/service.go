@@ -147,6 +147,20 @@ func (s *Service) createResult(
 	}, nil
 }
 
+// replay answers a start repeated with the same idempotency key: a fresh
+// upload URL while the session still takes its bytes, the session alone
+// once it completed (there is nothing left to upload), and ErrSessionEnded
+// otherwise, rather than a URL that has expired or a session that is gone.
+func (s *Service) replay(ctx context.Context, session *model.UploadSession) (CreateResult, error) {
+	switch {
+	case session.Status == model.UploadStatusCompleted || session.Status == model.UploadStatusVerified:
+		return CreateResult{Upload: session, Reused: true}, nil
+	case session.Status != model.UploadStatusPending || !session.ExpiresAt.After(s.now()):
+		return CreateResult{}, ErrSessionEnded
+	}
+	return s.createResult(ctx, session, true)
+}
+
 // Create validates the request and ccretes or reuses an upoload session.
 func (s *Service) Create(
 	ctx context.Context,
@@ -156,55 +170,11 @@ func (s *Service) Create(
 		return CreateResult{}, err
 	}
 
-	req := input.Request
-
-	if strings.TrimSpace(input.TenantID) == "" ||
-		strings.TrimSpace(input.OwnerID) == "" {
-		return CreateResult{}, fmt.Errorf("%w: trusted tenant and owner are requeire", ErrInvalidRequest)
-	}
-
-	if strings.TrimSpace(req.IdempotencyKey) == "" {
-		return CreateResult{}, fmt.Errorf("%w: idempotency_key is required", ErrInvalidRequest)
-	}
-
-	if strings.TrimSpace(req.FileName) == "" {
-		return CreateResult{}, fmt.Errorf("%w: file_name is required", ErrInvalidRequest)
-	}
-
-	if strings.TrimSpace(req.ContentType) == "" {
-		return CreateResult{}, fmt.Errorf("%w: content_type is required", ErrInvalidRequest)
-	}
-
-	if req.SizeBytes <= 0 {
-		return CreateResult{}, fmt.Errorf("%w: size_bytes must be positive", ErrInvalidRequest)
-	}
-
-	if req.SizeBytes > s.maxSize {
-		return CreateResult{}, ErrUploadTooLarge
-	}
-
-	if input.Dataset == "" {
-		input.Dataset = req.Dataset
-	}
-	if input.Dataset != "" && !model.ValidDataset(input.Dataset) {
-		return CreateResult{}, fmt.Errorf("%w: invalid dataset", ErrInvalidRequest)
-	}
-	path, err := catalogPath(req.Path, req.FileName, req.Metadata)
+	input, path, err := s.validCreate(input)
 	if err != nil {
 		return CreateResult{}, err
 	}
-
-	// We only validate the checksum's shape here. The actual checksum
-	// must be verified against the uploaded bytes later.
-	if req.ChecksumSHA256 != "" {
-		if len(req.ChecksumSHA256) != 64 {
-			return CreateResult{}, fmt.Errorf("%w: checksum_sha256 must contain 64 hexadecimal character", ErrInvalidRequest)
-		}
-
-		if _, err := hex.DecodeString(req.ChecksumSHA256); err != nil {
-			return CreateResult{}, fmt.Errorf("%w: checksum_sha256 is not valid hexadecimal", ErrInvalidRequest)
-		}
-	}
+	req := input.Request
 
 	// An identical retry returns the original session. Reusing the key
 	// with different file metadata is a conflict.
@@ -220,16 +190,122 @@ func (s *Service) Create(
 			return CreateResult{}, ErrIdempotencyConflict
 		}
 
-		return s.createResult(ctx, existing, true)
+		return s.replay(ctx, existing)
 	}
 
 	if err != model.ErrUploadNotFound {
 		return CreateResult{}, fmt.Errorf("find previous upload request: %w", err)
 	}
 
+	session, err := s.newSession(ctx, input, path)
+	if err != nil {
+		return CreateResult{}, err
+	}
+
+	if err := s.save(ctx, session, req.IdempotencyKey); err != nil {
+		var quotaErr *model.QuotaError
+		if errors.As(err, &quotaErr) || errors.Is(err, model.ErrPathExists) || errors.Is(err, model.ErrPathBusy) ||
+			errors.Is(err, model.ErrConnectionNotActive) || errors.Is(err, model.ErrConnectionNotFound) {
+			return CreateResult{}, err
+		}
+		// Another request may have insterted that same idempotency key
+		// after our initial lookup. Replay its result if the request
+		// metadata matches.
+		if errors.Is(err, model.ErrIdempotencyConflict) {
+			existing, lookupErr := s.repository.GetByIdempotencyKey(
+				ctx,
+				input.TenantID,
+				input.OwnerID,
+				req.IdempotencyKey,
+			)
+
+			if lookupErr == nil && sameUploadRequest(existing, input) {
+				return s.replay(ctx, existing)
+			}
+
+			if lookupErr == nil {
+				return CreateResult{}, ErrIdempotencyConflict
+			}
+
+			return CreateResult{}, fmt.Errorf(
+				"resolve concurrent idempotency conflict: %w",
+				lookupErr,
+			)
+		}
+
+		if !errors.Is(err, model.ErrUploadNotFound) {
+			return CreateResult{}, fmt.Errorf("find previous upload request: %w", err)
+		}
+
+		return CreateResult{}, fmt.Errorf("save upload session: %w", err)
+	}
+
+	return s.createResult(ctx, session, false)
+}
+
+// validCreate checks a create request and returns it with its dataset
+// filled in, and its catalog path normalized.
+func (s *Service) validCreate(input CreateInput) (CreateInput, string, error) {
+	req := input.Request
+
+	if strings.TrimSpace(input.TenantID) == "" ||
+		strings.TrimSpace(input.OwnerID) == "" {
+		return input, "", fmt.Errorf("%w: trusted tenant and owner are requeire", ErrInvalidRequest)
+	}
+
+	if strings.TrimSpace(req.IdempotencyKey) == "" {
+		return input, "", fmt.Errorf("%w: idempotency_key is required", ErrInvalidRequest)
+	}
+
+	if strings.TrimSpace(req.FileName) == "" {
+		return input, "", fmt.Errorf("%w: file_name is required", ErrInvalidRequest)
+	}
+
+	if strings.TrimSpace(req.ContentType) == "" {
+		return input, "", fmt.Errorf("%w: content_type is required", ErrInvalidRequest)
+	}
+
+	if req.SizeBytes <= 0 {
+		return input, "", fmt.Errorf("%w: size_bytes must be positive", ErrInvalidRequest)
+	}
+
+	if req.SizeBytes > s.maxSize {
+		return input, "", ErrUploadTooLarge
+	}
+
+	if input.Dataset == "" {
+		input.Dataset = req.Dataset
+	}
+	if input.Dataset != "" && !model.ValidDataset(input.Dataset) {
+		return input, "", fmt.Errorf("%w: invalid dataset", ErrInvalidRequest)
+	}
+	path, err := catalogPath(req.Path, req.FileName, req.Metadata)
+	if err != nil {
+		return input, "", err
+	}
+
+	// We only validate the checksum's shape here. The actual checksum
+	// must be verified against the uploaded bytes later.
+	if req.ChecksumSHA256 != "" {
+		if len(req.ChecksumSHA256) != 64 {
+			return input, "", fmt.Errorf("%w: checksum_sha256 must contain 64 hexadecimal character", ErrInvalidRequest)
+		}
+
+		if _, err := hex.DecodeString(req.ChecksumSHA256); err != nil {
+			return input, "", fmt.Errorf("%w: checksum_sha256 is not valid hexadecimal", ErrInvalidRequest)
+		}
+	}
+	return input, path, nil
+}
+
+// newSession builds the PENDING session of a checked request: a new ID,
+// its storage binding and its expiry.
+func (s *Service) newSession(ctx context.Context, input CreateInput, path string) (*model.UploadSession, error) {
+	req := input.Request
+
 	id, err := newUploadID()
 	if err != nil {
-		return CreateResult{}, fmt.Errorf("generate upload ID: %w", err)
+		return nil, fmt.Errorf("generate upload ID: %w", err)
 	}
 
 	principal := input.Principal
@@ -238,15 +314,15 @@ func (s *Service) Create(
 	}
 	bound, err := chooseBinding(ctx, s.chooser, principal, req.StorageConnectionID, input.Dataset, id)
 	if err != nil {
-		return CreateResult{}, err
+		return nil, err
 	}
 	if bound.staging != nil {
 		caps := bound.staging.Capabilities
 		if !caps.PresignedUpload {
-			return CreateResult{}, fmt.Errorf("%w: the storage connection cannot take direct uploads", model.ErrUnsupportedProvider)
+			return nil, fmt.Errorf("%w: the storage connection cannot take direct uploads", model.ErrUnsupportedProvider)
 		}
 		if caps.MaxSingleUploadBytes > 0 && req.SizeBytes > caps.MaxSingleUploadBytes {
-			return CreateResult{}, fmt.Errorf("%w: use a multipart upload on this storage connection", ErrUploadTooLarge)
+			return nil, fmt.Errorf("%w: use a multipart upload on this storage connection", ErrUploadTooLarge)
 		}
 	}
 
@@ -275,48 +351,47 @@ func (s *Service) Create(
 	}
 
 	if err := session.Validate(); err != nil {
-		return CreateResult{}, fmt.Errorf("validate upload session: %w", err)
+		return nil, fmt.Errorf("validate upload session: %w", err)
 	}
+	return session, nil
+}
 
-	if err := s.save(ctx, session, req.IdempotencyKey); err != nil {
-		var quotaErr *model.QuotaError
-		if errors.As(err, &quotaErr) || errors.Is(err, model.ErrPathExists) || errors.Is(err, model.ErrPathBusy) ||
-			errors.Is(err, model.ErrConnectionNotActive) || errors.Is(err, model.ErrConnectionNotFound) {
-			return CreateResult{}, err
-		}
-		// Another request may have insterted that same idempotency key
-		// after our initial lookup. Replay its result if the request
-		// metadata matches.
-		if errors.Is(err, model.ErrIdempotencyConflict) {
-			existing, lookupErr := s.repository.GetByIdempotencyKey(
-				ctx,
-				input.TenantID,
-				input.OwnerID,
-				req.IdempotencyKey,
-			)
+// BatchReserver stores many sessions with their reservations at once; the
+// quota service is one.
+type BatchReserver interface {
+	CreateReservedUploads(ctx context.Context, uploads []model.ReservedUpload) error
+}
 
-			if lookupErr == nil && sameUploadRequest(existing, input) {
-				return s.createResult(ctx, existing, true)
-			}
-
-			if lookupErr == nil {
-				return CreateResult{}, ErrIdempotencyConflict
-			}
-
-			return CreateResult{}, fmt.Errorf(
-				"resolve concurrent idempotency conflict: %w",
-				lookupErr,
-			)
-		}
-
-		if !errors.Is(err, model.ErrUploadNotFound) {
-			return CreateResult{}, fmt.Errorf("find previous upload request: %w", err)
-		}
-
-		return CreateResult{}, fmt.Errorf("save upload session: %w", err)
+// Reserve stores the sessions of several create requests of one tenant, with
+// their quota reservations, in one transaction: bulk ingestion calls it for
+// a claim's grants, so the tenant's usage row is locked once per claim
+// rather than once per file (docs/ingestion.md, "Where the database's time
+// goes").
+//
+// It is a head start, not a replacement for Create. A Create with the same
+// request afterwards finds its session by idempotency key and only presigns
+// it. When the batch is not made (a request is invalid, a limit or a path
+// refuses one, a key is already taken, or quotas are not enforced here),
+// nothing is stored and Create does the work one request at a time, with
+// every outcome reported as before.
+func (s *Service) Reserve(ctx context.Context, inputs []CreateInput) error {
+	batcher, ok := s.quotas.(BatchReserver)
+	if !ok || len(inputs) < 2 {
+		return nil
 	}
-
-	return s.createResult(ctx, session, false)
+	uploads := make([]model.ReservedUpload, 0, len(inputs))
+	for _, input := range inputs {
+		input, path, err := s.validCreate(input)
+		if err != nil {
+			return err
+		}
+		session, err := s.newSession(ctx, input, path)
+		if err != nil {
+			return err
+		}
+		uploads = append(uploads, model.ReservedUpload{Upload: session, IdempotencyKey: input.Request.IdempotencyKey})
+	}
+	return batcher.CreateReservedUploads(ctx, uploads)
 }
 
 func sameUploadRequest(

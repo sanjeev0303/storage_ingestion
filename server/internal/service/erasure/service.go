@@ -332,7 +332,10 @@ func (s *Service) Cancel(ctx context.Context, p model.Principal, id, note string
 	if err := audit.Require(ctx, s.deps.Audit, p, model.PermRetentionManage, "erasure.cancel", "erasure", id); err != nil {
 		return model.Erasure{}, err
 	}
-	ok, err := s.deps.Store.Transition(ctx, p.TenantID, id, []string{model.ErasurePlanned, model.ErasureApproved}, model.ErasureCancelled,
+	// A FAILED erasure (a deletion cancelled, say) can be dropped too: it
+	// never finishes on its own. What it already did stays done.
+	from := []string{model.ErasurePlanned, model.ErasureApproved, model.ErasureFailed}
+	ok, err := s.deps.Store.Transition(ctx, p.TenantID, id, from, model.ErasureCancelled,
 		func(e *model.Erasure) { e.Note = strings.TrimSpace(note) })
 	if err != nil {
 		return model.Erasure{}, err
@@ -344,7 +347,8 @@ func (s *Service) Cancel(ctx context.Context, p model.Principal, id, note string
 	return s.Get(ctx, p, id)
 }
 
-// Execute plans again, makes the successor snapshots, empties the drafts,
+// Execute plans again, claims the request (DELETING) so that a cancel can
+// no longer win, then makes the successor snapshots, empties the drafts,
 // and asks the lifecycle to delete every matched object now.
 func (s *Service) Execute(ctx context.Context, p model.Principal, id string) (model.Erasure, error) {
 	if err := audit.Require(ctx, s.deps.Audit, p, model.PermRetentionManage, "erasure.execute", "erasure", id); err != nil {
@@ -373,46 +377,42 @@ func (s *Service) Execute(ctx context.Context, p model.Principal, id string) (mo
 	}
 	now := s.now()
 
-	// ponytail: a second execute racing this one repeats idempotent steps
-	// (a superseded snapshot gets no second successor, a deletion asked
-	// twice is one); a lock per request would stop the duplicate work.
-	versions := slices.Clone(plan.Versions)
-	sort.SliceStable(versions, func(i, j int) bool {
-		if versions[i].DatasetID != versions[j].DatasetID {
-			return versions[i].DatasetID < versions[j].DatasetID
-		}
-		return versions[i].Version < versions[j].Version
-	})
-	successors := []model.Successor{}
-	for _, v := range versions {
-		if v.SupersededBy != "" {
-			continue
-		}
-		succ, made, err := s.deps.Store.Successor(ctx, p.TenantID, v.VersionID, plan.Matched, id, p.UserID, event.NewID(), now)
-		if err != nil {
-			return e, fmt.Errorf("successor of version %s: %w", v.VersionID, err)
-		}
-		if made {
-			successors = append(successors, succ)
-		}
+	items := make([]model.ErasureItem, len(plan.Objects))
+	for i, o := range plan.Objects {
+		items[i] = model.ErasureItem{AssetID: o.AssetID, ObjectID: o.ObjectID, ObjectVersion: o.Version, Path: o.Path, SHA256: o.SHA256,
+			SizeBytes: o.SizeBytes, ConnectionID: o.ConnectionID, State: model.ErasureItemPending}
 	}
-	drafted, err := s.deps.Store.RemoveFromDrafts(ctx, p.TenantID, plan.Matched, p.UserID, now)
+	// The two-person rule is checked again on the row being claimed: the
+	// read above may be stale.
+	from := []string{model.ErasurePlanned, model.ErasureApproved}
+	if g.ApproveDeletes {
+		from = []string{model.ErasureApproved}
+	}
+	claimed, err := s.deps.Store.Claim(ctx, p.TenantID, id, from, g.ApproveDeletes, plan, p.UserID, items, now)
+	if err != nil {
+		return e, err
+	}
+	if !claimed {
+		return e, model.ErrErasureState
+	}
+
+	// From here the request is DELETING: a failure leaves it so, and the
+	// worker prepares it again before it asks for any deletion.
+	successors, drafted, err := s.prepare(ctx, p.TenantID, id, p.UserID, plan.Matched, plan.Versions, now)
 	if err != nil {
 		return e, err
 	}
 
-	items := make([]model.ErasureItem, 0, len(plan.Objects))
 	ids := make([]string, 0, len(plan.Objects))
-	for _, o := range plan.Objects {
-		it := model.ErasureItem{AssetID: o.AssetID, ObjectID: o.ObjectID, ObjectVersion: o.Version, Path: o.Path, SHA256: o.SHA256,
-			SizeBytes: o.SizeBytes, ConnectionID: o.ConnectionID, State: model.ErasureItemDeleting}
+	for i, o := range plan.Objects {
+		it := &items[i]
+		it.State = model.ErasureItemDeleting
 		if err := s.requestDeletion(ctx, p, o); err != nil {
 			it.State, it.Reason = model.ErasureItemPending, err.Error()
 			if !errors.Is(err, model.ErrDeletionBlocked) {
 				it.State = model.ErasureItemFailed
 			}
 		}
-		items = append(items, it)
 		ids = append(ids, o.AssetID)
 	}
 	if _, err := s.deps.Store.Expedite(ctx, p.TenantID, ids, id, now); err != nil {
@@ -430,17 +430,44 @@ func (s *Service) Execute(ctx context.Context, p model.Principal, id string) (mo
 	s.record(ctx, p, "erasure.executed", id, map[string]any{"kind": e.Kind, "subject_sha256s": e.SubjectHashes, "content_sha256s": shas,
 		"objects": len(plan.Objects), "bytes": plan.Bytes, "successors": len(successors), "drafts_emptied": drafted,
 		"models_to_retrain": len(plan.Models), "institution": e.Institution, "reference": e.Reference})
-	ok, err := s.deps.Store.Transition(ctx, p.TenantID, id, []string{model.ErasurePlanned, model.ErasureApproved}, model.ErasureDeleting,
-		func(e *model.Erasure) {
-			e.Plan, e.Successors, e.ExecutedBy, e.ExecutedAt = plan, successors, p.UserID, &now
-		})
-	if err != nil {
-		return e, err
-	}
-	if !ok {
-		return e, model.ErrErasureState
-	}
 	return s.Get(ctx, p, id)
+}
+
+// prepare makes the successor snapshots and empties the drafts, then marks
+// the erasure prepared. Every step is safe to repeat, and to run twice at
+// once (an execute and the worker): a snapshot already superseded is
+// skipped, the successors are read back from the versions, and the drafts
+// have nothing left to remove.
+func (s *Service) prepare(ctx context.Context, tenantID, id, actor string, matched []string, versions []model.PlanVersion,
+	now time.Time) ([]model.Successor, int64, error) {
+	st := s.deps.Store
+	versions = slices.Clone(versions)
+	sort.SliceStable(versions, func(i, j int) bool {
+		if versions[i].DatasetID != versions[j].DatasetID {
+			return versions[i].DatasetID < versions[j].DatasetID
+		}
+		return versions[i].Version < versions[j].Version
+	})
+	for _, v := range versions {
+		if v.SupersededBy != "" {
+			continue
+		}
+		if _, _, err := st.Successor(ctx, tenantID, v.VersionID, matched, id, actor, event.NewID(), now); err != nil {
+			return nil, 0, fmt.Errorf("successor of version %s: %w", v.VersionID, err)
+		}
+	}
+	successors, err := st.SuccessorsOf(ctx, tenantID, id)
+	if err != nil {
+		return nil, 0, err
+	}
+	drafted, err := st.RemoveFromDrafts(ctx, tenantID, matched, actor, now)
+	if err != nil {
+		return nil, 0, err
+	}
+	if _, err := st.SetPrepared(ctx, tenantID, id, successors, now); err != nil {
+		return nil, 0, err
+	}
+	return successors, drafted, nil
 }
 
 // requestDeletion asks the lifecycle to delete one object, through the
@@ -467,9 +494,15 @@ func (s *Service) Progress(ctx context.Context) (int, error) {
 	}
 	done := 0
 	for _, e := range open {
+		// Touched first, so one that keeps failing goes to the back of the
+		// queue instead of holding a place in every batch.
+		if err := s.deps.Store.Touch(ctx, e.TenantID, e.ID); err != nil {
+			return done, err
+		}
 		finished, err := s.advance(ctx, e)
 		if err != nil {
-			return done, fmt.Errorf("erasure %s: %w", e.ID, err)
+			s.deps.Log.Warn("erasure not advanced", "erasure_id", e.ID, "tenant_id", e.TenantID, "error", err)
+			continue
 		}
 		if finished {
 			done++
@@ -480,6 +513,23 @@ func (s *Service) Progress(ctx context.Context) (int, error) {
 
 func (s *Service) advance(ctx context.Context, e model.Erasure) (bool, error) {
 	st := s.deps.Store
+	if e.PreparedAt == nil {
+		// The execute stopped, or is still running, before its snapshots
+		// and drafts were done: they come before any deletion.
+		matched, err := st.Matches(ctx, e.TenantID, e.Selector)
+		if err != nil {
+			return false, err
+		}
+		versions, err := st.Versions(ctx, e.TenantID, matched)
+		if err != nil {
+			return false, err
+		}
+		now := s.now()
+		if e.Successors, _, err = s.prepare(ctx, e.TenantID, e.ID, e.ExecutedBy, matched, versions, now); err != nil {
+			return false, err
+		}
+		e.PreparedAt = &now
+	}
 	items, err := st.Items(ctx, e.TenantID, e.ID)
 	if err != nil {
 		return false, err
@@ -593,6 +643,9 @@ type destroyedFile struct {
 }
 
 func (s *Service) complete(ctx context.Context, e model.Erasure, items []model.ErasureItem, now time.Time) error {
+	if e.PreparedAt == nil {
+		return fmt.Errorf("%w: its successor snapshots are not made yet", model.ErrErasureState)
+	}
 	st := s.deps.Store
 	seq, err := st.TombstoneSeq(ctx, e.TenantID, e.ID)
 	if err != nil {

@@ -40,6 +40,18 @@ describe("RegisterForm", () => {
     });
   });
 
+  it("stays busy after a successful sign-up until the console replaces the page", async () => {
+    server.use(http.post(REGISTER, () => HttpResponse.json({ user: { id: "u1" }, session_id: "s1" })));
+    render(<RegisterForm />);
+    await fillIn();
+    const button = screen.getByRole("button", { name: "Create account" });
+    await userEvent.click(button);
+
+    await waitFor(() => expect(replace).toHaveBeenCalledTimes(1));
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("aria-busy", "true");
+  });
+
   it("keeps the button disabled until the form is valid and says why", async () => {
     render(<RegisterForm />);
     const button = screen.getByRole("button", { name: "Create account" });

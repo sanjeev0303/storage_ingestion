@@ -9,10 +9,10 @@ The API issues opaque bearer tokens (`sat_` access, 15 minutes; `srt_` refresh, 
 | Concern | What happens |
 | --- | --- |
 | Where tokens live | HttpOnly, SameSite=Strict cookies set by `src/app/api/session/login`. Never in `localStorage`, `sessionStorage`, IndexedDB, URLs, logs or JS-visible state. |
-| Access token expiry | The access cookie expires 20 s early. The proxy then refreshes before sending, and also refreshes and retries once on a 401. |
-| Refresh replay | A spent refresh token revokes the whole session, so `src/server/auth.ts` shares one refresh between concurrent requests and answers late requests still carrying the old cookie from a 30 s memory cache. Single Node instance, or sticky sessions. |
+| Access token expiry | The access cookie expires 20 s early. The proxy then refreshes before sending (before it reads the request body), and also refreshes and retries once on a 401 whose code says the token or session was refused (`unauthenticated`, `refresh_reused`, or a bare 401 without a code). |
+| Refresh replay | A spent refresh token revokes the whole session, so `src/server/auth.ts` shares one refresh between concurrent requests and answers late requests still carrying the old cookie from a 5 s memory cache (`RECENT_MS`). The proxy never presents a refresh token more than `RECENT_MS` after the request carrying it arrived: the refresh happens before the body is read, and a 401 retry on a request that took longer answers 503 `refresh_unavailable` instead (the browser's next request carries its current cookies). A refresh that gets no answer (network failure or 5xx) may still have rotated the token on the API, so that failure is cached for `RECENT_MS` too and requests carrying the same token get 503 `refresh_unavailable` with `Retry-After` instead of presenting it again. After the window one more refresh is tried; if the lost attempt had in fact rotated the token, the API ends the session and the user signs in again, which is accepted over locking a session out for an API blip. Single Node instance, or sticky sessions (see Known limits). |
 | Sign-out | `POST /api/session/logout` ends the session on the API (best effort) and clears both cookies; the client drops every cached query. |
-| Expired or revoked session | A 401 clears the cookies and the client redirects to `/login?next=...`. The route guard (`src/proxy.ts`) only checks that a session cookie exists, and `/login` is not redirected away when signed out, so a stale cookie cannot loop. |
+| Expired or revoked session | A 401 that refuses the token or session (codes above) clears the cookies and the client redirects to `/login?next=...`. Other 401s, such as `invalid_credentials` for a wrong current password, are passed on and leave the session alone. If the API refuses even a freshly renewed token, the cookies are cleared and the renewed pair is not set. The route guard (`src/proxy.ts`) only checks that a session cookie exists, and `/login` is not redirected away when signed out, so a stale cookie cannot loop. |
 | Redirects | `next` is accepted only if it is a `/app...` path with no scheme, `//` or backslash (`src/lib/auth/redirect.ts`). |
 
 ## Request forgery and the proxy
@@ -49,5 +49,5 @@ Navigation and buttons are filtered with `can(permission)`, derived from the use
 ## Known limits
 
 - The CSP cannot pin provider hosts (see above).
-- The refresh de-duplication is in-process.
+- The refresh de-duplication (single flight, the `RECENT_MS` answer cache and the failure cache) lives in one Node process's memory. With several console instances behind a load balancer, two instances can each present the same refresh token and the API revokes the session. Run one instance or use sticky sessions; a shared store would be needed otherwise and is not built.
 - The API's error bodies come in three shapes; the client normalises them, but a proxy or load balancer error page is shown as a generic message.

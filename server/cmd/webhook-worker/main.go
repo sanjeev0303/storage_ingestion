@@ -19,6 +19,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/config"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/logger"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/webhook"
+	"github.com/sanjeev0303/object-storage-platform/internal/worker/heartbeat"
 )
 
 func main() {
@@ -86,6 +87,7 @@ func run() error {
 	// Woken by queue_webhook (migration 000021) when a delivery commits.
 	wake := make(chan struct{}, 1)
 	go db.Listen(ctx, "webhook_deliveries", wake, log)
+	go heartbeat.Run(ctx, db, "webhook", owner, log)
 	sender.Run(ctx, interval, wake)
 	log.Info("webhook worker stopped")
 	return nil

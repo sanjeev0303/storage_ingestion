@@ -131,14 +131,22 @@ func TestHTTPCrossTenantAccessIsHidden(t *testing.T) {
 	// The upload list holds the organization's own uploads only.
 	var listed struct {
 		Uploads []struct {
-			UploadID string `json:"upload_id"`
-			Status   string `json:"status"`
+			UploadID  string    `json:"upload_id"`
+			Status    string    `json:"status"`
+			AssetID   string    `json:"asset_id"`
+			UpdatedAt time.Time `json:"updated_at"`
 		} `json:"uploads"`
 	}
 	s.expect(t, auditorTok, "", http.MethodGet, "/api/v1/uploads?status=verified", "", http.StatusOK, &listed)
 	found := false
 	for _, u := range listed.Uploads {
-		found = found || u.UploadID == secret.UploadID
+		if u.UploadID == secret.UploadID {
+			found = true
+			// The listing names the asset processing made, as GET /uploads/{id} does.
+			if u.AssetID != secret.ID || u.UpdatedAt.IsZero() {
+				t.Fatalf("listed upload: %+v", u)
+			}
+		}
 		if u.Status != "VERIFIED" {
 			t.Fatalf("the status filter let through %+v", u)
 		}

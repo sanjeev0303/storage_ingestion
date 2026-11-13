@@ -57,6 +57,24 @@ describe("WebhooksScreen", () => {
     expect(within(dialog).getByRole("button", { name: "Add endpoint" })).toBeDisabled();
   });
 
+  it("does not queue test or repeat deliveries to a disabled endpoint, which would never send", async () => {
+    server.use(
+      http.get(`${API}/webhooks`, () => HttpResponse.json({ webhooks: [{ ...hook, enabled: false }], event_types: EVENTS })),
+      http.get(`${API}/webhooks/wh-1/deliveries`, () =>
+        HttpResponse.json({
+          deliveries: [{ id: "d-1", event_id: "ev-1", event_type: "object.available", status: "FAILED", attempts: 8, created_at: "2026-10-28T11:00:00Z", payload: {} }],
+        }),
+      ),
+    );
+    renderWithProviders(<WebhooksScreen />);
+    const again = await screen.findByRole("button", { name: "Send again" });
+    expect(again).toBeDisabled();
+    expect(again).toHaveAttribute("title", "Enable the endpoint first");
+    const test = screen.getByRole("button", { name: "Send test event" });
+    expect(test).toBeDisabled();
+    expect(test).toHaveAttribute("title", "Enable the endpoint first");
+  });
+
   it("hides changes from a role without org.manage", async () => {
     server.use(
       http.get(`${API}/webhooks`, () => HttpResponse.json({ webhooks: [hook], event_types: EVENTS })),

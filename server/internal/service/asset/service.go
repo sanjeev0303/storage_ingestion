@@ -5,6 +5,7 @@ package asset
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -278,6 +279,52 @@ func (s *Service) HoldsFor(ctx context.Context, principal model.Principal, inclu
 		return nil, err
 	}
 	return s.deps.Holds.List(ctx, principal.TenantID, includeReleased)
+}
+
+// HoldPageFor pages the legal holds of the caller's organization, newest
+// placed first, as HoldsFor filters them. cursor is the next cursor of the
+// page before, or "" for the first; limit defaults to 50 and is capped at
+// 200. A cursor this did not write is model.ErrInvalidCursor.
+func (s *Service) HoldPageFor(ctx context.Context, principal model.Principal, includeReleased bool, cursor string, limit int) ([]model.LegalHold, string, error) {
+	if err := audit.Require(ctx, s.security, principal, model.PermRetentionManage, "retention.hold_read", "legal_hold", ""); err != nil {
+		return nil, "", err
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	limit = min(limit, 200)
+	beforeAt, beforeID, err := decodeHoldCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	holds, err := s.deps.Holds.Page(ctx, principal.TenantID, includeReleased, beforeAt, beforeID, limit+1)
+	if err != nil || len(holds) <= limit {
+		return holds, "", err
+	}
+	holds = holds[:limit]
+	last := holds[limit-1]
+	return holds, encodeHoldCursor(last.PlacedAt, last.ID), nil
+}
+
+// A hold cursor is the placing time and ID of the last hold of a page.
+func encodeHoldCursor(at time.Time, id string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(at.UTC().Format(time.RFC3339Nano) + "|" + id))
+}
+
+func decodeHoldCursor(cursor string) (time.Time, string, error) {
+	if cursor == "" {
+		return time.Time{}, "", nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return time.Time{}, "", model.ErrInvalidCursor
+	}
+	at, id, ok := strings.Cut(string(raw), "|")
+	t, err := time.Parse(time.RFC3339Nano, at)
+	if !ok || err != nil || id == "" {
+		return time.Time{}, "", model.ErrInvalidCursor
+	}
+	return t, id, nil
 }
 
 // ReleaseHoldFor releases a legal hold of the caller's organization.
@@ -602,7 +649,16 @@ func (s *Service) owned(ctx context.Context, principal model.Principal, assetID 
 	if err := audit.Require(ctx, s.security, principal, perm, "asset.access", "asset", assetID); err != nil {
 		return model.Asset{}, err
 	}
-	return s.tenantAsset(ctx, principal.TenantID, assetID)
+	asset, err := s.tenantAsset(ctx, principal.TenantID, assetID)
+	if err != nil {
+		return model.Asset{}, err
+	}
+	// A token confined to some datasets sees nothing outside them, as in
+	// delivery.
+	if !principal.Scope.Allows(asset.Dataset) {
+		return model.Asset{}, ErrNotFound
+	}
+	return asset, nil
 }
 
 // tenantAsset loads the tenant's asset; tombstones are ErrNotFound.

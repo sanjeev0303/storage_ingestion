@@ -412,6 +412,10 @@ func (r *ProcessingJobRepository) GetByAsset(ctx context.Context, tenantID, asse
 	return job, nil
 }
 
+// Requeue gives an EXHAUSTED job a fresh attempt budget while its asset is
+// still QUARANTINED or PROCESSING. The asset is share-locked in the same
+// statement, so a soft delete (which locks it first) and a requeue cannot
+// both win.
 func (r *ProcessingJobRepository) Requeue(ctx context.Context, tenantID, assetID string, now time.Time) (model.ProcessingJob, error) {
 	job, err := scanJob(r.db.Pool.QueryRow(ctx, `
 		UPDATE processing_jobs
@@ -424,6 +428,7 @@ func (r *ProcessingJobRepository) Requeue(ctx context.Context, tenantID, assetID
 		WHERE tenant_id = $1
 		  AND asset_id = $2
 		  AND state = 'EXHAUSTED'
+		  AND EXISTS (SELECT 1 FROM assets a WHERE a.tenant_id = $1 AND a.id = $2 AND a.status IN ('QUARANTINED', 'PROCESSING') FOR SHARE)
 		RETURNING `+jobColumns,
 		tenantID, assetID, now))
 	if errors.Is(err, pgx.ErrNoRows) {

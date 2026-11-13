@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -282,6 +283,32 @@ func (r *ReconciliationRepository) Finish(
 		return model.ErrLeaseLost
 	}
 
+	return nil
+}
+
+// Requeue gives an EXHAUSTED task, after an operator fixed its cause, a
+// fresh attempt budget and makes it due now. Its last error is kept for
+// the record until the next attempt replaces it.
+func (r *ReconciliationRepository) Requeue(ctx context.Context, taskID string, now time.Time) error {
+	tag, err := r.db.Pool.Exec(ctx, `
+		UPDATE reconciliation_tasks
+		SET state = 'PENDING',
+		    attempt_count = 0,
+		    next_attempt_at = $2,
+		    outcome = NULL,
+		    updated_at = $2
+		WHERE id = $1
+		  AND state = 'EXHAUSTED'
+	`, taskID, now)
+	if isUniqueViolation(err) {
+		return errors.New("the upload already has a pending reconciliation task")
+	}
+	if err != nil {
+		return fmt.Errorf("requeue reconciliation task: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return model.ErrTaskNotExhausted
+	}
 	return nil
 }
 

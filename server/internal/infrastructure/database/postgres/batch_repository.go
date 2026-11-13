@@ -215,8 +215,12 @@ func (r *IngestionRepository) CreateJob(ctx context.Context, job model.Ingestion
 		if tag.RowsAffected() == 0 {
 			return fmt.Errorf("%w: at most %d active ingestion jobs", model.ErrQuotaExceeded, maxActiveJobs)
 		}
-		if _, err := lockDataset(ctx, tx, job.TenantID, job.DatasetID); err != nil {
+		dataset, err := lockDataset(ctx, tx, job.TenantID, job.DatasetID)
+		if err != nil {
 			return err
+		}
+		if dataset.Lifecycle == model.LifecycleArchived {
+			return model.ErrDatasetArchived
 		}
 		stored, err = scanIngestionJob(tx.QueryRow(ctx, `
 			INSERT INTO ingestion_jobs (id, tenant_id, dataset_id, created_by, idempotency_key, state,

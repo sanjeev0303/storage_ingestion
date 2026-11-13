@@ -66,7 +66,7 @@ func (h *SCIMHandler) fail(w nethttp.ResponseWriter, err error) {
 		status = nethttp.StatusNotImplemented
 	case errors.Is(err, identity.ErrSCIMNotFound):
 		status = nethttp.StatusNotFound
-	case errors.Is(err, identity.ErrSCIMConflict):
+	case errors.Is(err, identity.ErrSCIMConflict), errors.Is(err, identity.ErrSCIMAccountExists):
 		status, scimType = nethttp.StatusConflict, "uniqueness"
 	case errors.Is(err, identity.ErrSCIMOwner), errors.Is(err, model.ErrForbidden), errors.Is(err, model.ErrEscalation),
 		errors.Is(err, model.ErrLastOwner):

@@ -104,8 +104,8 @@ func (s *Service) convert(ctx context.Context, stats *Stats) error {
 			continue
 		}
 		if err := s.convertOne(ctx, c); err != nil {
-			if errors.Is(err, postgres.ErrChunkBusy) {
-				continue // the next pass
+			if errors.Is(err, postgres.ErrChunkBusy) || errors.Is(err, postgres.ErrChunkStateChanged) {
+				continue // the next pass, or not this pass's any more
 			}
 			stats.Failed++
 			s.deps.Log.Warn("chunk conversion failed; the object stays as it is", "asset_id", c.AssetID, "error", err)
@@ -240,7 +240,11 @@ func (s *Service) rehydrate(ctx context.Context, stats *Stats) error {
 	}
 	var errs []error
 	for _, a := range assets {
-		if err := s.rehydrateOne(ctx, a); err != nil {
+		err := s.rehydrateOne(ctx, a)
+		if errors.Is(err, postgres.ErrChunkStateChanged) {
+			continue // released meanwhile, or its original went: the next pass sees which
+		}
+		if err != nil {
 			errs = append(errs, fmt.Errorf("rehydrate %s: %w", a.AssetID, err))
 			continue
 		}

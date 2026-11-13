@@ -5,5 +5,5 @@ export const metadata: Metadata = { title: "Validation report" };
 
 export default async function ReportPage({ params }: { params: Promise<{ reportId: string }> }) {
   const { reportId } = await params;
-  return <ReportScreen reportId={reportId} />;
+  return <ReportScreen key={reportId} reportId={reportId} />;
 }

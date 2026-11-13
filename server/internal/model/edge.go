@@ -13,6 +13,9 @@ var (
 	ErrInvalidEdge       = errors.New("invalid edge request")
 	ErrChunkDiffers      = errors.New("a chunk at that path has other bytes")
 	ErrOutsideDevicePath = errors.New("the path is outside what this credential may write")
+	ErrRecordingComplete = errors.New("the recording is complete: it takes no more chunks")
+	// ErrRecordingChanged: a chunk arrived while the recording was closing.
+	ErrRecordingChanged = errors.New("a chunk arrived while the recording was closing")
 )
 
 const (

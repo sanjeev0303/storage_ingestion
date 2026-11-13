@@ -70,7 +70,7 @@ func activeConnection(t *testing.T, repo *postgres.StorageConnectionRepository, 
 	if stored.Status != model.ConnectionPending {
 		t.Fatalf("a new connection is pending: %s", stored.Status)
 	}
-	stored, err = repo.RecordTest(ctx, tenantID, c.ID, interfaces.ConnectionTestRecord{OK: true, At: time.Now().UTC(),
+	stored, err = repo.RecordTest(ctx, tenantID, c.ID, interfaces.ConnectionTestRecord{OK: true, At: time.Now().UTC(), CredentialVersion: 1,
 		Capabilities: &model.ProviderCapabilities{PresignedUpload: true, Multipart: true}})
 	if err != nil || stored.Status != model.ConnectionActive {
 		t.Fatalf("a passing test activates: %+v %v", stored, err)

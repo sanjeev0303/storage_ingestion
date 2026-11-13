@@ -174,6 +174,8 @@ function EndpointDetail({
   const remove = useWebhookMutation(deleteWebhook);
   const retry = useWebhookMutation(redeliver);
   const [confirm, setConfirm] = useState<"rotate" | "delete" | null>(null);
+  // Only enabled endpoints are sent to, so a delivery queued for a disabled one would wait forever.
+  const offHint = hook.enabled ? undefined : "Enable the endpoint first";
 
   async function run<T>(action: () => Promise<T>, done: string) {
     try {
@@ -191,7 +193,11 @@ function EndpointDetail({
       actions={
         canManage && (
           <>
-            <Button onClick={() => run(() => test.mutateAsync(hook.id), "Test event queued")} disabled={test.isPending}>
+            <Button
+              onClick={() => run(() => test.mutateAsync(hook.id), "Test event queued")}
+              disabled={test.isPending || !hook.enabled}
+              title={offHint}
+            >
               Send test event
             </Button>
             <Button onClick={onEdit}>Edit</Button>
@@ -270,7 +276,8 @@ function EndpointDetail({
                     {canManage && d.status !== "DELIVERED" && (
                       <Button
                         onClick={() => run(() => retry.mutateAsync({ id: hook.id, deliveryId: d.id }), "Sent again")}
-                        disabled={retry.isPending}
+                        disabled={retry.isPending || !hook.enabled}
+                        title={offHint}
                       >
                         Send again
                       </Button>

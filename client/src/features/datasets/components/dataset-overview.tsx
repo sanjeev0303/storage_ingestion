@@ -244,8 +244,15 @@ function OverviewBody({ dataset }: { dataset: Dataset }) {
 
 function EditDialog({ dataset, onClose }: { dataset: Dataset; onClose: () => void }) {
   const update = useUpdateDataset(dataset.id);
-  // The form is keyed by revision: after a conflict the latest values load and replace the stale form.
   const [conflict, setConflict] = useState(false);
+  // The form restarts with the latest values only once a refused save has
+  // brought in a newer revision. A background refetch alone keeps the edits.
+  const [reloads, setReloads] = useState(0);
+  const [refusedRevision, setRefusedRevision] = useState<number | null>(null);
+  if (refusedRevision !== null && dataset.revision !== refusedRevision) {
+    setRefusedRevision(null);
+    setReloads(reloads + 1);
+  }
 
   return (
     <Modal open onOpenChange={(open) => !open && !update.isPending && onClose()} title="Edit dataset">
@@ -255,8 +262,9 @@ function EditDialog({ dataset, onClose }: { dataset: Dataset; onClose: () => voi
         </p>
       )}
       <EditForm
-        key={dataset.revision}
+        key={reloads}
         dataset={dataset}
+        saved={update.isSuccess}
         pending={update.isPending}
         error={update.isError && !conflict ? update.error : null}
         onCancel={onClose}
@@ -264,7 +272,11 @@ function EditDialog({ dataset, onClose }: { dataset: Dataset; onClose: () => voi
           setConflict(false);
           update.mutate(body, {
             onSuccess: onClose,
-            onError: (error) => setConflict(isCode(error, "revision_conflict")),
+            onError: (error) => {
+              const stale = isCode(error, "revision_conflict");
+              setConflict(stale);
+              if (stale) setRefusedRevision(body.revision);
+            },
           });
         }}
       />
@@ -273,13 +285,15 @@ function EditDialog({ dataset, onClose }: { dataset: Dataset; onClose: () => voi
 }
 
 function EditForm({
-  dataset,
+  dataset: latest,
+  saved,
   pending,
   error,
   onSave,
   onCancel,
 }: {
   dataset: Dataset;
+  saved: boolean;
   pending: boolean;
   error: unknown;
   onSave: (body: UpdateDatasetRequest) => void;
@@ -287,6 +301,11 @@ function EditForm({
 }) {
   const { can } = useSession();
   const profiles = useValidationProfiles();
+  // The dataset as it was when editing started. Changes are worked out against
+  // it and sent with its revision, so a change made elsewhere since is refused
+  // (412) rather than overwritten.
+  const [dataset] = useState(latest);
+  const changedElsewhere = !saved && latest.revision !== dataset.revision;
   const [description, setDescription] = useState(dataset.description);
   const [tagText, setTagText] = useState(dataset.tags.join(", "));
   const [metaText, setMetaText] = useState(formatKeyValues(dataset.metadata));
@@ -340,6 +359,12 @@ function EditForm({
 
   return (
     <form onSubmit={submit} noValidate className="grid gap-4" aria-label="Edit dataset">
+      {changedElsewhere && (
+        <p role="status" className="text-base">
+          Someone else changed this dataset after you started editing. Your edits are kept, but saving them will be refused and
+          the form will load the latest values.
+        </p>
+      )}
       <Field label="Description" error={problems.description}>
         {(props) => (
           <Textarea {...props} value={description} onChange={(e) => setDescription(e.target.value)} maxLength={2000} />

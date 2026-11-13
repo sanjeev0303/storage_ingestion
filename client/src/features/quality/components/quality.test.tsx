@@ -4,6 +4,7 @@ import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import { renderWithProviders } from "@/test/render";
 import { API, server } from "@/test/server";
+import { Toaster } from "@/components/ui/toast";
 import { QualitySettingsPanel } from "./quality-settings-panel";
 import { RunLeakage } from "./run-leakage";
 import { VersionQuality } from "./version-quality";
@@ -129,6 +130,24 @@ describe("VersionQuality", () => {
     await userEvent.click(screen.getByRole("button", { name: "Release this version" }));
     await waitFor(() => expect(body).toEqual({ label: "DR2", notes: "Baseline 05.00" }));
   });
+  it("says plainly when the version has expired and cannot be released", async () => {
+    base();
+    server.use(
+      http.get(`${API}/datasets/ds1/releases`, () => HttpResponse.json({ releases: [] })),
+      http.put(`${API}/datasets/ds1/versions/v2/release`, () =>
+        HttpResponse.json({ error: "the version has expired", code: "version_expired" }, { status: 409 })),
+    );
+    renderWithProviders(
+      <>
+        <VersionQuality id="ds1" versionId="v2" />
+        <Toaster />
+      </>,
+      { permissions: ["datasets.read", "datasets.manage"] },
+    );
+    await userEvent.type(await screen.findByLabelText(/^Label/), "DR2");
+    await userEvent.click(screen.getByRole("button", { name: "Release this version" }));
+    expect(await screen.findByText("This version has expired, so it cannot be released. Release a newer version instead.")).toBeInTheDocument();
+  });
 });
 
 describe("QualitySettingsPanel", () => {
@@ -158,6 +177,20 @@ describe("QualitySettingsPanel", () => {
         subject_key: "",
         subject_pattern: "^patients/([^/]+)/",
       }));
+  });
+
+  it("keeps unsaved settings through a refetch and says someone else changed them", async () => {
+    let current = { profile_snapshots: true, max_psi: 0.2, max_null_change: 0.1, max_row_change: 0.5, subject_key: "", subject_pattern: "", updated_at: "2026-10-30T09:00:00Z" };
+    server.use(http.get(`${API}/datasets/ds1/quality-settings`, () => HttpResponse.json(current)));
+    const { client } = renderWithProviders(<QualitySettingsPanel datasetId="ds1" />, { permissions: ["datasets.read", "datasets.manage"] });
+    const nulls = await screen.findByLabelText("Null rate change");
+    await userEvent.clear(nulls);
+    await userEvent.type(nulls, "5");
+
+    current = { ...current, max_psi: 0.3, updated_at: "2026-10-30T10:00:00Z" };
+    await client.invalidateQueries();
+    expect(await screen.findByText(/Someone else changed the quality settings after you started editing/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Null rate change")).toHaveValue("5");
   });
 });
 

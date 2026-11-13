@@ -3,6 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
+import { ChangedElsewhere } from "@/components/ui/changed-elsewhere";
 import { ConfirmDialog } from "@/components/ui/dialog";
 import { Field, Input, Select } from "@/components/ui/field";
 import { DefList, Meter } from "@/components/ui/page";
@@ -131,6 +132,10 @@ function MonthPanel() {
 function BudgetPanel() {
   const { organizationId, refresh } = useCostKeys();
   const { can } = useSession();
+  // The form restarts with the latest budget after a save or when asked. A
+  // background refetch alone must not wipe what the user typed.
+  const [reloads, setReloads] = useState(0);
+  const reload = () => setReloads((n) => n + 1);
   const budget = useQuery({
     queryKey: orgKey(organizationId, "costs", "budget"),
     queryFn: ({ signal }) => getBudget(signal),
@@ -155,14 +160,35 @@ function BudgetPanel() {
           {budget.data.monthly_usd > 0 && report.data && (
             <Meter label="Spent this month" used={report.data.total_usd} limit={budget.data.monthly_usd} format={money} />
           )}
-          <BudgetForm key={budget.data.updated_at ?? "none"} budget={budget.data} editable={can("org.manage")} onSaved={refresh} />
+          <BudgetForm
+            key={reloads}
+            latest={budget.data}
+            editable={can("org.manage")}
+            onSaved={async () => {
+              await refresh();
+              reload();
+            }}
+            onReload={reload}
+          />
         </div>
       )}
     </Panel>
   );
 }
 
-function BudgetForm({ budget, editable, onSaved }: { budget: Budget; editable: boolean; onSaved: () => void }) {
+function BudgetForm({
+  latest,
+  editable,
+  onSaved,
+  onReload,
+}: {
+  latest: Budget;
+  editable: boolean;
+  onSaved: () => void;
+  onReload: () => void;
+}) {
+  // The budget as it was when editing started.
+  const [budget] = useState(latest);
   const [dollars, setDollars] = useState(budget.monthly_usd ? String(budget.monthly_usd) : "");
   const [reads, setReads] = useState(budget.monthly_requests ? String(budget.monthly_requests) : "");
   const [action, setAction] = useState<Budget["action"]>(budget.action);
@@ -178,12 +204,15 @@ function BudgetForm({ budget, editable, onSaved }: { budget: Budget; editable: b
     },
     onError: notify.error,
   });
+  // Our own save also moves updated_at; that is not a change made elsewhere.
+  const changedElsewhere = !save.isSuccess && latest.updated_at !== budget.updated_at;
   const submit = (e: FormEvent) => {
     e.preventDefault();
     if (!usdError && !readsError) save.mutate();
   };
   return (
     <form onSubmit={submit} className="flex flex-col gap-4">
+      {changedElsewhere && <ChangedElsewhere subject="the budget" onReload={onReload} />}
       <Field label="Dollars a month" hint="Empty for no cost limit." error={usdError}>
         {(props) => (
           <Input {...props} name="budget_usd" inputMode="decimal" autoComplete="off" className="tabular-nums" disabled={!editable}

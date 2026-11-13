@@ -34,7 +34,7 @@ func (r *DeltaUploadRepository) ReuseSources(ctx context.Context, tenantID, vers
 	rows, err := r.db.Pool.Query(ctx, `
 		WITH files AS (
 		    SELECT DISTINCT ON (m.checksum_sha256) m.checksum_sha256 AS sha, m.asset_id
-		    FROM dataset_version_members m JOIN assets a ON a.id = m.asset_id AND a.tenant_id = m.tenant_id AND a.status = 'AVAILABLE'
+		    FROM dataset_version_members m JOIN assets a ON a.id = m.asset_id AND a.tenant_id = m.tenant_id AND a.status = 'AVAILABLE' AND a.blocked_reason IS NULL
 		    WHERE m.tenant_id = $1 AND m.version_id = $2 AND m.checksum_sha256 IS NOT NULL
 		)
 		SELECT DISTINCT ON (f.chunk_sha256) f.chunk_sha256, files.asset_id, f.byte_offset
@@ -156,10 +156,14 @@ func (r *DeltaUploadRepository) MissingChunks(ctx context.Context, id string) ([
 	return out, rows.Err()
 }
 
-// Queue hands a complete upload to the worker.
-func (r *DeltaUploadRepository) Queue(ctx context.Context, id string) error {
-	_, err := r.db.Pool.Exec(ctx, `UPDATE delta_uploads SET state = 'QUEUED' WHERE id = $1 AND state = 'OPEN'`, id)
-	return err
+// Queue hands a complete upload to the worker, and says whether it was
+// still open to hand over.
+func (r *DeltaUploadRepository) Queue(ctx context.Context, id string) (bool, error) {
+	tag, err := r.db.Pool.Exec(ctx, `UPDATE delta_uploads SET state = 'QUEUED' WHERE id = $1 AND state = 'OPEN'`, id)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // Claim takes the oldest queued upload, or one whose worker has gone.
@@ -186,10 +190,26 @@ func (r *DeltaUploadRepository) Extend(ctx context.Context, id, owner string, le
 	return err
 }
 
-// Finish records the outcome.
-func (r *DeltaUploadRepository) Finish(ctx context.Context, id, state, uploadID, failure string, now time.Time) error {
-	_, err := r.db.Pool.Exec(ctx, `UPDATE delta_uploads SET state = $2, upload_id = $3, error = $4, finished_at = $5, lease_owner = NULL WHERE id = $1`, id, state, uploadID, failure, now)
-	return err
+// Finish records the outcome of owner's assembly, and says whether owner
+// still held the upload: a worker whose lease ran out writes nothing.
+func (r *DeltaUploadRepository) Finish(ctx context.Context, id, owner, state, uploadID, failure string, now time.Time) (bool, error) {
+	tag, err := r.db.Pool.Exec(ctx, `UPDATE delta_uploads SET state = $3, upload_id = $4, error = $5, finished_at = $6, lease_owner = NULL
+		WHERE id = $1 AND state = 'ASSEMBLING' AND lease_owner = $2`, id, owner, state, uploadID, failure, now)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// Expire ends an upload nobody finished, and says whether it did: one
+// completed since the sweep read it is left to the worker.
+func (r *DeltaUploadRepository) Expire(ctx context.Context, id string, now time.Time) (bool, error) {
+	tag, err := r.db.Pool.Exec(ctx, `UPDATE delta_uploads SET state = 'EXPIRED', error = 'nobody finished it in time', finished_at = $2
+		WHERE id = $1 AND state = 'OPEN' AND expires_at <= $2`, id, now)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // Expired finds uploads nobody finished, and those whose chunks are ready to go.

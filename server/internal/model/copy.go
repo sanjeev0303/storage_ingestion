@@ -30,6 +30,9 @@ const (
 var (
 	ErrCopyJobNotFound = errors.New("copy job not found")
 	ErrInvalidCopyJob  = errors.New("invalid copy job")
+	// ErrCopyJobEnded: the job is no longer running under this worker's
+	// lease (cancelled, or taken over).
+	ErrCopyJobEnded = errors.New("the copy job is no longer running here")
 	// ErrEscrowRequired: the asset belongs to a dataset that keeps a
 	// verified escrow copy, and it has none yet.
 	ErrEscrowRequired = errors.New("the dataset requires a verified escrow copy at its replica connection before deletion")

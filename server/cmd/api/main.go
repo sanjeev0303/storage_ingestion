@@ -177,7 +177,7 @@ func run() error {
 	// egress and classification are enforced by delivery.
 	accessRepo := postgres.NewAccessRepository(db)
 	identityService.WithTokens(accessRepo)
-	routes.Access = access.NewService(accessRepo, auditService, log)
+	routes.Access = access.NewService(accessRepo, auditService, log).WithPepper(sec.Auth.APITokenPepper)
 	routes.Delivery.Guard(identityService.PrincipalFor, auditService)
 	routes.Delivery.Govern(routes.Access)
 	routes.Lifecycle.Guard(auditService)
@@ -263,6 +263,7 @@ func run() error {
 	routes.StorageConnections, err = storageconn.NewService(storageconn.Dependencies{
 		Connections: connections, Sealer: sealer, Clients: storageRegistry, Audit: auditService, Log: log,
 		Health: connections, Alerts: accessRepo, Drift: connections,
+		Limiter: limiter, ProbeRule: ratelimit.Rule{Requests: sec.Rates["storage_test"].Requests, Window: sec.Rates["storage_test"].Window},
 	}, storageCfg, storageregistry.Policy(storageCfg))
 	if err != nil {
 		return fmt.Errorf("configure storage connections: %w", err)
@@ -375,8 +376,12 @@ func run() error {
 		defer stopMetrics()
 	}
 	srv := &http.Server{
-		Addr:              ":" + cfg.HTTPPort,
-		Handler:           server.NewRouter(routes),
+		Addr: ":" + cfg.HTTPPort,
+		// A body gets 30 s to start and then must keep up 16 KiB/s, so a
+		// trickled body cannot hold a connection open, while a large inline
+		// manifest still can take as long as it needs. Object bytes never
+		// come through here: they go to presigned URLs.
+		Handler:           middleware.BodyDeadline(30*time.Second, 16<<10, server.NewRouter(routes)),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}

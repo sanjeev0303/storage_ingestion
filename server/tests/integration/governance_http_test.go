@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -204,4 +205,59 @@ func containsAll(s string, parts ...string) bool {
 		}
 	}
 	return true
+}
+
+// Legal holds are listed in pages, newest first, with released ones only
+// on request.
+func TestHTTPLegalHoldPages(t *testing.T) {
+	s := openSecurityStack(t, nil)
+	acme := s.team(t, "gov-pages")
+	owner := s.signIn(t, acme.ownerUser.Email, acme.ownerPW).AccessToken
+
+	var placed []string
+	for _, key := range []string{"set-a", "set-b", "set-c"} {
+		var hold struct {
+			ID string `json:"id"`
+		}
+		s.expect(t, owner, "", http.MethodPost, "/api/v1/legal-holds",
+			fmt.Sprintf(`{"scope":"DATASET","scope_key":%q,"reason":"litigation"}`, key), http.StatusCreated, &hold)
+		placed = append(placed, hold.ID)
+	}
+	s.expect(t, owner, "", http.MethodDelete, "/api/v1/legal-holds/"+placed[1]+"?reason=settled", "", http.StatusNoContent, nil)
+
+	type page struct {
+		Holds []struct {
+			ID string `json:"id"`
+		} `json:"holds"`
+		Next string `json:"next_cursor"`
+	}
+	walk := func(path string) []string {
+		var ids []string
+		cursor := ""
+		for range 5 {
+			var p page
+			s.expect(t, owner, "", http.MethodGet, path+"&cursor="+cursor, "", http.StatusOK, &p)
+			for _, h := range p.Holds {
+				ids = append(ids, h.ID)
+			}
+			if p.Next == "" {
+				return ids
+			}
+			cursor = p.Next
+		}
+		t.Fatalf("%s never ended", path)
+		return nil
+	}
+	if got := walk("/api/v1/legal-holds?limit=1"); !slices.Equal(got, []string{placed[2], placed[0]}) {
+		t.Fatalf("active holds: %v, placed %v", got, placed)
+	}
+	if got := walk("/api/v1/legal-holds?include_released=true&limit=2"); !slices.Equal(got, []string{placed[2], placed[1], placed[0]}) {
+		t.Fatalf("every hold: %v, placed %v", got, placed)
+	}
+
+	for _, path := range []string{"/api/v1/legal-holds?cursor=garbage", "/api/v1/legal-holds?limit=0", "/api/v1/legal-holds?limit=abc"} {
+		if r := s.call(t, owner, "", http.MethodGet, path, ""); r.status != http.StatusBadRequest {
+			t.Fatalf("%s: %s", path, r)
+		}
+	}
 }

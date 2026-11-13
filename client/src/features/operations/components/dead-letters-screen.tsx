@@ -138,7 +138,7 @@ function DeadLetterList() {
           </div>
           <div className="min-w-0">
             {selected ? (
-              <Detail id={selected} />
+              <Detail key={selected} id={selected} />
             ) : (
               <EmptyState title="Pick an entry">Inspect one to see its error and act on it.</EmptyState>
             )}

@@ -45,7 +45,8 @@ export type NewAdoption = {
   source: AdoptionSource;
   source_ref?: string;
   inline?: string;
-  mode: "DETACH" | "MANAGE";
+  // Left out for imports, which the server records as DETACH.
+  mode?: "DETACH" | "MANAGE";
   require_digest: boolean;
 };
 

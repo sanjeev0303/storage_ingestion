@@ -83,8 +83,8 @@ type ConsumeStats struct {
 	Busy         int
 	Retried      int
 	DeadLettered int
-	// Interrupted events stopped for shutdown; they come back after their
-	// visibility timeout.
+	// Interrupted events stopped for shutdown. They are handed back at
+	// once, without using up an attempt.
 	Interrupted int
 	// Unrecorded events could not have their outcome saved; they are
 	// delivered again.
@@ -312,7 +312,10 @@ func (c *Consumer) handle(ctx context.Context, msg interfaces.QueueMessage) stri
 		return c.reject(record, msg, env, fmt.Errorf("%w: %s has no handler on queue %s", event.ErrUnknownType, env.Type, c.cfg.Name))
 	}
 
-	claim, rec, err := c.inbox.Claim(ctx, inboxRecordOf(c.cfg.Name, env), c.cfg.Owner, c.now(), c.cfg.Visibility)
+	// Each claim has an owner of its own, so an earlier attempt of this
+	// same worker that lost its lease cannot write over this one.
+	owner := c.cfg.Owner + "#" + event.NewID()
+	claim, rec, err := c.inbox.Claim(ctx, inboxRecordOf(c.cfg.Name, env), owner, c.now(), c.cfg.Visibility)
 	if err != nil && ctx.Err() != nil {
 		// Cut short by shutdown: let another consumer have it now.
 		c.retryMessage(record, msg, 0)
@@ -343,28 +346,25 @@ func (c *Consumer) handle(ctx context.Context, msg interfaces.QueueMessage) stri
 	if rec.Attempts > c.cfg.Retry.MaxAttempts {
 		// The earlier attempts ended without an outcome (a crash, or a lost
 		// lease) until the budget was spent.
-		return c.giveUp(record, msg, env, rec, model.FailureExhausted, "no attempt recorded an outcome", log)
+		return c.giveUp(record, msg, env, rec, owner, model.FailureExhausted, "no attempt recorded an outcome", log)
 	}
 
 	newer, err := c.inbox.NewerHandled(ctx, c.cfg.Name, env.AggregateType, env.AggregateID, env.AggregateSequence)
 	if err != nil && ctx.Err() != nil {
-		// Shutting down: write nothing, as below. The inbox lease and the
-		// message's visibility run out and the event is delivered again.
-		log.Info("event interrupted by shutdown")
-		return outcomeInterrupted
+		return c.interrupted(record, msg, env, owner, log)
 	}
 	if err != nil {
-		return c.retryLater(record, msg, env, rec, fmt.Errorf("check event order: %w", err), log)
+		return c.retryLater(record, msg, env, rec, owner, fmt.Errorf("check event order: %w", err), log)
 	}
 	if newer > 0 {
 		// Out of order: a later event of the same aggregate was handled, so
 		// acting on this one could undo a newer decision.
 		c.metrics.Add("events_stale", 1)
-		return c.skip(record, msg, env, fmt.Sprintf("stale: event %d of this %s was already handled", newer, env.AggregateType), log)
+		return c.skip(record, msg, env, owner, fmt.Sprintf("stale: event %d of this %s was already handled", newer, env.AggregateType), log)
 	}
 
 	started := time.Now()
-	note, err := c.run(ctx, handler, env, msg, log)
+	note, err := c.run(ctx, handler, env, msg, owner, log)
 	c.metrics.Add("events_handler_ms_total", time.Since(started).Milliseconds())
 	// The handler may have run for longer than a record may take. Its outcome
 	// gets a clock of its own, or a slow event's success is lost and it runs again.
@@ -372,15 +372,12 @@ func (c *Consumer) handle(ctx context.Context, msg interfaces.QueueMessage) stri
 	defer cancelOutcome()
 	record = outcome
 	if ctx.Err() != nil {
-		// Shutting down: write nothing. The lease and the message's
-		// visibility run out and the event is delivered again.
-		log.Info("event interrupted by shutdown")
-		return outcomeInterrupted
+		return c.interrupted(record, msg, env, owner, log)
 	}
 
 	switch {
 	case err == nil:
-		if err := c.inbox.Complete(record, c.cfg.Name, env.ID, c.cfg.Owner, c.now(), note); err != nil {
+		if err := c.inbox.Complete(record, c.cfg.Name, env.ID, owner, c.now(), note); err != nil {
 			log.Error("record completed event", "error", retry.Sanitize(err))
 			return outcomeUnrecorded
 		}
@@ -391,20 +388,34 @@ func (c *Consumer) handle(ctx context.Context, msg interfaces.QueueMessage) stri
 
 	case errors.Is(err, model.ErrStaleEvent):
 		c.metrics.Add("events_stale", 1)
-		return c.skip(record, msg, env, retry.Sanitize(err), log)
+		return c.skip(record, msg, env, owner, retry.Sanitize(err), log)
 
 	case retry.IsPermanent(err):
-		return c.giveUp(record, msg, env, rec, model.FailurePermanent, retry.Sanitize(err), log)
+		return c.giveUp(record, msg, env, rec, owner, model.FailurePermanent, retry.Sanitize(err), log)
 
 	case c.cfg.Retry.Exhausted(rec.Attempts):
-		return c.giveUp(record, msg, env, rec, model.FailureExhausted, retry.Sanitize(err), log)
+		return c.giveUp(record, msg, env, rec, owner, model.FailureExhausted, retry.Sanitize(err), log)
 	}
-	return c.retryLater(record, msg, env, rec, err, log)
+	return c.retryLater(record, msg, env, rec, owner, err, log)
+}
+
+// interrupted hands back an event that shutdown cut short. Its outcome is
+// unknown, so none is written, but the attempt is given back and the
+// message made visible again, so another worker takes it now and a restart
+// does not use up the event's retries.
+func (c *Consumer) interrupted(ctx context.Context, msg interfaces.QueueMessage, env event.Envelope, owner string, log *slog.Logger) string {
+	if err := c.inbox.Release(ctx, c.cfg.Name, env.ID, owner, c.now()); err != nil {
+		// The lease runs out instead, and the attempt stays counted.
+		log.Warn("interrupted event not released", "error", retry.Sanitize(err))
+	}
+	c.retryMessage(ctx, msg, 0)
+	log.Info("event interrupted by shutdown")
+	return outcomeInterrupted
 }
 
 // run calls the handler while a heartbeat renews the inbox lease and the
 // message's visibility. Losing the lease stops the handler.
-func (c *Consumer) run(ctx context.Context, handler Handler, env event.Envelope, msg interfaces.QueueMessage, log *slog.Logger) (string, error) {
+func (c *Consumer) run(ctx context.Context, handler Handler, env event.Envelope, msg interfaces.QueueMessage, owner string, log *slog.Logger) (string, error) {
 	work, cancel := context.WithTimeout(correlation.With(ctx, env.CorrelationID), c.cfg.HandlerTimeout)
 	defer cancel()
 	beat, stopBeat := context.WithCancel(work)
@@ -421,7 +432,7 @@ func (c *Consumer) run(ctx context.Context, handler Handler, env event.Envelope,
 				return
 			case <-ticker.C:
 			}
-			err := c.inbox.Extend(beat, c.cfg.Name, env.ID, c.cfg.Owner, c.now(), c.cfg.Visibility)
+			err := c.inbox.Extend(beat, c.cfg.Name, env.ID, owner, c.now(), c.cfg.Visibility)
 			if errors.Is(err, model.ErrLeaseLost) {
 				log.Warn("inbox lease lost; stopping the handler")
 				cancel()
@@ -444,10 +455,10 @@ func (c *Consumer) run(ctx context.Context, handler Handler, env event.Envelope,
 
 // retryLater records a failed attempt and has the queue deliver the
 // message again after the backoff.
-func (c *Consumer) retryLater(ctx context.Context, msg interfaces.QueueMessage, env event.Envelope, rec model.InboxRecord, cause error, log *slog.Logger) string {
+func (c *Consumer) retryLater(ctx context.Context, msg interfaces.QueueMessage, env event.Envelope, rec model.InboxRecord, owner string, cause error, log *slog.Logger) string {
 	delay := c.cfg.Retry.Delay(rec.Attempts)
 	reason := retry.Sanitize(cause)
-	if err := c.inbox.Fail(ctx, c.cfg.Name, env.ID, c.cfg.Owner, c.now(), c.now().Add(delay), reason); err != nil {
+	if err := c.inbox.Fail(ctx, c.cfg.Name, env.ID, owner, c.now(), c.now().Add(delay), reason); err != nil {
 		log.Error("record failed attempt", "error", retry.Sanitize(err))
 		return outcomeUnrecorded
 	}
@@ -458,8 +469,8 @@ func (c *Consumer) retryLater(ctx context.Context, msg interfaces.QueueMessage, 
 	return outcomeRetried
 }
 
-func (c *Consumer) skip(ctx context.Context, msg interfaces.QueueMessage, env event.Envelope, reason string, log *slog.Logger) string {
-	if err := c.inbox.Skip(ctx, c.cfg.Name, env.ID, c.cfg.Owner, c.now(), reason); err != nil {
+func (c *Consumer) skip(ctx context.Context, msg interfaces.QueueMessage, env event.Envelope, owner, reason string, log *slog.Logger) string {
+	if err := c.inbox.Skip(ctx, c.cfg.Name, env.ID, owner, c.now(), reason); err != nil {
 		log.Error("record skipped event", "error", retry.Sanitize(err))
 		return outcomeUnrecorded
 	}
@@ -471,13 +482,13 @@ func (c *Consumer) skip(ctx context.Context, msg interfaces.QueueMessage, env ev
 
 // giveUp dead-letters the event for this consumer, then acknowledges the
 // message: the dead_letters table, not the queue, keeps it from now on.
-func (c *Consumer) giveUp(ctx context.Context, msg interfaces.QueueMessage, env event.Envelope, rec model.InboxRecord, category, reason string, log *slog.Logger) string {
+func (c *Consumer) giveUp(ctx context.Context, msg interfaces.QueueMessage, env event.Envelope, rec model.InboxRecord, owner, category, reason string, log *slog.Logger) string {
 	now := c.now()
 	dl := deadLetterOf(env, model.SourceConsumer, c.cfg.Name, category, reason, rec.Attempts, now)
 	if rec.Attempts > 1 {
 		dl.FirstFailedAt = rec.FirstSeenAt
 	}
-	if err := c.inbox.Dead(ctx, c.cfg.Name, env.ID, c.cfg.Owner, dl); err != nil {
+	if err := c.inbox.Dead(ctx, c.cfg.Name, env.ID, owner, dl); err != nil {
 		log.Error("record dead-lettered event", "error", retry.Sanitize(err))
 		return outcomeUnrecorded
 	}

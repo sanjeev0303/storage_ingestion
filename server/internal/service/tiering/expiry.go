@@ -3,10 +3,12 @@ package tiering
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/audit"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/dataset"
 )
 
 // VersionEstimate is what reading a snapshot would cost and wait for:
@@ -124,11 +126,22 @@ func (s *Service) ExpireVersions(ctx context.Context, p model.Principal, dataset
 	if err != nil {
 		return Expiry{}, err
 	}
+	released := map[string]bool{}
+	releases, err := s.deps.Datasets.Releases(ctx, p, datasetID)
+	if err != nil && !errors.Is(err, dataset.ErrQualityOff) {
+		return Expiry{}, err
+	}
+	for _, r := range releases {
+		released[r.VersionID] = true
+	}
 	cutoff := s.now().AddDate(0, 0, -in.OlderThanDays)
 	out := Expiry{Expire: []ExpiringVersion{}, Keep: []ExpiringVersion{}, DryRun: in.DryRun}
 	var ids []string
 	for i, u := range uses { // newest first
 		v := ExpiringVersion{ID: u.ID, Version: u.Version, Members: u.Members, Bytes: u.Bytes, CreatedAt: u.CreatedAt, Kept: u.Reason}
+		if v.Kept == "" && released[u.ID] {
+			v.Kept = "it is a release"
+		}
 		switch {
 		case i < in.KeepLast:
 			v.Kept = "one of the newest kept"
@@ -166,8 +179,14 @@ func (s *Service) ExpireVersions(ctx context.Context, p model.Principal, dataset
 		return out, nil
 	}
 
-	if err := s.deps.Store.Expire(ctx, p.TenantID, ids, p.UserID, s.now()); err != nil {
+	kept, err := s.deps.Store.Expire(ctx, p.TenantID, ids, p.UserID, s.now())
+	if err != nil {
 		return Expiry{}, err
+	}
+	if len(kept) > 0 {
+		// Released after the plan above: what it would free is wrong, so
+		// nothing was expired. Asking again plans without it.
+		return Expiry{}, fmt.Errorf("%w: version %s was released meanwhile; nothing was expired, ask again", model.ErrRevisionConflict, kept[0])
 	}
 	out.Refused = map[string]string{}
 	for _, a := range freed {

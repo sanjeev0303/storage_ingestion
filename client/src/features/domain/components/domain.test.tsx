@@ -70,6 +70,17 @@ describe("VersionDomain", () => {
     await waitFor(() => expect(reason).toBe("wrong calibration"));
   });
 
+  it("does not offer a DOI for a withdrawn publication", async () => {
+    routes({
+      landing_url: "https://c/published/s1",
+      publication: { id: "p1", slug: "s1", title: "Logs", license: "MIT", withdrawn_at: "2026-11-03T00:00:00Z", withdrawn_reason: "wrong calibration",
+        created_at: "2026-11-02T00:00:00Z" },
+    });
+    renderWithProviders(<VersionDomain id="d1" versionId="v1" version={3} />, { permissions: ["datasets.manage"] });
+    expect(await screen.findByText("wrong calibration")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Register a DOI" })).not.toBeInTheDocument();
+  });
+
   it("shows recordings with their topics, and nothing when there are none", async () => {
     routes(null, [
       { asset_id: "a1", path: "logs/run1.mcap", kind: "MCAP", start_ns: 0, end_ns: 8_000_000_000, message_count: 42, topics: [{ topic: "/imu", schema: "sensor_msgs/Imu", message_count: 42 }] },

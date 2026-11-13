@@ -82,6 +82,82 @@ describe("GovernanceScreen", () => {
     await waitFor(() => expect(bodies[1]).toEqual({ dataset: "old-scans", reason: "past retention", dry_run: false }));
   });
 
+  it("drops the previewed plan when a field changes, so only a previewed request can be deleted", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    base([]);
+    server.use(
+      http.post(`${API}/assets/bulk-delete`, async ({ request }) => {
+        bodies.push((await request.json()) as Record<string, unknown>);
+        return HttpResponse.json({ matched: 3, bytes: 3072, blocked: {}, checked: 3, scheduled: 0, sample: [] });
+      }),
+    );
+    renderWithProviders(<GovernanceScreen />, { permissions: ["retention.manage", "assets.delete"] });
+
+    await userEvent.type(await screen.findByLabelText("Dataset"), "old-scans");
+    await userEvent.type(screen.getAllByLabelText(/^Reason/)[0], "past retention");
+    await userEvent.click(screen.getByRole("button", { name: "Preview deletion" }));
+    expect(await screen.findByRole("button", { name: "Delete 3 assets" })).toBeInTheDocument();
+
+    await userEvent.type(screen.getByLabelText("Path starts with"), "everything/");
+    expect(screen.queryByRole("button", { name: "Delete 3 assets" })).not.toBeInTheDocument();
+    expect(bodies).toHaveLength(1);
+  });
+
+  it("sends the switches a stricter profile turns on, as they are shown", async () => {
+    let sent: Record<string, unknown> | undefined;
+    base([]);
+    server.use(
+      http.get(`${API}/governance`, () => HttpResponse.json({ ...settings, two_person: false })),
+      http.put(`${API}/governance`, async ({ request }) => {
+        sent = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json({ ...settings, profile: "GXP_VAULT" });
+      }),
+    );
+    renderWithProviders(<GovernanceScreen />, { permissions: ["retention.manage"] });
+
+    await userEvent.selectOptions(await screen.findByLabelText("Profile"), "GXP_VAULT");
+    expect(screen.getByRole("checkbox", { name: /Two-person rule/ })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /Every deletion needs approval/ })).toBeChecked();
+    await userEvent.click(screen.getByRole("button", { name: "Save governance" }));
+    await waitFor(() => expect(sent).toMatchObject({ profile: "GXP_VAULT", two_person: true, approve_deletes: true }));
+  });
+
+  it("keeps unsaved governance edits through a refetch and says someone else changed it", async () => {
+    let current = { ...settings, updated_at: "2026-10-30T09:00:00Z" };
+    base([]);
+    server.use(http.get(`${API}/governance`, () => HttpResponse.json(current)));
+    const { client } = renderWithProviders(<GovernanceScreen />, { permissions: ["retention.manage"] });
+    await userEvent.type(await screen.findByLabelText(/^Reason/), "audit asked for it");
+
+    current = { ...current, approve_deletes: true, updated_at: "2026-10-30T10:00:00Z" };
+    await client.invalidateQueries();
+    expect(await screen.findByText(/Someone else changed the governance settings after you started editing/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Reason/)).toHaveValue("audit asked for it");
+  });
+
+  it("does not act on an approval another member already decided", async () => {
+    let lists = 0;
+    let decided = false;
+    server.use(
+      http.get(`${API}/governance`, () => HttpResponse.json(settings)),
+      http.get(`${API}/approvals`, () => {
+        lists += 1;
+        return HttpResponse.json({ approvals: lists === 1 ? [pending("user:someone-else")] : [] });
+      }),
+      http.post(`${API}/approvals/ap-1/approve`, () => {
+        decided = true;
+        return HttpResponse.json({ ...pending("user:someone-else"), state: "EXECUTED" });
+      }),
+    );
+    renderWithProviders(<GovernanceScreen />, { permissions: ["retention.manage"] });
+
+    await userEvent.click(await screen.findByRole("button", { name: "Review" }));
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Approve and carry out" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(decided).toBe(false);
+  });
+
   it("checks a certificate's hash in the browser", async () => {
     const signed = '{"type":"disposition-certificate/v1","file_name":"old.txt"}';
     const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(signed)));

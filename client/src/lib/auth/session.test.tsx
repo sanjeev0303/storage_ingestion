@@ -138,4 +138,35 @@ describe("session and organization scoping", () => {
     await waitFor(() => expect(replace).toHaveBeenCalledWith("/login?next=%2Fapp%2Fcatalog"));
     expect(client.getQueryCache().getAll()).toHaveLength(0);
   });
+  it("redirects again when a later session ends, even though this provider stayed mounted", async () => {
+    let objects = () => HttpResponse.json({ owner: "first" }) as Response;
+    useBackend(() => server.use(http.get(`${API}/catalog/objects`, () => objects())));
+    sessionStorage.setItem("orb.organization", "org-a");
+    const client = newClient();
+    const tree = () => (
+      <QueryClientProvider client={client}>
+        <SessionProvider fallback={<p>loading</p>}>
+          <Probe />
+        </SessionProvider>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(tree());
+    await waitFor(() => expect(screen.getByTestId("owner")).toHaveTextContent("first"));
+
+    objects = () => HttpResponse.json({ error: "x", code: "unauthenticated" }, { status: 401 });
+    await act(async () => {
+      await userEvent.click(screen.getByText("reload"));
+    });
+    await waitFor(() => expect(replace).toHaveBeenCalledTimes(1));
+
+    // The API confirms a session again (signed in in another tab), then that one ends too.
+    objects = () => HttpResponse.json({ owner: "second" });
+    rerender(tree());
+    await waitFor(() => expect(screen.getByTestId("owner")).toHaveTextContent("second"));
+    objects = () => HttpResponse.json({ error: "x", code: "unauthenticated" }, { status: 401 });
+    await act(async () => {
+      await userEvent.click(screen.getByText("reload"));
+    });
+    await waitFor(() => expect(replace).toHaveBeenCalledTimes(2));
+  });
 });

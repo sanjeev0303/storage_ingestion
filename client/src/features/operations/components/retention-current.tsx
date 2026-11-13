@@ -5,6 +5,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/dialog";
 import { Checkbox } from "@/components/ui/field";
+import { LoadMore } from "@/components/ui/page";
 import { Panel } from "@/components/ui/panel";
 import { EmptyState, ErrorState, SkeletonRows } from "@/components/ui/states";
 import { StateBadge } from "@/components/ui/status";
@@ -13,6 +14,7 @@ import { Time } from "@/components/ui/time";
 import { notify } from "@/components/ui/toast";
 import { useSession } from "@/lib/auth/session";
 import { orgKey } from "@/lib/query/keys";
+import { usePagedQuery } from "@/lib/query/paged";
 import { HoldProofDialog } from "@/features/governance/components/hold-proof";
 import { isPending, listHolds, listPolicies, policyHistory, releaseLegalHold } from "../api";
 import type { HeldHold, PolicyInEffect } from "../types";
@@ -115,10 +117,13 @@ export function HoldsInEffect() {
   const [showReleased, setShowReleased] = useState(false);
   const [releasing, setReleasing] = useState<HeldHold | null>(null);
   const [proving, setProving] = useState<HeldHold | null>(null);
-  const holds = useQuery({
+  const holds = usePagedQuery<HeldHold, string>({
     queryKey: orgKey(organizationId, "retention", "holds", showReleased),
-    queryFn: ({ signal }) => listHolds(showReleased, signal),
     enabled: Boolean(organizationId),
+    fetchPage: async (cursor, signal) => {
+      const page = await listHolds(showReleased, cursor, signal);
+      return { items: page.holds, next: page.next_cursor };
+    },
   });
 
   return (
@@ -131,58 +136,68 @@ export function HoldsInEffect() {
         <SkeletonRows rows={3} />
       ) : holds.isError ? (
         <ErrorState error={holds.error} onRetry={() => holds.refetch()} />
-      ) : holds.data.holds.length === 0 ? (
+      ) : holds.items.length === 0 ? (
         <EmptyState title={showReleased ? "No holds, ever" : "No active holds"}>
           Place a hold below when a matter needs data kept regardless of retention.
         </EmptyState>
       ) : (
-        <Table>
-          <caption className="sr-only">Legal holds</caption>
-          <thead>
-            <tr>
-              <Th>Scope</Th>
-              <Th>Reason</Th>
-              <Th>Placed</Th>
-              <Th>
-                <span className="sr-only">Actions</span>
-              </Th>
-            </tr>
-          </thead>
-          <tbody>
-            {holds.data.holds.map((hold) => (
-              <tr key={hold.id}>
-                <Td>
-                  <div>{SCOPE_TEXT[hold.scope] ?? hold.scope}</div>
-                  {hold.scope_key && <div className="mono-data text-sm text-muted">{hold.scope_key}</div>}
-                  {hold.query && <div className="mono-data text-sm text-muted [overflow-wrap:anywhere]">{describeQuery(hold.query)}</div>}
-                </Td>
-                <Td className="max-w-sm">
-                  {hold.matter && <div className="font-medium">{hold.matter}</div>}
-                  {hold.reason}
-                  {hold.custodians && hold.custodians.length > 0 && (
-                    <div className="text-sm text-muted">Custodians: {hold.custodians.join(", ")}</div>
-                  )}
-                </Td>
-                <Td>
-                  <Time value={hold.placed_at} />
-                  <div className="text-sm text-muted">{hold.placed_by}</div>
-                </Td>
-                <Td className="text-right">
-                  {hold.released_at ? (
-                    <StateBadge>
-                      Released <Time value={hold.released_at} />
-                    </StateBadge>
-                  ) : (
-                    <span className="flex flex-wrap justify-end gap-2">
-                      <Button onClick={() => setProving(hold)}>Proof</Button>
-                      <Button onClick={() => setReleasing(hold)}>Release</Button>
-                    </span>
-                  )}
-                </Td>
+        <>
+          <Table>
+            <caption className="sr-only">Legal holds</caption>
+            <thead>
+              <tr>
+                <Th>Scope</Th>
+                <Th>Reason</Th>
+                <Th>Placed</Th>
+                <Th>
+                  <span className="sr-only">Actions</span>
+                </Th>
               </tr>
-            ))}
-          </tbody>
-        </Table>
+            </thead>
+            <tbody>
+              {holds.items.map((hold) => (
+                <tr key={hold.id}>
+                  <Td>
+                    <div>{SCOPE_TEXT[hold.scope] ?? hold.scope}</div>
+                    {hold.scope_key && <div className="mono-data text-sm text-muted">{hold.scope_key}</div>}
+                    {hold.query && <div className="mono-data text-sm text-muted [overflow-wrap:anywhere]">{describeQuery(hold.query)}</div>}
+                  </Td>
+                  <Td className="max-w-sm">
+                    {hold.matter && <div className="font-medium">{hold.matter}</div>}
+                    {hold.reason}
+                    {hold.custodians && hold.custodians.length > 0 && (
+                      <div className="text-sm text-muted">Custodians: {hold.custodians.join(", ")}</div>
+                    )}
+                  </Td>
+                  <Td>
+                    <Time value={hold.placed_at} />
+                    <div className="text-sm text-muted">{hold.placed_by}</div>
+                  </Td>
+                  <Td className="text-right">
+                    {hold.released_at ? (
+                      <StateBadge>
+                        Released <Time value={hold.released_at} />
+                      </StateBadge>
+                    ) : (
+                      <span className="flex flex-wrap justify-end gap-2">
+                        <Button onClick={() => setProving(hold)}>Proof</Button>
+                        <Button onClick={() => setReleasing(hold)}>Release</Button>
+                      </span>
+                    )}
+                  </Td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+          {(holds.hasNextPage || holds.data.pages.length > 1) && (
+            <LoadMore
+              hasNext={Boolean(holds.hasNextPage)}
+              loading={holds.isFetchingNextPage}
+              onLoad={() => holds.fetchNextPage()}
+              shown={holds.items.length}
+            />
+          )}
+        </>
       )}
 
       {proving && (

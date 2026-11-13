@@ -57,6 +57,22 @@ describe("SsoScreen", () => {
     expect(sent).toMatchObject({ protocol: "OIDC", client_secret: "", allowed_domains: ["example.com", "example.org"], enabled: true });
   });
 
+  it("keeps unsaved edits through a refetch and says someone else changed single sign-on", async () => {
+    let current = configured;
+    server.use(
+      http.get(`${API}/organization/sso`, () => HttpResponse.json(current)),
+      http.get(`${API}/organization/roles`, () => HttpResponse.json({ roles: [] })),
+      noToken(),
+    );
+    const { client } = renderWithProviders(<SsoScreen />);
+    await userEvent.type(await screen.findByLabelText(/Email domains/), ", example.org");
+
+    current = { ...configured, enabled: false, updated_at: "2026-10-29T10:00:00Z" };
+    await client.invalidateQueries();
+    expect(await screen.findByText(/Someone else changed single sign-on after you started editing/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Email domains/)).toHaveValue("example.com, example.org");
+  });
+
   it("needs a secret the first time", async () => {
     server.use(
       http.get(`${API}/organization/sso`, () => HttpResponse.json(blank)),

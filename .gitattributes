@@ -1,0 +1,4 @@
+# Go and SQL sources stay LF in every checkout, so gofmt -l on Windows reports
+# real formatting problems instead of the CR that core.autocrlf would add.
+*.go text eol=lf
+*.sql text eol=lf

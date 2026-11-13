@@ -38,6 +38,30 @@ describe("AdoptionScreen", () => {
     );
   });
 
+  it("sends neither hidden pasted text nor a manage mode the chosen source does not take", async () => {
+    let sent: unknown;
+    server.use(
+      http.get(`${API}/adoptions`, () => HttpResponse.json({ adoptions: [] })),
+      http.get(`${API}/storage-connections`, () => HttpResponse.json({ connections: [connection], default_connection_id: "platform" })),
+      http.post(`${API}/adoptions`, async ({ request }) => {
+        sent = await request.json();
+        return HttpResponse.json({ ...job, state: "QUEUED" }, { status: 201 });
+      }),
+    );
+    renderWithProviders(<AdoptionScreen />, { permissions: ["ingestion.read", "ingestion.write"] });
+    const source = await screen.findByLabelText("Source");
+    // Paste a manifest and ask for manage mode, then switch to an import that offers neither.
+    await userEvent.selectOptions(source, "MANIFEST");
+    await userEvent.type(screen.getByLabelText(/Or paste it/), '{{"key":"a"}');
+    await userEvent.click(screen.getByLabelText(/Let the platform delete the objects/));
+    await userEvent.selectOptions(source, "STAC");
+    await userEvent.type(screen.getByLabelText(/catalog URL/), "https://stac.example.com/catalog.json");
+    await userEvent.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() =>
+      expect(sent).toEqual({ source: "STAC", source_ref: "https://stac.example.com/catalog.json", require_digest: true }),
+    );
+  });
+
   it("shows a job's counters and its entries' outcomes", async () => {
     server.use(
       http.get(`${API}/adoptions`, () => HttpResponse.json({ adoptions: [job] })),

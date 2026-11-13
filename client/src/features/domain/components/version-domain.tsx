@@ -195,7 +195,7 @@ function PublishPanel({ id, versionId }: { id: string; versionId: string }) {
           {p.doi_error && <p className="text-base break-words">The DOI was not registered: {p.doi_error}</p>}
           {can("datasets.manage") && (
             <div className="flex flex-wrap gap-2">
-              {!p.doi && (
+              {!p.doi && !p.withdrawn_at && (
                 <Button variant="secondary" onClick={() => retry.mutate()} loading={retry.isPending}>
                   {p.doi_error ? "Try the DOI again" : "Register a DOI"}
                 </Button>

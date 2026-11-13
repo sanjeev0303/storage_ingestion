@@ -3,6 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
+import { ChangedElsewhere } from "@/components/ui/changed-elsewhere";
 import { CopyButton } from "@/components/ui/copy-button";
 import { ConfirmDialog, Modal } from "@/components/ui/dialog";
 import { Checkbox, Field, Input, Select } from "@/components/ui/field";
@@ -260,7 +261,8 @@ function NewTokenDialog({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <Modal open onOpenChange={(open) => !open && onClose()} title="New API token" description="Give it only what the script or vendor needs.">
+    // Closing while the token is being made would lose its secret, which is shown only once.
+    <Modal open onOpenChange={(open) => !open && !create.isPending && onClose()} title="New API token" description="Give it only what the script or vendor needs.">
       <form id="new-token" onSubmit={submit} className="flex flex-col gap-4">
         <Field label="Name" required hint="Who or what uses it, such as ci-nightly or vendor-acme.">
           {(props) => <Input {...props} name="token_name" value={name} autoComplete="off" onChange={(e) => setName(e.target.value)} />}
@@ -497,6 +499,9 @@ function EgressPanel() {
 
 function PolicyPanel() {
   const { organizationId } = useSession();
+  // The form restarts with the latest policy after a save or when asked. A
+  // background refetch alone must not wipe what the user typed.
+  const [reloads, setReloads] = useState(0);
   const policy = useQuery({
     queryKey: orgKey(organizationId, "access", "policy"),
     queryFn: ({ signal }) => getAccessPolicy(signal),
@@ -509,7 +514,7 @@ function PolicyPanel() {
       ) : policy.isError ? (
         <ErrorState error={policy.error} onRetry={() => policy.refetch()} />
       ) : (
-        <PolicyForm key={policy.data.updated_at ?? "default"} initial={policy.data} />
+        <PolicyForm key={reloads} latest={policy.data} onReload={() => setReloads((n) => n + 1)} />
       )}
     </Panel>
   );
@@ -517,10 +522,17 @@ function PolicyPanel() {
 
 const toGB = (bytes: number) => (bytes > 0 ? String(Math.round((bytes / GB) * 100) / 100) : "");
 const fromGB = (text: string) => Math.round((Number(text) || 0) * GB);
+const budgetError = (text: string) => {
+  if (text.trim() === "") return undefined;
+  const value = Number(text);
+  return !Number.isFinite(value) || value < 0 ? "A number of GB, or empty for none." : undefined;
+};
 
-function PolicyForm({ initial }: { initial: AccessPolicy }) {
+function PolicyForm({ latest, onReload }: { latest: AccessPolicy; onReload: () => void }) {
   const { can } = useSession();
   const editable = can("org.manage");
+  // The policy as it was when editing started.
+  const [initial] = useState(latest);
   const [linksEnabled, setLinksEnabled] = useState(initial.links_enabled);
   const [ttl, setTTL] = useState(initial.max_link_ttl === "0s" ? "" : initial.max_link_ttl);
   const [monthly, setMonthly] = useState(toGB(initial.egress_monthly_bytes));
@@ -531,8 +543,12 @@ function PolicyForm({ initial }: { initial: AccessPolicy }) {
   const refresh = useAccessKeys();
   const save = useMutation({ mutationFn: putAccessPolicy });
 
+  // Our own save also moves updated_at; that is not a change made elsewhere.
+  const changedElsewhere = !save.isSuccess && latest.updated_at !== initial.updated_at;
   const thresholdNumber = Number(threshold);
-  const valid = Number.isInteger(thresholdNumber) && thresholdNumber >= 10 && thresholdNumber <= 100000 && !(Number(monthly) < 0) && !(Number(daily) < 0);
+  const monthlyError = budgetError(monthly);
+  const dailyError = budgetError(daily);
+  const valid = Number.isInteger(thresholdNumber) && thresholdNumber >= 10 && thresholdNumber <= 100000 && !monthlyError && !dailyError;
 
   function submit(e: FormEvent) {
     e.preventDefault();
@@ -550,6 +566,7 @@ function PolicyForm({ initial }: { initial: AccessPolicy }) {
         onSuccess: async () => {
           await refresh();
           notify.success("Access policy saved");
+          onReload();
         },
         onError: notify.error,
       },
@@ -558,6 +575,7 @@ function PolicyForm({ initial }: { initial: AccessPolicy }) {
 
   return (
     <form onSubmit={submit} className="flex flex-col gap-4">
+      {changedElsewhere && <ChangedElsewhere subject="the access policy" onReload={onReload} />}
       <fieldset disabled={!editable} className="flex flex-col gap-4">
         <Checkbox checked={linksEnabled} onChange={(e) => setLinksEnabled(e.target.checked)} label="Members may create share links" />
         <Field label="Longest link" hint="CONFIDENTIAL assets are capped at 1 hour and RESTRICTED at 15 minutes either way.">
@@ -574,10 +592,10 @@ function PolicyForm({ initial }: { initial: AccessPolicy }) {
           )}
         </Field>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
-          <Field label="Monthly budget, GB" hint="Empty for none.">
+          <Field label="Monthly budget, GB" hint="Empty for none." error={monthlyError}>
             {(props) => <Input {...props} name="egress_monthly" inputMode="decimal" value={monthly} className="tabular-nums" onChange={(e) => setMonthly(e.target.value)} />}
           </Field>
-          <Field label="Per member per day, GB" hint="Empty for none.">
+          <Field label="Per member per day, GB" hint="Empty for none." error={dailyError}>
             {(props) => <Input {...props} name="egress_daily" inputMode="decimal" value={daily} className="tabular-nums" onChange={(e) => setDaily(e.target.value)} />}
           </Field>
         </div>
@@ -596,13 +614,17 @@ function PolicyForm({ initial }: { initial: AccessPolicy }) {
           {(props) => (
             <Select {...props} name="anomaly_action" value={anomaly} onChange={(e) => setAnomaly(e.target.value as AccessPolicy["anomaly_action"])}>
               <option value="ALERT">Alert only</option>
-              <option value="REVOKE_LINKS">Alert and revoke the member's share links</option>
+              <option value="REVOKE_LINKS">Alert and revoke the member&apos;s share links</option>
             </Select>
           )}
         </Field>
       </fieldset>
       {editable ? (
-        <SubmitButton valid={valid} loading={save.isPending} hint="The alert threshold is between 10 and 100,000.">
+        <SubmitButton
+          valid={valid}
+          loading={save.isPending}
+          hint={monthlyError || dailyError ? "Fix the budgets marked above." : "The alert threshold is between 10 and 100,000."}
+        >
           Save access policy
         </SubmitButton>
       ) : (

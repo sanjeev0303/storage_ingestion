@@ -136,18 +136,26 @@ func (r *DeadLetterRepository) Retry(ctx context.Context, id, actor, note string
 	}
 
 	// The same event again, in a new publication generation so the queue
-	// does not drop it as a duplicate of the first.
+	// does not drop it as a duplicate of the first. A publisher holding the
+	// event right now keeps it: taking its lease would publish it twice.
 	tag, err := tx.Exec(ctx, `
 		UPDATE outbox_events
 		SET status = 'PENDING', attempts = 0,
 		    republished = republished + CASE WHEN status = 'PENDING' THEN 0 ELSE 1 END,
 		    next_attempt_at = $2, last_error = NULL, lease_owner = NULL, lease_expires_at = NULL, updated_at = $2
-		WHERE id = $1
+		WHERE id = $1 AND (lease_expires_at IS NULL OR lease_expires_at <= $2)
 	`, dl.EventID, now)
 	if err != nil {
 		return fmt.Errorf("requeue outbox event: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
+		var exists bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM outbox_events WHERE id = $1)`, dl.EventID).Scan(&exists); err != nil {
+			return fmt.Errorf("read outbox event: %w", err)
+		}
+		if exists {
+			return model.ErrEventInFlight
+		}
 		return model.ErrNotReplayable
 	}
 	if dl.Consumer != "" {

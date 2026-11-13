@@ -129,6 +129,59 @@ func TestMQTTSession(t *testing.T) {
 	}
 }
 
+// A file opened before the broker went away is still finished when its time
+// is up, so what it holds is sent while the agent waits to reconnect.
+func TestMQTTFileRollsWhileDisconnected(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	m := &MQTT{Broker: "tcp://" + ln.Addr().String(), ClientID: "dev-1", Topics: []string{"a"}, Dir: dir, RollSeconds: 1}
+	m.withDefaults()
+	a := &Agent{cfg: Config{MQTT: m}, log: slog.New(slog.NewTextHandler(io.Discard, nil)), now: time.Now}
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() {
+		a.runMQTT(ctx)
+		close(stopped)
+	}()
+	defer func() {
+		cancel()
+		<-stopped
+	}()
+
+	conn, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln.Close() // nothing to reconnect to
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	br := bufio.NewReader(conn)
+	if _, err := readPacket(br); err != nil { // CONNECT
+		t.Fatal(err)
+	}
+	_ = writePacket(conn, 0x20, []byte{0, 0})
+	if _, err := readPacket(br); err != nil { // SUBSCRIBE
+		t.Fatal(err)
+	}
+	k, b := publish(0, 0, false, "a", []byte(`{"x":1}`))
+	_ = writePacket(conn, k, b)
+	waitFor(t, 2*time.Second, filepath.Join(dir, "mqtt_*.jsonl.part"))
+	conn.Close()
+	waitFor(t, 8*time.Second, filepath.Join(dir, "mqtt_*.jsonl"))
+}
+
+func waitFor(t *testing.T, limit time.Duration, pattern string) {
+	t.Helper()
+	for give := time.Now().Add(limit); time.Now().Before(give); time.Sleep(20 * time.Millisecond) {
+		if found, _ := filepath.Glob(pattern); len(found) > 0 {
+			return
+		}
+	}
+	t.Fatalf("nothing matched %s within %v", filepath.Base(pattern), limit)
+}
+
 func TestRollingWriterRecovers(t *testing.T) {
 	dir := t.TempDir()
 	torn := filepath.Join(dir, "mqtt_1.jsonl.part")

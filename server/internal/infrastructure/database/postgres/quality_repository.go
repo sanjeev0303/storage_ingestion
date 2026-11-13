@@ -137,7 +137,8 @@ func (r *QualityRepository) ExtendProfile(ctx context.Context, versionID, owner 
 	return err
 }
 
-// FinishProfile records the outcome, if owner still holds the lease.
+// FinishProfile records the outcome, if owner still holds the lease on a
+// RUNNING profile.
 func (r *QualityRepository) FinishProfile(ctx context.Context, owner string, p model.VersionProfile) error {
 	tables, err := json.Marshal(p.Tables)
 	if err != nil {
@@ -156,7 +157,7 @@ func (r *QualityRepository) FinishProfile(ctx context.Context, owner string, p m
 	_, err = r.db.Pool.Exec(ctx, `UPDATE version_profiles SET state = $3, tables = $4, skipped = $5, files_profiled = $6,
 		bytes_read = $7, other_files = $8, baseline_version_id = NULLIF($9, ''), drift = $10, drifted = $11, error = $12,
 		finished_at = now(), lease_owner = NULL, lease_until = NULL
-		WHERE version_id = $1 AND lease_owner = $2`,
+		WHERE version_id = $1 AND lease_owner = $2 AND state = 'RUNNING'`,
 		p.VersionID, owner, p.State, tables, skipped, p.FilesProfiled, p.BytesRead, p.OtherFiles, p.BaselineVersionID, drift, p.Drifted, p.Error)
 	if err != nil {
 		return fmt.Errorf("finish profile: %w", err)
@@ -369,10 +370,12 @@ func (r *QualityRepository) RunsToCheck(ctx context.Context, limit int) ([][2]st
 
 // ─── Releases ─────────────────────────────────────────────────────────
 
-// SetRelease labels a version, once.
+// SetRelease labels a version, once. An expired version is refused: its
+// members are gone. Expiry locks the versions it expires, so this guard
+// and a concurrent expiry cannot both win.
 func (r *QualityRepository) SetRelease(ctx context.Context, tenantID, versionID, label, notes, actor string, at time.Time) error {
 	tag, err := r.db.Pool.Exec(ctx, `UPDATE dataset_versions SET release_label = $3, release_notes = $4, released_by = $5, released_at = $6
-		WHERE tenant_id = $1 AND id = $2 AND release_label IS NULL`, tenantID, versionID, label, notes, actor, at)
+		WHERE tenant_id = $1 AND id = $2 AND release_label IS NULL AND expired_at IS NULL`, tenantID, versionID, label, notes, actor, at)
 	if isUniqueViolation(err) {
 		return model.ErrReleaseTaken
 	}
@@ -380,6 +383,14 @@ func (r *QualityRepository) SetRelease(ctx context.Context, tenantID, versionID,
 		return fmt.Errorf("label release: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
+		var expired bool
+		if err := r.db.Pool.QueryRow(ctx, `SELECT expired_at IS NOT NULL FROM dataset_versions WHERE tenant_id = $1 AND id = $2`,
+			tenantID, versionID).Scan(&expired); err != nil {
+			return fmt.Errorf("read version: %w", err)
+		}
+		if expired {
+			return model.ErrVersionExpired
+		}
 		return fmt.Errorf("%w: the version is already released", model.ErrReleaseTaken)
 	}
 	return nil

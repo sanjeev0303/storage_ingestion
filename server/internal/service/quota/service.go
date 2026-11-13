@@ -87,6 +87,21 @@ func (s *Service) CreateReservedUpload(ctx context.Context, upload *model.Upload
 	return err
 }
 
+// CreateReservedUploads stores single-request sessions of one tenant with
+// their reservations in one transaction (see the repository). It reports no
+// refusal itself: on model.ErrBatchNotReserved the caller reserves the
+// sessions one at a time, and CreateReservedUpload audits each refusal.
+func (s *Service) CreateReservedUploads(ctx context.Context, uploads []model.ReservedUpload) error {
+	if len(uploads) == 0 {
+		return nil
+	}
+	limits, err := s.Effective(ctx, uploads[0].Upload.TenantID)
+	if err != nil {
+		return err
+	}
+	return s.repo.CreateReservedUploads(ctx, uploads, limits)
+}
+
 // Report is a tenant's limits and usage.
 type Report struct {
 	Policy model.TenantQuota

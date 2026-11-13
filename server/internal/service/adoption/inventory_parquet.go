@@ -1,7 +1,6 @@
 package adoption
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"strconv"
@@ -9,6 +8,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 )
@@ -16,8 +16,8 @@ import (
 // inventoryParquet reads a Parquet data file of an S3 Inventory report. Its
 // columns are snake_case (key, size, e_tag, is_latest, is_delete_marker),
 // and its keys are not URL-encoded.
-func inventoryParquet(ctx context.Context, raw []byte, emit func(inventoryRow) error) error {
-	pf, err := file.NewParquetReader(bytes.NewReader(raw))
+func inventoryParquet(ctx context.Context, data parquet.ReaderAtSeeker, emit func(inventoryRow) error) error {
+	pf, err := file.NewParquetReader(data)
 	if err != nil {
 		return err
 	}

@@ -465,6 +465,18 @@ func (e *QuotaError) Is(target error) bool { return target == ErrQuotaExceeded }
 // Remaining is what is left under the limit.
 func (e *QuotaError) Remaining() int64 { return max(e.Max-e.Used, 0) }
 
+// ErrBatchNotReserved means a batch reservation stored nothing because one of
+// its sessions would have been refused or conflicted (a limit, a busy path, a
+// taken idempotency key). The caller reserves the sessions one at a time, so
+// each outcome is reported as it is for a single reservation.
+var ErrBatchNotReserved = errors.New("the batch reservation was not made")
+
+// ReservedUpload is one session of a batch reservation.
+type ReservedUpload struct {
+	Upload         *UploadSession
+	IdempotencyKey string
+}
+
 // TenantUsage is a tenant's ingestion usage. ReservedBytes are claimed for
 // uploads in flight, judged by declared sizes; StoredBytes are published
 // bytes, from the verified object sizes.

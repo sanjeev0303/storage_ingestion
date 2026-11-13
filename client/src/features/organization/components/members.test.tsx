@@ -80,6 +80,28 @@ describe("Members", () => {
     await waitFor(() => expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument());
   });
 
+  it("marks suspend busy while it is pending, so it cannot be sent twice", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let calls = 0;
+    mockApi(() => [member(2)]);
+    server.use(
+      http.post(`${API}/organization/members/u-02/suspend`, async () => {
+        calls += 1;
+        await gate;
+        return HttpResponse.json(member(2, { status: "SUSPENDED" }));
+      }),
+    );
+    renderWithProviders(<Members />);
+    const suspend = await screen.findByRole("button", { name: "Suspend" });
+    await userEvent.click(suspend);
+    await waitFor(() => expect(suspend).toBeDisabled());
+    expect(suspend).toHaveAttribute("aria-busy", "true");
+    await userEvent.click(suspend);
+    release();
+    await waitFor(() => expect(calls).toBe(1));
+  });
+
   it("explains a last-owner refusal in plain words", async () => {
     mockApi(() => [member(2)]);
     server.use(

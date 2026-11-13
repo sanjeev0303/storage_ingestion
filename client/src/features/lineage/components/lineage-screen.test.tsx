@@ -7,6 +7,7 @@ import { renderWithProviders } from "@/test/render";
 import { API, server } from "@/test/server";
 import type { Edge } from "../types";
 import { LineageScreen } from "./lineage-screen";
+import DatasetLineagePage from "@/app/app/datasets/[id]/lineage/page";
 
 // Other work on this machine can slow the first renders; the default 1s is too tight.
 configure({ asyncUtilTimeout: 5000 });
@@ -164,5 +165,18 @@ describe("LineageScreen", () => {
     server.use(http.get(`${API}/datasets/ds-1/lineage`, () => HttpResponse.json({ error: "forbidden", code: "forbidden" }, { status: 403 })));
     renderWithProviders(<LineageScreen datasetId="ds-1" />);
     expect(await screen.findByText("Your role cannot do this")).toBeInTheDocument();
+  });
+
+  it("starts from the new version when ?version changes on the open page", async () => {
+    mockVersions();
+    mockLineage(() => ({ start: ds, direction: "upstream", truncated: false, edges: [] }));
+    const page = (version: string) =>
+      DatasetLineagePage({ params: Promise.resolve({ id: "ds-1" }), searchParams: Promise.resolve({ version }) });
+
+    const { rerender } = renderWithProviders(await page("version-7aaaaaaa"));
+    expect(await screen.findByLabelText("Start from")).toHaveValue("version-7aaaaaaa");
+
+    rerender(await page("version-9bbbbbbb"));
+    expect(await screen.findByLabelText("Start from")).toHaveValue("version-9bbbbbbb");
   });
 });

@@ -3,6 +3,7 @@ package access
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/sanjeev0303/object-storage-platform/internal/infrastructure/database/postgres"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
+	"github.com/sanjeev0303/object-storage-platform/internal/service/identity"
 )
 
 // memStore is enough of the access store for the policy and detection
@@ -182,5 +184,36 @@ func TestTokenAndModelRules(t *testing.T) {
 	if model.ClassForFindings([]string{"format.invalid_bam", "secret.aws_access_key"}) != model.ClassRestricted ||
 		model.ClassForFindings([]string{"external.pii.ssn"}) != model.ClassConfidential || model.ClassForFindings(nil) != "" {
 		t.Fatal("classification from findings")
+	}
+}
+
+type tokenStore struct {
+	*memStore
+	created []model.APIToken
+}
+
+func (s *tokenStore) CreateToken(_ context.Context, t model.APIToken) error {
+	s.created = append(s.created, t)
+	return nil
+}
+
+func TestNewTokensAreStoredPepperedAndShownOnce(t *testing.T) {
+	store := &tokenStore{memStore: &memStore{}}
+	pepper := []byte("0123456789abcdef0123456789abcdef")
+	svc := NewService(store, nil, slog.New(slog.NewTextHandler(io.Discard, nil))).WithPepper(pepper)
+	p := model.Principal{TenantID: "t1", UserID: "u1", Permissions: model.AllPermissions}
+	created, raw, err := svc.CreateTokenFor(context.Background(), p, TokenInput{Name: "ci", Permissions: []string{"assets.read"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := store.created[0]
+	if stored.TokenHash != identity.HashAPIToken(raw, pepper) || stored.TokenHash == identity.HashAPIToken(raw, nil) {
+		t.Fatal("the stored hash is not keyed by the pepper")
+	}
+	if strings.Contains(fmt.Sprintf("%+v %+v", stored, created), raw[len(identity.APITokenPrefix):]) {
+		t.Fatal("the raw token is kept beside its hash")
+	}
+	if stored.Hint != "…"+raw[len(raw)-4:] {
+		t.Fatalf("hint: %q", stored.Hint)
 	}
 }

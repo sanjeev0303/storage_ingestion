@@ -39,6 +39,7 @@ type SSOStore interface {
 	SaveLoginState(ctx context.Context, stateHash []byte, st model.SSOLoginState, now time.Time) error
 	TakeLoginState(ctx context.Context, stateHash []byte, now time.Time) (model.SSOLoginState, error)
 	LinkedUser(ctx context.Context, issuer, subject string) (string, error)
+	SAMLIssuerInUse(ctx context.Context, issuer, orgID string) (bool, error)
 	Provision(ctx context.Context, p model.SSOProvision, now time.Time, audit ...model.AuditEvent) error
 }
 
@@ -155,6 +156,16 @@ func (s *Service) PutSSO(ctx context.Context, p model.Principal, in SSOSettingsI
 		meta, err := parseIDPMetadata(in.IDPMetadata)
 		if err != nil {
 			return invalid(err.Error())
+		}
+		// Sign-ins are linked by issuer and subject. A second organization
+		// naming the same entity ID, with signing keys of its own, could
+		// sign in as the first one's people.
+		inUse, err := s.sso.store.SAMLIssuerInUse(ctx, meta.EntityID, p.TenantID)
+		if err != nil {
+			return model.SSOConnection{}, err
+		}
+		if inUse {
+			return invalid("another organization already uses this identity provider (entity ID " + meta.EntityID + ")")
 		}
 		c.Issuer, c.IDPMetadata = meta.EntityID, strings.TrimSpace(in.IDPMetadata)
 	} else {
@@ -323,8 +334,9 @@ type federatedClaims struct {
 
 // signInFederated turns a provider's verified answer into a session: the
 // email must be verified and in an allowed domain; the subject is linked
-// to its account on its first sign-in; a first sign-in gets an account
-// and a membership when the connection gives a default role.
+// to its account on its first sign-in, if that account belongs to this
+// organization alone; a first sign-in gets an account and a membership
+// when the connection gives a default role.
 func (s *Service) signInFederated(ctx context.Context, conn model.SSOConnection, issuer string, claims federatedClaims, client Client, now time.Time) (Tokens, error) {
 	refuse := func(reason string) (Tokens, error) { return Tokens{}, fmt.Errorf("%w: %s", model.ErrSSOFailed, reason) }
 	email := strings.ToLower(strings.TrimSpace(claims.Email))
@@ -363,6 +375,14 @@ func (s *Service) signInFederated(ctx context.Context, conn model.SSOConnection,
 			provision.NewUser = true
 		} else if err != nil {
 			return Tokens{}, err
+		} else {
+			mine, err := s.belongsOnlyTo(ctx, user, conn.OrgID)
+			if err != nil {
+				return Tokens{}, err
+			}
+			if !mine {
+				return refuse("an account for " + email + " belongs to another organization, so this organization's single sign-on cannot link it")
+			}
 		}
 	}
 	if user.Status != model.UserActive {
@@ -398,6 +418,31 @@ func (s *Service) signInFederated(ctx context.Context, conn model.SSOConnection,
 		return Tokens{User: user}, err
 	}
 	return s.startSession(ctx, user, client)
+}
+
+// belongsOnlyTo reports whether an existing account is a member of this
+// organization and of no other, and has no platform role. An
+// organization's identity provider may link such an account on its first
+// sign-in, and no other: an account elsewhere could be someone else's, and
+// allowed domains are not proof of owning it.
+//
+// ponytail: a link made here outlives a later membership elsewhere; sessions
+// bound to the signing-in organization would close that, and need a schema
+// change.
+func (s *Service) belongsOnlyTo(ctx context.Context, user model.User, orgID string) (bool, error) {
+	if user.PlatformRole != "" {
+		return false, nil
+	}
+	memberships, _, err := s.deps.Tenancy.UserMemberships(ctx, user.ID)
+	if err != nil {
+		return false, err
+	}
+	for _, m := range memberships {
+		if m.OrgID != orgID {
+			return false, nil
+		}
+	}
+	return len(memberships) == 1, nil
 }
 
 // ssoRefused records a refused sign-in and returns err.

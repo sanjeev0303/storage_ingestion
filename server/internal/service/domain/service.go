@@ -840,6 +840,9 @@ func (s *Service) MintDOI(ctx context.Context, p model.Principal, datasetID, ver
 	if pub.DOI != "" {
 		return pub, nil
 	}
+	if pub.WithdrawnAt != nil {
+		return pub, model.ErrWithdrawn
+	}
 	if !s.doiConfigured() {
 		return pub, model.ErrDOIOff
 	}
@@ -847,7 +850,9 @@ func (s *Service) MintDOI(ctx context.Context, p model.Principal, datasetID, ver
 }
 
 // mint registers the DOI with a PUT on a name made from the slug, so that
-// trying again after an answer that got lost cannot make a second DOI.
+// trying again after an answer that got lost cannot make a second DOI. A
+// publication withdrawn while DataCite answered keeps no DOI here
+// (SetDOI refuses); the registered name stays unused at DataCite.
 func (s *Service) mint(ctx context.Context, p model.Principal, pub model.Publication) (model.Publication, error) {
 	doi := s.deps.DataCite.Prefix + "/osp." + pub.Slug
 	if err := s.registerDOI(ctx, doi, pub); err != nil {

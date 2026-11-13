@@ -163,6 +163,7 @@ type Erasure struct {
 	ApprovedAt    *time.Time      `json:"approved_at,omitempty"`
 	ExecutedBy    string          `json:"executed_by,omitempty"`
 	ExecutedAt    *time.Time      `json:"executed_at,omitempty"`
+	PreparedAt    *time.Time      `json:"prepared_at,omitempty"`
 	CompletedAt   *time.Time      `json:"completed_at,omitempty"`
 	Note          string          `json:"note,omitempty"`
 	Certified     bool            `json:"certified"`

@@ -85,20 +85,34 @@ func (s *Service) retireSources(ctx context.Context, stats *CycleStats) error {
 // planRewrites plans, for packs holding enough deleted entries, a new pack
 // of their live entries. Publishing it moves those entries and retires the
 // old pack, whose deleted entries' bytes then go with it.
+//
+// It plans at most ActiveWriters per cycle, but looks past the packs of
+// tenants whose pack slots are full: those come first by age, and taking
+// only the first few would hold every other tenant's rewrites back for as
+// long as that tenant stays busy.
 func (s *Service) planRewrites(ctx context.Context, stats *CycleStats) error {
-	packs, err := s.deps.Packs.PacksToRewrite(ctx, s.cfg.RewriteDeadRatio, s.now().Add(-s.cfg.MaxDeletionDelay), s.cfg.ActiveWriters)
+	packs, err := s.deps.Packs.PacksToRewrite(ctx, s.cfg.RewriteDeadRatio, s.now().Add(-s.cfg.MaxDeletionDelay), batch)
 	if err != nil {
 		return err
 	}
 	var errs []error
+	planned := 0
+	busy := map[string]bool{}
 	for _, old := range packs {
+		if planned == s.cfg.ActiveWriters || ctx.Err() != nil {
+			break
+		}
+		if busy[old.TenantID] {
+			continue
+		}
 		building, err := s.deps.Packs.BuildingPacks(ctx, old.TenantID)
 		if err != nil {
 			errs = append(errs, err)
 			continue
 		}
 		if building >= s.cfg.TenantActivePacks {
-			continue // the tenant's turn comes when its packs are built
+			busy[old.TenantID] = true // the tenant's turn comes when its packs are built
+			continue
 		}
 		entries, err := s.deps.Packs.Entries(ctx, old.ID)
 		if err != nil {
@@ -129,6 +143,7 @@ func (s *Service) planRewrites(ctx context.Context, stats *CycleStats) error {
 			errs = append(errs, err)
 			continue
 		}
+		planned++
 		stats.Rewrites++
 		s.deps.Metrics.Add("pack_rewrites_planned", 1)
 	}

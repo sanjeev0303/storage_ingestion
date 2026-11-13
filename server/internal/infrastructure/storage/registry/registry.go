@@ -40,8 +40,8 @@ type Dependencies struct {
 	Config      config.Storage
 	Platform    interfaces.StorageLocation
 	Connections interfaces.StorageConnectionRepository
-	// Sealer opens stored credentials; nil when BYOS is off, and then only
-	// the platform connection resolves.
+	// Sealer is the master key stored credentials are enveloped under;
+	// nil when BYOS is off, and then only the platform connection resolves.
 	Sealer  secretbox.Sealer
 	Metrics *metrics.Registry
 	// Build builds clients; NewBuilder's is the real one, tests pass fakes.
@@ -317,8 +317,9 @@ func (r *Registry) open(ctx context.Context, c model.StorageConnection) (interfa
 		if err != nil {
 			return nil, nil, err
 		}
-		plain, err := r.deps.Sealer.Open(secretbox.Sealed{KeyVersion: sealed.KeyVersion, Nonce: sealed.Nonce, Ciphertext: sealed.Ciphertext},
-			c.CredentialAAD(c.CredentialVersion))
+		envelope := secretbox.NewEnvelope(r.deps.Sealer)
+		plain, err := envelope.Open(secretbox.Sealed{KeyVersion: sealed.KeyVersion, Nonce: sealed.Nonce, Ciphertext: sealed.Ciphertext,
+			WrappedKey: sealed.WrappedKey}, c.CredentialAAD(c.CredentialVersion))
 		if err != nil {
 			return nil, nil, fmt.Errorf("%w: the stored credentials could not be decrypted", model.ErrCredentialMissing)
 		}

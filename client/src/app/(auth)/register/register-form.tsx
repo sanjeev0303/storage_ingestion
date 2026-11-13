@@ -37,6 +37,9 @@ function messageFor(code: string | undefined, fallback: string, retryAfter?: num
 export function RegisterForm() {
   const router = useRouter();
   const [formError, setFormError] = useState<string | null>(null);
+  // Stays true until the next page replaces this one, so the button cannot
+  // be pressed again while the navigation is still loading.
+  const [leaving, setLeaving] = useState(false);
   const {
     register,
     handleSubmit,
@@ -66,6 +69,7 @@ export function RegisterForm() {
         setFormError(messageFor(error.code, describeError(error), error.retryAfter));
         return;
       }
+      setLeaving(true);
       router.replace("/app/overview");
     } catch {
       setFormError("Could not reach the server. Check the connection and try again.");
@@ -98,7 +102,7 @@ export function RegisterForm() {
           </p>
         )}
 
-        <SubmitButton valid={isValid && rulesMet} loading={isSubmitting} className="h-10">
+        <SubmitButton valid={isValid && rulesMet} loading={isSubmitting || leaving} className="h-10">
           Create account
         </SubmitButton>
       </form>

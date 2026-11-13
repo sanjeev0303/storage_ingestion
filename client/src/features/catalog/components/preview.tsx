@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { describeError } from "@/lib/api/errors";
 import { fetchContent } from "../api";
@@ -24,6 +24,14 @@ export function Preview({
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const mounted = useRef(false);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (loaded?.kind !== "image") return;
@@ -48,6 +56,8 @@ export function Preview({
         return;
       }
       if (plan.kind === "image") {
+        // A URL made after unmount would never be revoked.
+        if (!mounted.current) return;
         setLoaded({ kind: "image", url: URL.createObjectURL(blob) });
       } else {
         setLoaded({ kind: "text", text: await blob.text() });

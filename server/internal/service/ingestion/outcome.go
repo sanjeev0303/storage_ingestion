@@ -51,19 +51,26 @@ func (s *Service) settleOutcome(ctx context.Context, e model.IngestionEntry) (st
 		JobID: e.JobID, Position: e.Position, Now: now, UploadID: e.UploadID, AssetID: asset.ID,
 		From: []model.EntryState{model.EntryUploaded, model.EntryProcessing, model.EntryRetryable},
 	}
-	switch asset.Status {
+	status := asset.Status
+	if status == model.AssetStatusAvailable && asset.BlockedReason != "" {
+		status = model.AssetStatusBlocked // a re-scan stopped its reads: not published for this entry
+	}
+	switch status {
 	case model.AssetStatusAvailable:
 		change.To, change.StoredBytes = model.EntryPublished, asset.SizeBytes
-		if _, err := s.deps.Repo.Transition(ctx, change); err != nil {
+		if _, err := s.transition(ctx, change); err != nil {
 			return s.lost(err, "published")
 		}
 		s.count("ingestion_entries_published", 1)
 		s.count("ingestion_entry_latency_ms_total", now.Sub(e.CreatedAt).Milliseconds())
 		return "published", nil
 
-	case model.AssetStatusRejected, model.AssetStatusSoftDeleted, model.AssetStatusDeleted:
+	case model.AssetStatusRejected, model.AssetStatusSoftDeleted, model.AssetStatusDeleted, model.AssetStatusBlocked:
 		detail := asset.RejectionReason
-		if asset.Status != model.AssetStatusRejected {
+		switch status {
+		case model.AssetStatusBlocked:
+			detail = "blocked after publication: " + asset.BlockedReason
+		case model.AssetStatusSoftDeleted, model.AssetStatusDeleted:
 			detail = "the asset was deleted before it was published"
 		}
 		change.To, change.ErrorCode, change.ErrorDetail = model.EntryFailed, model.EntryErrRejected, detail
@@ -102,7 +109,7 @@ func (s *Service) settleOutcome(ctx context.Context, e model.IngestionEntry) (st
 	if e.State == model.EntryUploaded {
 		change.To = model.EntryProcessing
 		change.From = []model.EntryState{model.EntryUploaded}
-		if _, err := s.deps.Repo.Transition(ctx, change); err != nil {
+		if _, err := s.transition(ctx, change); err != nil {
 			return s.lost(err, "processing")
 		}
 	} else {

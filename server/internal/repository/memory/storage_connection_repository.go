@@ -194,6 +194,9 @@ func (r *StorageConnectionRepository) RecordTest(_ context.Context, tenantID, co
 	if err != nil {
 		return c, err
 	}
+	if c.CredentialVersion != result.CredentialVersion {
+		return c, model.ErrCredentialChanged
+	}
 	at := result.At
 	c.LastTestedAt = &at
 	if result.OK {

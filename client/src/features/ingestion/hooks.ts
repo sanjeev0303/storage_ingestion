@@ -39,6 +39,8 @@ export function useJob(id: string) {
     // react-query does not poll while the tab is hidden.
     refetchInterval: (query) => {
       const job = query.state.data;
+      // A first load that failed shows an error with a retry; polling it would only repeat the failure.
+      if (query.state.status === "error" && !job) return false;
       return job && isTerminal(job.state) ? false : POLL_MS;
     },
   });
@@ -192,6 +194,11 @@ export function useDriver({ jobId, concurrency, azure, getFile }: DriverInput) {
       activeMap.current.delete(event.position);
       s.failed++;
       s.problems = [{ position: event.position, message: event.message }, ...s.problems].slice(0, 20);
+    } else if (event.type === "unconfirmed") {
+      activeMap.current.delete(event.position);
+      s.problems = [{ position: event.position, message: event.message }, ...s.problems].slice(0, 20);
+    } else if (event.type === "warning") {
+      s.problems = [{ position: event.position, message: event.message }, ...s.problems].slice(0, 20);
     } else if (event.type === "skipped") {
       s.skipped++;
       s.problems = [{ position: event.position, message: event.message }, ...s.problems].slice(0, 20);
@@ -234,7 +241,8 @@ export function useDriver({ jobId, concurrency, azure, getFile }: DriverInput) {
         store.current.end = end;
       })
       .catch((error) => {
-        if (!abort.signal.aborted) store.current.fatal = describeError(error);
+        if (abort.signal.aborted) store.current.end = "stopped";
+        else store.current.fatal = describeError(error);
       })
       .finally(() => {
         clearInterval(timer);

@@ -2,6 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
+import { ChangedElsewhere } from "@/components/ui/changed-elsewhere";
 import { Field, Input, Select, Textarea } from "@/components/ui/field";
 import { Panel } from "@/components/ui/panel";
 import { ErrorState, SkeletonRows } from "@/components/ui/states";
@@ -38,15 +39,29 @@ function splitTypes(text: string) {
 
 export function ContentPolicyScreen() {
   const policy = useContentPolicy();
+  // The form restarts with the latest policy after a save or when asked. A
+  // background refetch alone must not wipe what the user typed.
+  const [reloads, setReloads] = useState(0);
   if (policy.isPending) return <SkeletonRows rows={6} />;
   if (policy.isError) return <ErrorState error={policy.error} onRetry={() => policy.refetch()} />;
-  return <PolicyForm key={JSON.stringify(policy.data.policy)} initial={policy.data.policy} families={policy.data.finding_families} />;
+  return (
+    <PolicyForm
+      key={reloads}
+      latest={policy.data.policy}
+      families={policy.data.finding_families}
+      onReload={() => setReloads((n) => n + 1)}
+    />
+  );
 }
 
-function PolicyForm({ initial, families }: { initial: ContentPolicy; families: string[] }) {
+function PolicyForm({ latest, families, onReload }: { latest: ContentPolicy; families: string[]; onReload: () => void }) {
   const { can } = useSession();
   const canManage = can("org.manage");
   const save = useSaveContentPolicy();
+  // The policy as it was when editing started.
+  const [initial] = useState(latest);
+  // The policy carries no revision, so a change is told by its content.
+  const changedElsewhere = !save.isSuccess && JSON.stringify(latest) !== JSON.stringify(initial);
   const [actions, setActions] = useState<Record<string, PolicyAction>>(initial.finding_actions ?? {});
   const [allowed, setAllowed] = useState(initial.allowed_types.join("\n"));
   const [denied, setDenied] = useState(initial.denied_types.join("\n"));
@@ -75,6 +90,12 @@ function PolicyForm({ initial, families }: { initial: ContentPolicy; families: s
     });
   }
 
+  function addException() {
+    if (newCode === "" || newCodeProblem !== undefined) return;
+    setFamily(newCode, newAction);
+    setNewCode("");
+  }
+
   function submit(e: FormEvent) {
     e.preventDefault();
     save.mutate(
@@ -85,13 +106,20 @@ function PolicyForm({ initial, families }: { initial: ContentPolicy; families: s
         max_size_bytes: maxMiB === "" ? 0 : Math.round(Number(maxMiB) * 2 ** 20),
         unknown_type_action: unknown,
       },
-      { onSuccess: () => notify.success("Content policy saved. It applies to the next upload."), onError: notify.error },
+      {
+        onSuccess: () => {
+          notify.success("Content policy saved. It applies to the next upload.");
+          onReload();
+        },
+        onError: notify.error,
+      },
     );
   }
 
   return (
     <form onSubmit={submit} className="grid gap-6 lg:grid-cols-3">
       <div className="flex min-w-0 flex-col gap-6 lg:col-span-2">
+        {changedElsewhere && <ChangedElsewhere subject="the content policy" onReload={onReload} />}
         <Panel
           title="What a finding does"
           description="Every upload is checked inside the quarantine gate before it is published. A flagged file is published with the finding on its record; a rejected one is not."
@@ -169,6 +197,12 @@ function PolicyForm({ initial, families }: { initial: ContentPolicy; families: s
                     autoComplete="off"
                     placeholder="model.pickle_imports…"
                     onChange={(e) => setNewCode(e.target.value.trim().toLowerCase())}
+                    // Enter adds the exception; it must not submit the whole policy without it.
+                    onKeyDown={(e) => {
+                      if (e.key !== "Enter") return;
+                      e.preventDefault();
+                      addException();
+                    }}
                   />
                 )}
               </Field>
@@ -181,14 +215,7 @@ function PolicyForm({ initial, families }: { initial: ContentPolicy; families: s
                   </Select>
                 )}
               </Field>
-              <Button
-                type="button"
-                disabled={newCode === "" || newCodeProblem !== undefined}
-                onClick={() => {
-                  setFamily(newCode, newAction);
-                  setNewCode("");
-                }}
-              >
+              <Button type="button" disabled={newCode === "" || newCodeProblem !== undefined} onClick={addException}>
                 Add exception
               </Button>
             </div>

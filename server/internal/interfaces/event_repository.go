@@ -84,6 +84,9 @@ type InboxRepository interface {
 	Skip(ctx context.Context, consumer, eventID, owner string, now time.Time, reason string) error
 	// Fail records a failed attempt; the next delivery after next retries.
 	Fail(ctx context.Context, consumer, eventID, owner string, now, next time.Time, lastError string) error
+	// Release gives back an attempt that shutdown cut short: the record is
+	// due again now, and the attempt is not counted.
+	Release(ctx context.Context, consumer, eventID, owner string, now time.Time) error
 	// Dead ends the event as DEAD for the consumer and records its dead
 	// letter, in one transaction.
 	Dead(ctx context.Context, consumer, eventID, owner string, dl model.DeadLetter) error

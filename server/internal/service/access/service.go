@@ -52,10 +52,19 @@ type Service struct {
 	audit interfaces.AuditRecorder
 	log   *slog.Logger
 	now   func() time.Time
+	// pepper keys new tokens' stored hashes (identity.HashAPIToken); it
+	// must be the identity service's, or the tokens will not authenticate.
+	pepper []byte
 }
 
 func NewService(store Store, recorder interfaces.AuditRecorder, log *slog.Logger) *Service {
 	return &Service{store: store, audit: recorder, log: log, now: func() time.Time { return time.Now().UTC() }}
+}
+
+// WithPepper stores new tokens' hashes keyed by pepper (API_TOKEN_PEPPER).
+func (s *Service) WithPepper(pepper []byte) *Service {
+	s.pepper = pepper
+	return s
 }
 
 func (s *Service) record(ctx context.Context, p model.Principal, action, kind, id string, details map[string]any) {
@@ -139,7 +148,7 @@ func (s *Service) CreateTokenFor(ctx context.Context, p model.Principal, in Toke
 	raw := identity.APITokenPrefix + base64.RawURLEncoding.EncodeToString(secret[:])
 	now := s.now()
 	t := model.APIToken{ID: event.NewID(), TenantID: p.TenantID, UserID: p.UserID, Name: in.Name,
-		TokenHash: identity.HashAPIToken(raw), Hint: "…" + raw[len(raw)-4:], Permissions: perms,
+		TokenHash: identity.HashAPIToken(raw, s.pepper), Hint: "…" + raw[len(raw)-4:], Permissions: perms,
 		Datasets: in.Datasets, PathPrefix: in.PathPrefix, Networks: in.Networks, AllowLinks: in.AllowLinks && len(in.Datasets) == 0,
 		ExpiresAt: now.Add(in.ExpiresIn), CreatedAt: now}
 	if err := s.store.CreateToken(ctx, t); err != nil {

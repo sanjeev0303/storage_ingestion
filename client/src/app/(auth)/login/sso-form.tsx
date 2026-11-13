@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Field, Input } from "@/components/ui/field";
 import { readError } from "@/lib/api/errors";
@@ -23,6 +23,16 @@ export function SsoForm({ refused }: { refused?: string }) {
   const [organization, setOrganization] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(refused ?? null);
+
+  // Coming back from the identity provider with the back button can restore
+  // this page from the back-forward cache, still busy from the redirect.
+  useEffect(() => {
+    const reset = (e: PageTransitionEvent) => {
+      if (e.persisted) setBusy(false);
+    };
+    window.addEventListener("pageshow", reset);
+    return () => window.removeEventListener("pageshow", reset);
+  }, []);
 
   async function start(e: FormEvent) {
     e.preventDefault();

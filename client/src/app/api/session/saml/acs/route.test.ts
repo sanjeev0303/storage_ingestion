@@ -7,12 +7,17 @@ import { POST } from "./route";
 
 const BACKEND = "http://localhost:8080/api/v1";
 
-function post(fields: Record<string, string>) {
+// The browser that started the sign-in holds its state in orb_sso_state.
+function post(fields: Record<string, string>, stateCookie = "state-1") {
   return POST(
     new NextRequest("http://localhost:3100/api/session/saml/acs", {
       method: "POST",
       // The provider's page posts the form from its own site.
-      headers: { "content-type": "application/x-www-form-urlencoded", origin: "https://idp.example.com" },
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "https://idp.example.com",
+        cookie: `orb_sso_state=${stateCookie}`,
+      },
       body: new URLSearchParams(fields).toString(),
     }),
   );
@@ -53,6 +58,20 @@ describe("SAML assertion consumer service", () => {
     const cookies = res.headers.get("set-cookie") ?? "";
     expect(cookies).toContain("orb_sso_error=");
     expect(cookies).not.toContain("orb_rt=");
+  });
+
+  it("refuses a response to a sign-in this browser did not start", async () => {
+    let called = false;
+    server.use(
+      http.post(`${BACKEND}/auth/saml/acs`, () => {
+        called = true;
+        return HttpResponse.json({}, { status: 500 });
+      }),
+    );
+    const res = await post({ SAMLResponse: "eA==", RelayState: "attacker-state" }, "state-1");
+    expect(called).toBe(false);
+    expect(await res.text()).toContain("/login?sso=refused");
+    expect(res.headers.get("set-cookie") ?? "").not.toContain("orb_rt=");
   });
 
   it("refuses an incomplete post before calling the API", async () => {

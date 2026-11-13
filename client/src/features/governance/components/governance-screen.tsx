@@ -3,6 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
+import { ChangedElsewhere } from "@/components/ui/changed-elsewhere";
 import { ConfirmDialog, Modal } from "@/components/ui/dialog";
 import { Checkbox, Field, Input, Select, Textarea } from "@/components/ui/field";
 import { DefList } from "@/components/ui/page";
@@ -29,6 +30,7 @@ import {
   type Approval,
   type ApprovalState,
   type BulkDeletePlan,
+  type BulkDeleteRequest,
   type Certificate,
   type Profile,
 } from "../api";
@@ -88,6 +90,9 @@ function useGovernanceKeys() {
 
 function GovernancePanel() {
   const { organizationId } = useSession();
+  // The form restarts with the latest settings after a save or when asked. A
+  // background refetch alone must not wipe what the user typed.
+  const [reloads, setReloads] = useState(0);
   const settings = useQuery({
     queryKey: orgKey(organizationId, "governance", "settings"),
     queryFn: ({ signal }) => getGovernance(signal),
@@ -100,29 +105,40 @@ function GovernancePanel() {
       ) : settings.isError ? (
         <ErrorState error={settings.error} onRetry={() => settings.refetch()} />
       ) : (
-        <GovernanceForm key={settings.data.updated_at ?? "new"} initial={settings.data} />
+        <GovernanceForm key={reloads} latest={settings.data} onReload={() => setReloads((n) => n + 1)} />
       )}
     </Panel>
   );
 }
 
-function GovernanceForm({ initial }: { initial: Awaited<ReturnType<typeof getGovernance>> }) {
+function GovernanceForm({ latest, onReload }: { latest: Awaited<ReturnType<typeof getGovernance>>; onReload: () => void }) {
+  // The settings as they were when editing started.
+  const [initial] = useState(latest);
   const [profile, setProfile] = useState<Profile>(initial.profile);
   const [twoPerson, setTwoPerson] = useState(initial.two_person);
   const [approveDeletes, setApproveDeletes] = useState(initial.approve_deletes);
   const [reason, setReason] = useState("");
   const refresh = useGovernanceKeys();
   const save = useMutation({ mutationFn: putGovernance });
+  // Our own save also moves updated_at; that is not a change made elsewhere.
+  const changedElsewhere = !save.isSuccess && latest.updated_at !== initial.updated_at;
+  // The stricter profiles switch these on; what is shown is what is sent.
+  const twoPersonOn = twoPerson || profile !== "STANDARD";
+  const approveDeletesOn = approveDeletes || profile === "GXP_VAULT";
 
   function submit(e: FormEvent) {
     e.preventDefault();
     save.mutate(
-      { profile, two_person: twoPerson, approve_deletes: approveDeletes, retention_floor: "", reason: reason.trim() },
+      { profile, two_person: twoPersonOn, approve_deletes: approveDeletesOn, retention_floor: "", reason: reason.trim() },
       {
         onSuccess: async (answer) => {
           await refresh();
-          if ("status" in answer) notify.info("Sent for approval", "Loosening governance needs a second member.");
-          else notify.success("Governance saved");
+          if ("status" in answer) {
+            notify.info("Sent for approval", "Loosening governance needs a second member.");
+          } else {
+            notify.success("Governance saved");
+            onReload();
+          }
         },
         onError: notify.error,
       },
@@ -131,6 +147,7 @@ function GovernanceForm({ initial }: { initial: Awaited<ReturnType<typeof getGov
 
   return (
     <form onSubmit={submit} className="flex flex-col gap-4">
+      {changedElsewhere && <ChangedElsewhere subject="the governance settings" onReload={onReload} />}
       <Field label="Profile" hint={PROFILE_TEXT[profile].detail}>
         {(props) => (
           <Select {...props} name="profile" value={profile} onChange={(e) => setProfile(e.target.value as Profile)}>
@@ -143,13 +160,13 @@ function GovernanceForm({ initial }: { initial: Awaited<ReturnType<typeof getGov
         )}
       </Field>
       <Checkbox
-        checked={twoPerson || profile !== "STANDARD"}
+        checked={twoPersonOn}
         disabled={profile !== "STANDARD"}
         onChange={(e) => setTwoPerson(e.target.checked)}
         label="Two-person rule: shortening retention, releasing a hold and bulk deletes wait for a second member"
       />
       <Checkbox
-        checked={approveDeletes || profile === "GXP_VAULT"}
+        checked={approveDeletesOn}
         disabled={profile === "GXP_VAULT"}
         onChange={(e) => setApproveDeletes(e.target.checked)}
         label="Every deletion needs approval"
@@ -172,6 +189,8 @@ function GovernanceForm({ initial }: { initial: Awaited<ReturnType<typeof getGov
   );
 }
 
+const APPROVALS_POLL_MS = 15_000;
+
 function ApprovalsPanel() {
   const { organizationId, user } = useSession();
   const me = `user:${user.id}`;
@@ -181,6 +200,8 @@ function ApprovalsPanel() {
     queryKey: orgKey(organizationId, "governance", "approvals", state),
     queryFn: ({ signal }) => listApprovals(state, signal),
     enabled: Boolean(organizationId),
+    // Another member may decide, or an approval may expire, while this is open.
+    refetchInterval: (query) => (query.state.data?.approvals.some((a) => a.state === "PENDING") ? APPROVALS_POLL_MS : false),
   });
 
   return (
@@ -250,8 +271,21 @@ function DecideDialog({ approval, onClose }: { approval: Approval; onClose: () =
   const [note, setNote] = useState("");
   const refresh = useGovernanceKeys();
   const decide = useMutation({ mutationFn: decideApproval });
+  const [checking, setChecking] = useState(false);
 
-  function run(approve: boolean) {
+  // The dialog shows a snapshot. Look again before acting, so an approval that
+  // was decided elsewhere or has expired is not acted on. The server still
+  // judges expiry and self-approval; this only avoids a stale attempt.
+  async function run(approve: boolean) {
+    setChecking(true);
+    const pending = await listApprovals("PENDING").catch(() => null);
+    setChecking(false);
+    if (pending && !pending.approvals.some((a) => a.id === approval.id)) {
+      await refresh();
+      notify.info("No longer waiting", "Another member decided it, or it expired.");
+      onClose();
+      return;
+    }
     decide.mutate(
       { id: approval.id, approve, note: note.trim() },
       {
@@ -273,10 +307,10 @@ function DecideDialog({ approval, onClose }: { approval: Approval; onClose: () =
       description={approval.summary}
       footer={
         <>
-          <Button onClick={() => run(false)} disabled={decide.isPending}>
+          <Button onClick={() => run(false)} disabled={decide.isPending || checking}>
             Reject
           </Button>
-          <Button variant="accent" onClick={() => run(true)} loading={decide.isPending}>
+          <Button variant="accent" onClick={() => run(true)} loading={decide.isPending || checking}>
             Approve and carry out
           </Button>
         </>
@@ -303,8 +337,16 @@ function BulkDeletePanel() {
   const [ids, setIds] = useState("");
   const [reason, setReason] = useState("");
   const [plan, setPlan] = useState<BulkDeletePlan | null>(null);
+  // The exact request the plan was previewed with. Deleting sends this, never
+  // whatever the fields say now; editing a field drops the plan.
+  const [planned, setPlanned] = useState<BulkDeleteRequest | null>(null);
   const [confirming, setConfirming] = useState(false);
   const preview = useMutation({ mutationFn: bulkDelete });
+
+  function dropPlan() {
+    setPlan(null);
+    setPlanned(null);
+  }
 
   const assetIds = ids.split(/[\s,]+/).filter(Boolean);
   const valid = (dataset.trim() !== "" || prefix.trim() !== "" || assetIds.length > 0) && reason.trim() !== "";
@@ -323,23 +365,30 @@ function BulkDeletePanel() {
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          preview.mutate(request(true), { onSuccess: setPlan, onError: notify.error });
+          const body = request(true);
+          preview.mutate(body, {
+            onSuccess: (result) => {
+              setPlan(result);
+              setPlanned(body);
+            },
+            onError: notify.error,
+          });
         }}
         className="flex flex-col gap-4"
       >
         <div className="grid gap-4 sm:grid-cols-2">
           <Field label="Dataset">
-            {(props) => <Input {...props} name="bulk_dataset" value={dataset} className="mono-data" autoComplete="off" spellCheck={false} onChange={(e) => setDataset(e.target.value)} />}
+            {(props) => <Input {...props} name="bulk_dataset" value={dataset} className="mono-data" autoComplete="off" spellCheck={false} onChange={(e) => { setDataset(e.target.value); dropPlan(); }} />}
           </Field>
           <Field label="Path starts with">
-            {(props) => <Input {...props} name="bulk_prefix" value={prefix} className="mono-data" autoComplete="off" spellCheck={false} onChange={(e) => setPrefix(e.target.value)} />}
+            {(props) => <Input {...props} name="bulk_prefix" value={prefix} className="mono-data" autoComplete="off" spellCheck={false} onChange={(e) => { setPrefix(e.target.value); dropPlan(); }} />}
           </Field>
         </div>
         <Field label="Or these asset ids" hint="Separated by spaces, commas or lines; at most 10,000.">
-          {(props) => <Textarea {...props} name="bulk_ids" rows={2} value={ids} className="mono-data" spellCheck={false} onChange={(e) => setIds(e.target.value)} />}
+          {(props) => <Textarea {...props} name="bulk_ids" rows={2} value={ids} className="mono-data" spellCheck={false} onChange={(e) => { setIds(e.target.value); dropPlan(); }} />}
         </Field>
         <Field label="Reason" required>
-          {(props) => <Textarea {...props} name="bulk_reason" rows={2} value={reason} onChange={(e) => setReason(e.target.value)} />}
+          {(props) => <Textarea {...props} name="bulk_reason" rows={2} value={reason} onChange={(e) => { setReason(e.target.value); dropPlan(); }} />}
         </Field>
         <SubmitButton valid={valid} loading={preview.isPending} hint="Choose assets and give a reason.">
           Preview deletion
@@ -362,7 +411,7 @@ function BulkDeletePanel() {
               },
             ]}
           />
-          {plan.matched > 0 && (
+          {plan.matched > 0 && planned && (
             <Button variant="accent" className="self-start" onClick={() => setConfirming(true)}>
               Delete {plan.matched.toLocaleString()} assets
             </Button>
@@ -378,8 +427,10 @@ function BulkDeletePanel() {
         confirmLabel="Delete assets"
         confirmText="DELETE"
         onConfirm={async () => {
-          const done = await bulkDelete(request(false));
+          if (!planned) return;
+          const done = await bulkDelete({ ...planned, dry_run: false });
           setPlan(null);
+          setPlanned(null);
           if (done.approval_id) notify.info("Sent for approval", "A second member approves it under Approvals.");
           else notify.success(`${done.scheduled.toLocaleString()} assets scheduled for deletion`);
         }}

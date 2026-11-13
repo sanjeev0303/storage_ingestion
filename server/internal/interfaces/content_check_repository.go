@@ -30,6 +30,9 @@ type ContentCheckRepository interface {
 type ContentChecks interface {
 	ListFindings(ctx context.Context, tenantID, assetID string) ([]model.ContentFinding, error)
 	BlastRadius(ctx context.Context, tenantID, assetID string, limit int) (model.BlastRadius, error)
+	// UnblockAsset clears a block a check after publication set, answering
+	// its reason, or model.ErrAssetNotBlocked.
+	UnblockAsset(ctx context.Context, tenantID, assetID string, at time.Time) (string, error)
 	GetPolicy(ctx context.Context, tenantID string) (model.ContentPolicy, bool, error)
 	PutPolicy(ctx context.Context, tenantID string, p model.ContentPolicy, at time.Time) error
 }

@@ -27,7 +27,7 @@ Packing stores many small published objects as one physical object (a *pack*) on
 ```
 pack:   PLANNED → WRITING → VERIFYING → PUBLISHED → RETIRING → DELETED
         PLANNED | WRITING | VERIFYING → FAILED → DELETED
-entry:  RESERVED → PUBLISHED → DELETED (its asset was deleted) | MOVED (rewritten into another pack)
+entry:  RESERVED → PUBLISHED → DELETED (its asset was deleted) | MOVED (rewritten into another pack, or unpacked)
         RESERVED → RELEASED (the pack failed) | EXCLUDED (its source failed verification)
 ```
 
@@ -107,6 +107,10 @@ Each cycle plans, builds and retires; a failing step is logged and the others st
 7. Writes the manifest and reads it back.
 8. Publishes.
 
+Leases are taken, renewed and checked by the database's clock (`now()` in the SQL), never the worker's, and a retry's delay is counted from it too. A worker whose clock runs ahead cannot take a lease that is still held, and one whose clock runs behind cannot renew a lease into the past.
+
+Verification checks the manifest against the entry count recorded when the pack was planned, not the current `PACKING_MAX_ENTRIES`: lowering the limit does not fail packs planned before.
+
 **Memory.** A writer holds the sources being fetched (`PACKING_SOURCE_CONCURRENCY`, C), the one being written, and one upload buffer: the whole pack when it fits in one part, otherwise one part (`STORAGE_TRANSFER_PART_BYTES`, P, 16 MiB). With W = `PACKING_ACTIVE_WRITERS` and M = `PACKING_MAX_OBJECT_BYTES`, the live pack data of one worker is at most
 
     W × ((C + 1) × M + min(pack size, P))
@@ -115,13 +119,13 @@ At the defaults (W 2, C 16, M 1 MiB, P 16 MiB) that is 66 MiB. Measured heap is 
 
 With `EVENT_QUEUE=sqs`, `pack.planned` events on the `packing` queue start builds at once; polling remains the safety net.
 
-**Publish.** One transaction locks the entries' assets and publishes each entry whose asset is still the same bytes (`AVAILABLE` or `SOFT_DELETED`, same ETag); the others become `DELETED`. Readers see a pack whole or not at all.
+**Publish.** One transaction locks every entry's asset (`FOR SHARE`) and publishes each entry whose asset is still the same bytes (`AVAILABLE` or `SOFT_DELETED`, same ETag); the others become `DELETED`. Readers see a pack whole or not at all. A rewrite or repack moves its entries out of the old pack in the same transaction. `ReleaseAsset` (a deletion) locks the asset `FOR UPDATE` before it marks the entry, so it either goes first, and the entry is not moved, or waits and marks the entry the new pack has just published. Without that lock a deletion could find the old entry already moved and miss the new one, and the deleted asset stayed in the new pack until its deletion's next recheck.
 
 **Retire.** The worker:
 
 - deletes sources past their grace period, including the standalone objects of entries a rewrite has since moved to a new pack;
 - retires packs with no published entries;
-- plans rewrites;
+- plans rewrites, at most `PACKING_ACTIVE_WRITERS` per cycle, tenant by tenant: every tenant's oldest pack to rewrite comes before any tenant's second, and a tenant whose pack slots are full is passed over, so it never holds the others back. Pending repacks are taken the same way;
 - deletes the objects of retired and failed packs after `PACKING_REMOVE_AFTER`;
 - lists one page of each tenant's `packs/` prefix and reports objects no pack row names, leaving them in place.
 
@@ -224,4 +228,16 @@ DELETE FROM schema_migrations WHERE version = '000017_packs.sql';
 COMMIT;
 ```
 
-Once sources have been retired, packed assets' bytes exist only in their packs. There is no tool yet to copy them back to standalone objects, so do not roll back then.
+Once sources have been retired, packed assets' bytes exist only in their packs. Unpack first, then roll back:
+
+1. Stop the pack worker (it would pack the assets again).
+2. For each tenant with packs, see what would happen, then unpack:
+
+```sh
+pack-worker unpack -tenant <org> -all -dry-run   # prints JSON: packs, entries, what would be copied
+pack-worker unpack -tenant <org> -all            # or -pack <id> for one pack
+```
+
+   Every entry still served from a published pack is read from the pack, pinned to its ETag or version, checked against its recorded size and SHA-256, written to the asset's own key and read back and checked again. Only then, in one transaction, is the asset pointed at the new object's ETag and version and the entry marked `MOVED`; the pack retires once nothing is served from it. An asset whose own object is still there is only repointed, nothing is copied. An asset deleted or rewritten meanwhile is skipped and the copy removed (`Skipped`). The command stops at the first error; run it again to carry on, it skips what is done. Run one unpack per tenant at a time.
+
+3. Check that `SELECT count(*) FROM pack_entries WHERE state = 'PUBLISHED'` returns 0, then delete the `packs/` objects and drop the tables as above.

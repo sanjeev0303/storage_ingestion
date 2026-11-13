@@ -2,6 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
+import { ChangedElsewhere } from "@/components/ui/changed-elsewhere";
 import { ConfirmDialog } from "@/components/ui/dialog";
 import { Field, Input, Textarea } from "@/components/ui/field";
 import { DefList } from "@/components/ui/page";
@@ -36,6 +37,9 @@ function ttlError(text: string) {
 export function OrgSettings() {
   const { can, isPlatformAdmin } = useSession();
   const org = useOrganizationQuery();
+  // The form restarts with the latest settings after a save or when asked. A
+  // background refetch alone must not wipe what the user typed.
+  const [reloads, setReloads] = useState(0);
 
   return (
     <div className="grid gap-6 lg:grid-cols-3">
@@ -54,7 +58,7 @@ export function OrgSettings() {
                 ]}
               />
             </Panel>
-            <OrgForm key={JSON.stringify(org.data)} org={org.data} canEdit={can("org.manage")} />
+            <OrgForm key={reloads} latest={org.data} canEdit={can("org.manage")} onReload={() => setReloads((n) => n + 1)} />
             {can("org.ownership") && <DeactivatePanel org={org.data} />}
           </>
         )}
@@ -73,12 +77,16 @@ export function OrgSettings() {
   );
 }
 
-function OrgForm({ org, canEdit }: { org: Organization; canEdit: boolean }) {
+function OrgForm({ latest, canEdit, onReload }: { latest: Organization; canEdit: boolean; onReload: () => void }) {
+  // The organization as it was when editing started.
+  const [org] = useState(latest);
   const [name, setName] = useState(org.name);
   const [domains, setDomains] = useState((org.allowed_email_domains ?? []).join("\n"));
   const [ttl, setTtl] = useState(org.invitation_ttl_hours ? String(org.invitation_ttl_hours) : "");
   const [error, setError] = useState<string | null>(null);
   const save = useOrgMutation((body: OrganizationUpdate) => updateOrganization(body), ["organization"]);
+  // The organization carries no revision, so a change is told by its content.
+  const changedElsewhere = !save.isSuccess && JSON.stringify(latest) !== JSON.stringify(org);
 
   const cleanName = cleanText(name);
   const list = parseDomains(domains);
@@ -101,6 +109,7 @@ function OrgForm({ org, canEdit }: { org: Organization; canEdit: boolean }) {
     try {
       await save.mutateAsync(body);
       notify.success("Organization settings saved");
+      onReload();
     } catch (e) {
       setError(describeError(e));
     }
@@ -112,6 +121,7 @@ function OrgForm({ org, canEdit }: { org: Organization; canEdit: boolean }) {
       description="Saving replaces all three settings at once. Fields you leave alone keep their current values."
     >
       <form onSubmit={submit} className="flex flex-col gap-4" noValidate>
+        {changedElsewhere && <ChangedElsewhere subject="the organization settings" onReload={onReload} />}
         <Field label="Name" required error={nameProblem}>
           {(p) => <Input {...p} value={name} onChange={(e) => setName(e.target.value)} disabled={!canEdit} />}
         </Field>

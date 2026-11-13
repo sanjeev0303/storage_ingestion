@@ -54,6 +54,19 @@ describe("api client", () => {
     expect(listener).toHaveBeenCalledTimes(1);
   });
 
+  it("does not end the session on a 401 about a wrong password", async () => {
+    const listener = vi.fn();
+    const off = onUnauthenticated(listener);
+    server.use(
+      http.post(`${API}/auth/password`, () =>
+        HttpResponse.json({ error: "invalid credentials", code: "invalid_credentials" }, { status: 401 }),
+      ),
+    );
+    await api("/auth/password", { method: "POST", body: {} }).catch(() => undefined);
+    off();
+    expect(listener).not.toHaveBeenCalled();
+  });
+
   it("reports a network failure without an HTTP status", async () => {
     server.use(http.get(`${API}/x`, () => HttpResponse.error()));
     const error = await api("/x").catch((e) => e);

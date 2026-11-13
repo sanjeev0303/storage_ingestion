@@ -54,7 +54,7 @@ export function TokenForm({ flow }: { flow: Flow }) {
   useEffect(() => {
     const token = params.get("token");
     if (!token) return;
-    setValue("token", token);
+    setValue("token", token, { shouldValidate: true });
     window.history.replaceState(null, "", window.location.pathname);
   }, [params, setValue]);
 

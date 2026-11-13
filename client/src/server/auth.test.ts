@@ -2,7 +2,7 @@
 import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import { server } from "@/test/server";
-import { BACKEND_URL, refreshTokens, type Tokens } from "./auth";
+import { BACKEND_URL, RefreshUnavailable, refreshTokens, type Tokens } from "./auth";
 
 const refreshUrl = `${BACKEND_URL}/api/v1/auth/refresh`;
 
@@ -61,5 +61,17 @@ describe("refreshTokens", () => {
   it("throws on a server failure so the session is not dropped by a blip", async () => {
     server.use(http.post(refreshUrl, () => new HttpResponse(null, { status: 500 })));
     await expect(refreshTokens("srt_old_d")).rejects.toThrow();
+  });
+  it("does not present a token again soon after a refresh got no answer (it may have been rotated)", async () => {
+    let calls = 0;
+    server.use(
+      http.post(refreshUrl, () => {
+        calls++;
+        return HttpResponse.error();
+      }),
+    );
+    await expect(refreshTokens("srt_old_e")).rejects.toBeInstanceOf(RefreshUnavailable);
+    await expect(refreshTokens("srt_old_e")).rejects.toBeInstanceOf(RefreshUnavailable);
+    expect(calls).toBe(1);
   });
 });

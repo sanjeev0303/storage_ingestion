@@ -13,6 +13,7 @@ var (
 	ErrAlreadyPublished = errors.New("this snapshot is already published")
 	ErrDOIFailed        = errors.New("the DOI could not be registered")
 	ErrDOIOff           = errors.New("DOI registration is not configured")
+	ErrWithdrawn        = errors.New("the publication is withdrawn")
 	ErrPublishingOff    = errors.New("publishing needs CONSOLE_PUBLIC_URL, the address landing pages are served from")
 )
 

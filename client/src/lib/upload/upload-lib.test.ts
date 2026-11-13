@@ -96,3 +96,19 @@ describe("sha256Blob", () => {
     expect(progress.at(-1)).toBe(3);
   });
 });
+
+describe("presigned URL refusals", () => {
+  it("asks for a new URL only when the old one expired, never for a permission refusal", () => {
+    const expired = [
+      "<Error><Code>AccessDenied</Code><Message>Request has expired</Message></Error>",
+      "<Error><Code>ExpiredToken</Code><Message>The provided token has expired.</Message></Error>",
+      "<Error><Code>AuthenticationFailed</Code><AuthenticationErrorDetail>Signature not valid in the specified time frame</AuthenticationErrorDetail></Error>",
+      "<Error><Code>RequestTimeTooSkewed</Code></Error>",
+    ];
+    for (const body of expired) expect(new UploadHttpError(403, body).urlExpired).toBe(true);
+
+    expect(new UploadHttpError(403, "<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>").urlExpired).toBe(false);
+    expect(new UploadHttpError(403, "<Error><Code>SignatureDoesNotMatch</Code></Error>").urlExpired).toBe(false);
+    expect(new UploadHttpError(400, "Request has expired").urlExpired).toBe(false);
+  });
+});

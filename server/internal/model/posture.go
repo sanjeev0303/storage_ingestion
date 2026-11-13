@@ -195,4 +195,10 @@ var (
 	ErrNoStagedCredential   = errors.New("no staged credential")
 	ErrDriftNotFound        = errors.New("drift finding not found")
 	ErrNoPreviousCredential = errors.New("no credential to roll back to")
+	// ErrStaleStagedCredential: the staged credential is not newer than the
+	// current one, so promoting it would go backwards.
+	ErrStaleStagedCredential = errors.New("the staged credential is not newer than the current one")
+	// ErrCredentialChanged: the credential the caller read was staged,
+	// promoted or rolled back by someone else before its change landed.
+	ErrCredentialChanged = errors.New("the credentials changed since they were read; read the connection and try again")
 )

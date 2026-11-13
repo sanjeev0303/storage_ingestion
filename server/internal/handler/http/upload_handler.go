@@ -135,7 +135,8 @@ func (h *UploadHandler) List(w http.ResponseWriter, r *http.Request) {
 	for _, u := range uploads {
 		out.Uploads = append(out.Uploads, uploadListItem{
 			UploadID: u.ID, Status: string(u.Status), FileName: u.FileName, ContentType: u.ContentType,
-			SizeBytes: u.ExpectedSize, Multipart: u.StorageUploadID != "", CreatedAt: u.CreatedAt, ExpiresAt: u.ExpiresAt,
+			SizeBytes: u.ExpectedSize, Multipart: u.StorageUploadID != "", CreatedAt: u.CreatedAt, UpdatedAt: u.UpdatedAt,
+			ExpiresAt: u.ExpiresAt, AssetID: u.AssetID,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -154,7 +155,9 @@ type uploadListItem struct {
 	SizeBytes   int64     `json:"size_bytes"`
 	Multipart   bool      `json:"multipart"`
 	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 	ExpiresAt   time.Time `json:"expires_at"`
+	AssetID     string    `json:"asset_id,omitempty"`
 }
 
 type uploadStatus struct {
@@ -191,6 +194,8 @@ func (h *UploadHandler) fail(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusRequestEntityTooLarge, err.Error())
 	case errors.Is(err, uploadservice.ErrUnsupportedMediaType):
 		writeError(w, http.StatusUnsupportedMediaType, err.Error())
+	case errors.Is(err, uploadservice.ErrSessionEnded):
+		writeJSON(w, http.StatusConflict, problem{Error: err.Error(), Code: "session_ended"})
 	case errors.Is(err, uploadservice.ErrIdempotencyConflict), errors.Is(err, model.ErrIdempotencyConflict):
 		writeError(w, http.StatusConflict, "idempotency key conflicts with another request")
 	case errors.Is(err, model.ErrUploadAlreadyExists):

@@ -37,6 +37,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/service/promotion"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/quota"
 	uploadservice "github.com/sanjeev0303/object-storage-platform/internal/service/upload"
+	"github.com/sanjeev0303/object-storage-platform/internal/worker/heartbeat"
 	processingworker "github.com/sanjeev0303/object-storage-platform/internal/worker/processing"
 )
 
@@ -404,6 +405,7 @@ func run() error {
 			}
 		}
 	}()
+	go heartbeat.Run(ctx, db, "processing", owner, log)
 	processingworker.Run(ctx, service, workerCfg.PollInterval, log)
 	wg.Wait()
 	log.Info("processing worker stopped")

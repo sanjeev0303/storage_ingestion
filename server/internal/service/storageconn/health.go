@@ -20,9 +20,9 @@ import (
 type HealthStore interface {
 	StageCredential(ctx context.Context, tenantID, connectionID string, sealed interfaces.SealedCredential, actor string, at time.Time) (model.StorageConnection, error)
 	StagedCredential(ctx context.Context, tenantID, connectionID string) (interfaces.SealedCredential, error)
-	PromoteCredential(ctx context.Context, tenantID, connectionID, actor string, keepUntil, at time.Time) (model.StorageConnection, error)
-	RollbackCredential(ctx context.Context, tenantID, connectionID, actor string, at time.Time) (model.StorageConnection, error)
-	DiscardStaged(ctx context.Context, tenantID, connectionID, actor string, at time.Time) (model.StorageConnection, error)
+	PromoteCredential(ctx context.Context, tenantID, connectionID string, stagedVersion int, actor string, keepUntil, at time.Time) (model.StorageConnection, error)
+	RollbackCredential(ctx context.Context, tenantID, connectionID string, currentVersion int, actor string, at time.Time) (model.StorageConnection, error)
+	DiscardStaged(ctx context.Context, tenantID, connectionID string, stagedVersion int, actor string, at time.Time) (model.StorageConnection, error)
 	ExpirePrevious(ctx context.Context, now time.Time) (int64, error)
 	Posture(ctx context.Context, tenantID, connectionID string) (model.PostureReport, bool, error)
 	PutPosture(ctx context.Context, tenantID string, report model.PostureReport) error
@@ -73,6 +73,9 @@ func (s *Service) CheckPosture(ctx context.Context, p model.Principal, connectio
 	}
 	c, err := s.ownConnection(ctx, p, connectionID)
 	if err != nil {
+		return model.PostureReport{}, err
+	}
+	if err := s.throttleProbe(c.TenantID); err != nil {
 		return model.PostureReport{}, err
 	}
 	client, closeClient, err := s.deps.Clients.BuildStored(ctx, c)
@@ -517,7 +520,8 @@ func (s *Service) PromoteCredentials(ctx context.Context, p model.Principal, con
 		s.record(ctx, p, "storage_connection.credentials.promote", c, map[string]any{"outcome": "refused", "category": result.Category})
 		return c, result, ErrTestFailed
 	}
-	stored, err := s.deps.Health.PromoteCredential(ctx, p.TenantID, connectionID, p.UserID, s.now().Add(rollbackWindow), s.now())
+	// Only the version just tested: one staged meanwhile is refused.
+	stored, err := s.deps.Health.PromoteCredential(ctx, p.TenantID, connectionID, sealed.Version, p.UserID, s.now().Add(rollbackWindow), s.now())
 	if err != nil {
 		return model.StorageConnection{}, TestResult{}, err
 	}
@@ -535,10 +539,11 @@ func (s *Service) RollbackCredentials(ctx context.Context, p model.Principal, co
 	if s.deps.Health == nil {
 		return model.StorageConnection{}, ErrPostureOff
 	}
-	if _, err := s.ownConnection(ctx, p, connectionID); err != nil {
+	c, err := s.ownConnection(ctx, p, connectionID)
+	if err != nil {
 		return model.StorageConnection{}, err
 	}
-	stored, err := s.deps.Health.RollbackCredential(ctx, p.TenantID, connectionID, p.UserID, s.now())
+	stored, err := s.deps.Health.RollbackCredential(ctx, p.TenantID, connectionID, c.CredentialVersion, p.UserID, s.now())
 	if err != nil {
 		return model.StorageConnection{}, err
 	}
@@ -555,10 +560,11 @@ func (s *Service) DiscardStagedCredentials(ctx context.Context, p model.Principa
 	if s.deps.Health == nil {
 		return model.StorageConnection{}, ErrPostureOff
 	}
-	if _, err := s.ownConnection(ctx, p, connectionID); err != nil {
+	c, err := s.ownConnection(ctx, p, connectionID)
+	if err != nil {
 		return model.StorageConnection{}, err
 	}
-	stored, err := s.deps.Health.DiscardStaged(ctx, p.TenantID, connectionID, p.UserID, s.now())
+	stored, err := s.deps.Health.DiscardStaged(ctx, p.TenantID, connectionID, c.StagedCredentialVersion, p.UserID, s.now())
 	if err != nil {
 		return model.StorageConnection{}, err
 	}
@@ -569,8 +575,8 @@ func (s *Service) DiscardStagedCredentials(ctx context.Context, p model.Principa
 // open decrypts a sealed credential of c.
 func (s *Service) open(c model.StorageConnection, sealed interfaces.SealedCredential) (model.StorageSecrets, error) {
 	var secrets model.StorageSecrets
-	plain, err := s.deps.Sealer.Open(secretbox.Sealed{KeyVersion: sealed.KeyVersion, Nonce: sealed.Nonce, Ciphertext: sealed.Ciphertext},
-		c.CredentialAAD(sealed.Version))
+	plain, err := s.sealer.Open(secretbox.Sealed{KeyVersion: sealed.KeyVersion, Nonce: sealed.Nonce, Ciphertext: sealed.Ciphertext,
+		WrappedKey: sealed.WrappedKey}, c.CredentialAAD(sealed.Version))
 	if err != nil {
 		return secrets, fmt.Errorf("%w: the staged credentials could not be decrypted", model.ErrCredentialMissing)
 	}

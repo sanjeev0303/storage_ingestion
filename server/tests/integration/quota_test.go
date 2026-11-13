@@ -247,7 +247,9 @@ func TestQuotaReconciliationRepairsUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := model.StorageUsage{TenantID: acme.org.ID, ReservedBytes: 90, ReservedUploads: 1, StoredBytes: published.SizeBytes, AssetCount: 1}
-	if result.Settled != 2 || !result.Repaired || result.After != want || result.Before.ReservedBytes != 999999 {
+	// The expired upload gives its 80 bytes back through the upload state
+	// machine, as any expiry does, before the counters are recounted.
+	if result.Settled != 2 || !result.Repaired || result.After != want || result.Before.ReservedBytes != 999999-80 {
 		t.Fatalf("reconcile: %+v", result)
 	}
 	if quotaState(t, s, crashed.ID) != "RELEASED" || quotaState(t, s, expired.ID) != "RELEASED" {

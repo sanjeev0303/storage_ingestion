@@ -1,18 +1,19 @@
 import { http, HttpResponse } from "msw";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setActiveOrganization } from "@/lib/api/client";
 import { MIB } from "@/lib/upload/parts";
 import { UploadHttpError, UploadNetworkError } from "@/lib/upload/put";
 import { abortError } from "@/lib/upload/sha256";
 import { API, server } from "@/test/server";
 import type { ResumeRecord } from "../types";
-import { FileUpload } from "./file-upload";
+import { FileUpload, HEAD_BYTES, isSameFile } from "./file-upload";
+import { backoffMs, ConnectionWatch, preferredPartBytes, SLOW_BPS } from "./network";
 import { memoryStore } from "./store";
 
 const SHA = "a".repeat(64);
 const request = { file_name: "big.bin", content_type: "application/octet-stream" };
 
-type Log = { method: string; path: string; body?: unknown }[];
+type Log = { method: string; path: string; body?: unknown; org?: string | null }[];
 
 type Mock = {
   log: Log;
@@ -30,7 +31,12 @@ function mockApi(overrides: Partial<Mock> = {}) {
   const record = async (request: Request) => {
     const url = new URL(request.url);
     const text = await request.clone().text();
-    mock.log.push({ method: request.method, path: url.pathname.replace("/api/proxy", ""), body: text ? JSON.parse(text) : undefined });
+    mock.log.push({
+      method: request.method,
+      path: url.pathname.replace("/api/proxy", ""),
+      body: text ? JSON.parse(text) : undefined,
+      org: request.headers.get("X-Organization-ID"),
+    });
   };
 
   server.use(
@@ -100,6 +106,12 @@ function bigFile(size = 20 * MIB, name = "big.bin") {
   return new File([new Uint8Array(size)], name, { type: "application/octet-stream" });
 }
 
+// A connection watch whose API check answers as the test says. It never
+// checks on a timer: tests call recheck() or fire the browser's events.
+function fakeConnection(reachable = { value: true }) {
+  return new ConnectionWatch({ probe: async () => reachable.value, sleep: () => new Promise(() => undefined) });
+}
+
 function makeUpload(file: File, put: unknown, extra = {}, store = memoryStore()) {
   const sleep = vi.fn(async () => undefined);
   const upload = new FileUpload(file, request, {
@@ -107,10 +119,18 @@ function makeUpload(file: File, put: unknown, extra = {}, store = memoryStore())
     hash: async () => SHA,
     sleep,
     store,
+    connection: fakeConnection(),
     pollMs: 0,
     ...extra,
   });
   return { upload, sleep, store };
+}
+
+// A PUT that waits until its request is aborted, like one on a dead link.
+function hangingPut(options?: { signal?: AbortSignal }) {
+  return new Promise<{ status: number; etag: string | null }>((_resolve, reject) => {
+    options?.signal?.addEventListener("abort", () => reject(abortError()));
+  });
 }
 
 const okPut = async (_url: string, body: Blob) => ({ status: 200, etag: `"etag-${body.size}"` });
@@ -121,7 +141,8 @@ describe("multipart upload", () => {
   it("hashes the file while its parts upload and sends the checksum with the completion", async () => {
     const mock = mockApi();
     let finishHash!: (sha: string) => void;
-    const hash = vi.fn(() => new Promise<string>((resolve) => (finishHash = resolve)));
+    // The first MiB is hashed at once, to know the file again on resume.
+    const hash = vi.fn((blob: Blob) => (blob.size <= HEAD_BYTES ? Promise.resolve("head") : new Promise<string>((resolve) => (finishHash = resolve))));
     const store = memoryStore();
     const saved = vi.spyOn(store, "put");
     const putsBeforeHash: string[] = [];
@@ -144,7 +165,7 @@ describe("multipart upload", () => {
     await upload.settled();
 
     expect(upload.getSnapshot().state).toBe("available");
-    expect(hash).toHaveBeenCalledTimes(1);
+    expect(hash.mock.calls.filter(([blob]) => blob.size > HEAD_BYTES)).toHaveLength(1);
     expect(mock.log.find((l) => l.path === "/uploads/mp1/complete")?.body).toMatchObject({ checksum_sha256: SHA });
     // Saved for a resume after a reload, so it is not read again.
     expect(saved.mock.calls.some(([record]) => record.sha256 === SHA)).toBe(true);
@@ -348,7 +369,7 @@ describe("single upload", () => {
     const put = vi.fn(async () => ({ status: 201, etag: null }));
     const file = new File(["a,b\n1,2\n"], "data.csv", { type: "text/csv" });
     const sleep = vi.fn(async () => undefined);
-    const upload = new FileUpload(file, { file_name: "data.csv", content_type: "text/csv" }, { put: put as never, hash: async () => SHA, sleep, store: memoryStore(), pollMs: 0 });
+    const upload = new FileUpload(file, { file_name: "data.csv", content_type: "text/csv" }, { put: put as never, hash: async () => SHA, sleep, store: memoryStore(), connection: fakeConnection(), pollMs: 0 });
 
     server.use(http.get(`${API}/catalog/objects/:id/versions`, () => HttpResponse.json({ versions: [{ version: 1, asset_id: "as1", status: "AVAILABLE", checksum_sha256: SHA, size_bytes: 8 }] })));
     server.use(http.get(`${API}/catalog/lookup`, () => HttpResponse.json({ id: "obj1", dataset: "", path: "data.csv", versions: 1 })));
@@ -365,6 +386,74 @@ describe("single upload", () => {
     expect(mock.log.find((l) => l.path === "/uploads/sg1/complete")?.body).toBe("");
     expect(mock.log.find((l) => l.path === "/uploads")?.body).toMatchObject({ checksum_sha256: SHA, content_type: "text/csv" });
     expect(upload.getSnapshot().mode).toBe("single");
+  });
+
+  it("starts a new session under a new key when a retry finds the old one ended", async () => {
+    const mock = mockApi({ uploadStatuses: ["VERIFIED"] });
+    let creates = 0;
+    server.use(
+      http.post(`${API}/uploads`, async ({ request }) => {
+        const body = (await request.json()) as { idempotency_key: string };
+        mock.log.push({ method: "POST", path: "/uploads", body });
+        creates += 1;
+        // The retry repeats the first key, whose session has ended by now.
+        if (creates === 2) {
+          return HttpResponse.json({ error: "upload session is not active: it has ended; start again with a new idempotency key", code: "session_ended" }, { status: 409 });
+        }
+        return HttpResponse.json({ upload_id: `sg${creates}`, status: "PENDING", upload_url: "https://store.test/single", expires_at: "2099-01-01T00:00:00Z", storage_connection_id: "platform" }, { status: 201 });
+      }),
+    );
+    let refuse = true;
+    const put = vi.fn(async (url: string, body: Blob) => {
+      if (refuse) throw new UploadHttpError(400, "InvalidArgument");
+      return okPut(url, body);
+    });
+    const { upload } = makeUpload(new File(["x"], "x.bin"), put as never);
+    await upload.run();
+    expect(upload.getSnapshot().state).toBe("failed");
+
+    refuse = false;
+    await upload.retry();
+    await upload.settled();
+
+    const keys = mock.log.filter((l) => l.path === "/uploads").map((l) => (l.body as { idempotency_key: string }).idempotency_key);
+    expect(keys).toHaveLength(3);
+    expect(keys[1]).toBe(keys[0]);
+    expect(keys[2]).not.toBe(keys[0]);
+    expect(upload.getSnapshot().uploadId).toBe("sg3");
+    expect(upload.getSnapshot().state).toBe("available");
+  });
+
+  it("does not upload again when a retry finds the file already stored", async () => {
+    const mock = mockApi({ uploadStatuses: ["VERIFIED"] });
+    let creates = 0;
+    let completes = 0;
+    server.use(
+      http.post(`${API}/uploads`, async () => {
+        creates += 1;
+        // A replay of a completed session: nothing is left to upload.
+        if (creates === 2) return HttpResponse.json({ upload_id: "sg1", status: "COMPLETED", upload_url: "", expires_at: "2099-01-01T00:00:00Z", storage_connection_id: "platform" });
+        return HttpResponse.json({ upload_id: "sg1", status: "PENDING", upload_url: "https://store.test/single", expires_at: "2099-01-01T00:00:00Z", storage_connection_id: "platform" }, { status: 201 });
+      }),
+      http.post(`${API}/uploads/sg1/complete`, () => {
+        completes += 1;
+        // The completion went through, but its answer did not arrive.
+        return HttpResponse.json({ error: "bad request" }, { status: 400 });
+      }),
+    );
+    const put = vi.fn(okPut);
+    const { upload } = makeUpload(new File(["x"], "x.bin"), put as never);
+    await upload.run();
+    expect(upload.getSnapshot().state).toBe("failed");
+
+    await upload.retry();
+    await upload.settled();
+
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(put).not.toHaveBeenCalledWith("", expect.anything(), expect.anything());
+    expect(completes).toBe(1);
+    expect(mock.log.some((l) => l.path === "/uploads/sg1")).toBe(true);
+    expect(upload.getSnapshot().state).toBe("available");
   });
 
   it("shows a rejected asset with the reason from the catalog", async () => {
@@ -406,5 +495,430 @@ describe("single upload", () => {
     // The first check comes quickly, not after the full poll interval.
     expect(sleep).toHaveBeenCalledWith(500, expect.anything());
     expect(mock.log.some((l) => l.path === "/uploads/sg1/complete")).toBe(true);
+  });
+});
+
+describe("bad networks", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const putsFor = (put: { mock: { calls: unknown[][] } }, part: number) => put.mock.calls.filter(([url]) => String(url).includes(`/part/${part}/`));
+  const confirmed = (mock: Mock) =>
+    mock.log.filter((l) => l.path.endsWith("/parts/confirm")).map((l) => (l.body as { parts: { part_number: number }[] }).parts.map((p) => p.part_number));
+  const presigned = (mock: Mock) => mock.log.filter((l) => l.path.endsWith("/parts/urls")).map((l) => l.body);
+
+  it("pauses when the browser goes offline, keeps finished parts, and goes on once the API answers again", async () => {
+    const mock = mockApi();
+    const reachable = { value: true };
+    const connection = fakeConnection(reachable);
+    let dropped = false;
+    // Part 1 gets through; parts 2 and 3 send a little, then hang until the link drops.
+    const put = vi.fn((url: string, body: Blob, options?: { signal?: AbortSignal; onProgress?: (n: number) => void }) => {
+      if (url.includes("/part/1/") || dropped) return okPut(url, body);
+      options?.onProgress?.(MIB);
+      return hangingPut(options);
+    });
+    const { upload } = makeUpload(bigFile(), put as never, { connection });
+
+    const running = upload.run();
+    await vi.waitFor(() => expect(upload.getSnapshot().sentBytes).toBe(10 * MIB));
+    expect(put).toHaveBeenCalledTimes(3);
+
+    dropped = true;
+    reachable.value = false;
+    window.dispatchEvent(new Event("offline"));
+    expect(upload.getSnapshot().paused).toBe("offline");
+    // Only the finished part is kept; the half-sent ones start again.
+    expect(upload.getSnapshot().sentBytes).toBe(8 * MIB);
+
+    // The online event alone is not believed while the API does not answer.
+    window.dispatchEvent(new Event("online"));
+    await connection.check();
+    expect(upload.getSnapshot().paused).toBe("offline");
+
+    reachable.value = true;
+    window.dispatchEvent(new Event("online"));
+    await running;
+    await upload.settled();
+
+    expect(upload.getSnapshot().state).toBe("available");
+    expect(putsFor(put, 1)).toHaveLength(1);
+    // The part sent before the drop is confirmed first; only 2 and 3 go again.
+    expect(presigned(mock)).toEqual([{ part_numbers: [1, 2, 3] }, { part_numbers: [2, 3] }]);
+    expect(confirmed(mock)).toEqual([[1], [2, 3]]);
+  });
+
+  it("treats a failed request as the real signal: checks the API and pauses while it cannot be reached", async () => {
+    const mock = mockApi();
+    const reachable = { value: true };
+    const connection = fakeConnection(reachable);
+    let recovered = false;
+    let failPart2: () => void = () => undefined;
+    const put = vi.fn((url: string, body: Blob, options?: { signal?: AbortSignal }) => {
+      if (url.includes("/part/1/") || recovered) return okPut(url, body);
+      if (url.includes("/part/2/")) {
+        return new Promise<{ status: number; etag: string | null }>((_resolve, reject) => (failPart2 = () => reject(new UploadNetworkError())));
+      }
+      return hangingPut(options);
+    });
+    const { upload, sleep } = makeUpload(bigFile(), put as never, { connection });
+
+    const running = upload.run();
+    await vi.waitFor(() => expect(upload.getSnapshot().sentBytes).toBe(8 * MIB));
+    // navigator.onLine still says true; the request says otherwise.
+    reachable.value = false;
+    failPart2();
+    await vi.waitFor(() => expect(upload.getSnapshot().paused).toBe("offline"));
+    // No retries are spent while offline.
+    expect(sleep).not.toHaveBeenCalled();
+
+    recovered = true;
+    reachable.value = true;
+    await connection.recheck();
+    await running;
+    await upload.settled();
+
+    expect(upload.getSnapshot().state).toBe("available");
+    expect(putsFor(put, 1)).toHaveLength(1);
+    expect(presigned(mock)).toEqual([{ part_numbers: [1, 2, 3] }, { part_numbers: [2, 3] }]);
+  });
+
+  it("stops a part that sends nothing for 20 seconds and sends it again", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    mockApi();
+    let stuck = true;
+    const put = vi.fn(async (url: string, body: Blob, options?: { signal?: AbortSignal; onProgress?: (n: number) => void }) => {
+      if (url.includes("/part/2/") && stuck) {
+        stuck = false;
+        options?.onProgress?.(1024);
+        return hangingPut(options);
+      }
+      return okPut(url, body);
+    });
+    const { upload } = makeUpload(bigFile(), put as never);
+
+    const running = upload.run();
+    await vi.waitFor(() => expect(put).toHaveBeenCalledTimes(3));
+    // No whole-request timeout: the watchdog decides.
+    expect(put.mock.calls[0][2]).toMatchObject({ timeoutMs: 0 });
+    await vi.advanceTimersByTimeAsync(19_000);
+    expect(putsFor(put, 2)).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1_500);
+    await running;
+    await upload.settled();
+
+    expect(putsFor(put, 2)).toHaveLength(2);
+    expect(upload.getSnapshot().state).toBe("available");
+  });
+
+  it("never retries a refusal that would not change", async () => {
+    mockApi();
+    const put = vi.fn<(url: string) => Promise<never>>(async () => {
+      throw new UploadHttpError(400, "InvalidArgument");
+    });
+    const { upload, sleep } = makeUpload(bigFile(), put as never);
+
+    await upload.run();
+
+    expect(upload.getSnapshot().state).toBe("failed");
+    // At most one attempt for each part that had started.
+    expect(new Set(put.mock.calls.map(([url]) => url)).size).toBe(put.mock.calls.length);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("backs off with full jitter, doubling up to a 30 second cap", () => {
+    expect(backoffMs(0, () => 0)).toBe(0);
+    expect(backoffMs(3, () => 0.5)).toBe(4000);
+    expect(backoffMs(10, () => 0.999)).toBeGreaterThan(29_000);
+    expect(backoffMs(10, () => 0.999)).toBeLessThan(30_000);
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const ms = backoffMs(attempt);
+      expect(ms).toBeGreaterThanOrEqual(0);
+      expect(ms).toBeLessThanOrEqual(Math.min(30_000, 1000 * 2 ** attempt));
+    }
+  });
+
+  it("sends fewer parts at once when the link is slow, and sizes new uploads to it", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    mockApi();
+    const connection = fakeConnection();
+    let inFlight = 0;
+    const atStart: number[] = [];
+    // Every part takes 20 seconds: about 400 KiB/s for the upload as a whole.
+    const put = vi.fn(async (_url: string, body: Blob, options?: { onProgress?: (n: number) => void }) => {
+      inFlight++;
+      atStart.push(inFlight);
+      await Promise.resolve();
+      vi.setSystemTime(Date.now() + 20_000);
+      options?.onProgress?.(body.size);
+      inFlight--;
+      return { status: 200, etag: `"etag-${body.size}"` };
+    });
+    const { upload } = makeUpload(bigFile(48 * MIB), put as never, { connection });
+
+    await upload.run();
+    await upload.settled();
+
+    expect(upload.getSnapshot().state).toBe("available");
+    expect(atStart.slice(0, 4)).toEqual([1, 2, 3, 4]);
+    expect(atStart.slice(4)).toEqual([1, 1]);
+    expect(connection.measuredBps).toBeGreaterThan(SLOW_BPS);
+
+    expect(preferredPartBytes(0)).toBe(8 * MIB);
+    expect(preferredPartBytes(100 * 1024)).toBe(5 * MIB);
+    expect(preferredPartBytes(20 * MIB)).toBe(16 * MIB);
+  });
+
+  it("resumes after a reload from the saved record: sent parts are confirmed, not sent again", async () => {
+    const mock = mockApi({ uploadStatuses: ["UPLOADING", "COMPLETED", "VERIFIED"] });
+    const store = memoryStore();
+    const file = bigFile();
+    // The first page sends parts 1 and 2, then closes while part 3 is on its way.
+    const firstPut = vi.fn((url: string, body: Blob, options?: { signal?: AbortSignal }) =>
+      url.includes("/part/3/") ? hangingPut(options) : okPut(url, body),
+    );
+    const first = makeUpload(file, firstPut as never, {}, store);
+    void first.upload.run();
+    await vi.waitFor(async () => expect((await store.get("mp1"))?.unconfirmed).toHaveLength(2));
+    const saved = (await store.get("mp1"))!;
+    expect(saved.parts).toEqual([]);
+    expect(saved.head_sha256).toBe(SHA);
+
+    // A new page: the person chooses the file again, and it is checked.
+    expect(await isSameFile(file, saved, async () => SHA)).toBe(true);
+    expect(await isSameFile(file, saved, async () => "b".repeat(64))).toBe(false);
+    expect(await isSameFile(bigFile(20 * MIB, "other.bin"), saved, async () => SHA)).toBe(false);
+
+    const secondPut = vi.fn(okPut);
+    const second = makeUpload(file, secondPut as never, {}, store);
+    await second.upload.run(saved);
+    await second.upload.settled();
+
+    expect(second.upload.getSnapshot().state).toBe("available");
+    expect(secondPut).toHaveBeenCalledTimes(1);
+    expect(String(secondPut.mock.calls[0][0])).toContain("/part/3/");
+    expect(confirmed(mock)).toEqual([[1, 2], [3]]);
+    expect(await store.get("mp1")).toBeUndefined();
+  });
+
+  it("sends parts again when the API says they never reached storage", async () => {
+    const mock = mockApi({ uploadStatuses: ["UPLOADING", "COMPLETED", "VERIFIED"] });
+    let refused = false;
+    server.use(
+      http.post(`${API}/uploads/:id/parts/confirm`, async ({ request }) => {
+        const body = await request.clone().json();
+        mock.log.push({ method: "POST", path: "/uploads/mp1/parts/confirm", body });
+        if (!refused) {
+          refused = true;
+          return HttpResponse.json({ error: "invalid part: part 1 is not stored at the provider" }, { status: 400 });
+        }
+        return HttpResponse.json({ status: "parts_recorded" });
+      }),
+    );
+    const file = bigFile();
+    const saved: ResumeRecord = {
+      upload_id: "mp1",
+      organization_id: "org-1",
+      idempotency_key: "key-from-before",
+      request,
+      file_size: file.size,
+      file_last_modified: file.lastModified,
+      sha256: SHA,
+      part_size: 8 * MIB,
+      parts: [],
+      unconfirmed: [{ number: 1, etag: '"lost"', size: 8 * MIB }],
+      expires_at: "2099-01-01T00:00:00Z",
+      saved_at: "2026-11-12T00:00:00Z",
+    };
+    const put = vi.fn(okPut);
+    const { upload } = makeUpload(file, put as never);
+
+    await upload.run(saved);
+    await upload.settled();
+
+    expect(upload.getSnapshot().state).toBe("available");
+    expect(put).toHaveBeenCalledTimes(3);
+    expect(confirmed(mock)).toEqual([[1], [1, 2, 3]]);
+  });
+
+  it("can be paused and resumed by hand without losing finished parts", async () => {
+    const mock = mockApi();
+    let hold = true;
+    const put = vi.fn((url: string, body: Blob, options?: { signal?: AbortSignal }) =>
+      hold && !url.includes("/part/1/") ? hangingPut(options) : okPut(url, body),
+    );
+    const { upload } = makeUpload(bigFile(), put as never);
+
+    const running = upload.run();
+    await vi.waitFor(() => expect(upload.getSnapshot().sentBytes).toBe(8 * MIB));
+    upload.pause();
+    expect(upload.getSnapshot().paused).toBe("user");
+
+    hold = false;
+    await upload.resume();
+    await running;
+    await upload.settled();
+
+    expect(upload.getSnapshot().state).toBe("available");
+    expect(putsFor(put, 1)).toHaveLength(1);
+    expect(confirmed(mock)).toEqual([[1], [2, 3]]);
+  });
+});
+
+describe("state changes", () => {
+  it("keeps every request on the organization the upload started in", async () => {
+    const mock = mockApi();
+    let switched = false;
+    // The person switches organization while the first part is on its way.
+    const put = vi.fn(async (url: string, body: Blob) => {
+      if (!switched) {
+        switched = true;
+        setActiveOrganization("org-2");
+      }
+      return okPut(url, body);
+    });
+    const { upload } = makeUpload(bigFile(), put as never);
+
+    await upload.run();
+    await upload.settled();
+
+    expect(upload.getSnapshot().state).toBe("available");
+    expect(mock.log.some((l) => l.path === "/uploads/mp1/complete")).toBe(true);
+    expect(new Set(mock.log.map((l) => l.org))).toEqual(new Set(["org-1"]));
+  });
+
+  it("checks again after checking stopped while the upload was finishing", async () => {
+    const mock = mockApi({ uploadStatuses: ["COMPLETING"] });
+    server.use(
+      http.post(`${API}/uploads/:id/complete`, () =>
+        HttpResponse.json({ upload_id: "mp1", status: "COMPLETING", expires_at: "2099-01-01T00:00:00Z" }, { status: 202 }),
+      ),
+    );
+    const { upload } = makeUpload(bigFile(), okPut as never, { maxPolls: 1 });
+
+    await upload.run();
+    await upload.settled();
+    expect(upload.getSnapshot()).toMatchObject({ state: "finalizing", pollingStopped: true });
+
+    mock.uploadStatuses = ["VERIFIED"];
+    mock.catalog = ["AVAILABLE"];
+    await upload.checkNow();
+
+    expect(upload.getSnapshot().state).toBe("available");
+  });
+
+  it("does not start a second round of checks while one is still running", async () => {
+    const mock = mockApi({ uploadStatuses: ["COMPLETED"] });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const { upload } = makeUpload(new File(["x"], "x.bin"), okPut as never, { sleep: vi.fn(() => gate) });
+
+    await upload.run();
+    expect(upload.getSnapshot()).toMatchObject({ state: "verifying", pollingStopped: false });
+    const checks = () => mock.log.filter((l) => l.method === "GET").length;
+    const before = checks();
+
+    const check = upload.checkNow();
+    await Promise.race([check, new Promise((resolve) => setTimeout(resolve, 50))]);
+    expect(checks()).toBe(before);
+
+    release();
+    await upload.settled();
+  });
+
+  it("cannot be cancelled once the completion was sent, and shows the real outcome", async () => {
+    const mock = mockApi();
+    let answer!: () => void;
+    const held = new Promise<void>((resolve) => (answer = resolve));
+    server.use(
+      http.post(`${API}/uploads/:id/complete`, async () => {
+        mock.log.push({ method: "POST", path: "/uploads/sg1/complete" });
+        await held;
+        return HttpResponse.json({ upload_id: "sg1", status: "COMPLETED", expires_at: "2099-01-01T00:00:00Z" });
+      }),
+    );
+    const { upload } = makeUpload(new File(["x"], "x.bin"), okPut as never);
+
+    const running = upload.run();
+    await vi.waitFor(() => expect(mock.log.some((l) => l.path === "/uploads/sg1/complete")).toBe(true));
+    expect(upload.getSnapshot().completionSent).toBe(true);
+    upload.cancel();
+    expect(upload.getSnapshot().state).toBe("finalizing");
+
+    answer();
+    await running;
+    await upload.settled();
+    expect(upload.getSnapshot().state).toBe("available");
+    expect(mock.log.some((l) => l.path.endsWith("/abort"))).toBe(false);
+  });
+
+  it("starts a retry once, however often Retry is pressed", async () => {
+    mockApi({ uploadStatuses: ["UPLOADING", "COMPLETED", "VERIFIED"] });
+    let refuse = true;
+    const put = vi.fn(async (url: string, body: Blob) => {
+      if (refuse) throw new UploadHttpError(400, "InvalidArgument");
+      return okPut(url, body);
+    });
+    const { upload } = makeUpload(bigFile(), put as never);
+    await upload.run();
+    expect(upload.getSnapshot().state).toBe("failed");
+
+    refuse = false;
+    const states: string[] = [];
+    upload.subscribe(() => states.push(upload.getSnapshot().state));
+    await Promise.all([upload.retry(), upload.retry()]);
+    await upload.settled();
+
+    expect(upload.getSnapshot().state).toBe("available");
+    expect(states.slice(states.indexOf("hashing"))).not.toContain("queued");
+  });
+
+  it("does not bring back the record of an expired session when the checksum finishes late", async () => {
+    mockApi({ failPartUrls: () => HttpResponse.json({ error: "multipart upload is not active" }, { status: 409 }) });
+    let finishHash!: (sha: string) => void;
+    const hash = vi.fn((blob: Blob) => (blob.size <= HEAD_BYTES ? Promise.resolve("head") : new Promise<string>((resolve) => (finishHash = resolve))));
+    const { upload, store } = makeUpload(bigFile(), okPut as never, { hash });
+
+    await upload.run();
+    expect(upload.getSnapshot().failure?.kind).toBe("session_expired");
+    expect(await store.get("mp1")).toBeUndefined();
+
+    finishHash(SHA);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await store.get("mp1")).toBeUndefined();
+  });
+
+  it("is not left paused when the server ends the upload", async () => {
+    mockApi({ uploadStatuses: ["COMPLETED"] });
+    const { upload } = makeUpload(new File(["x"], "x.bin"), okPut as never);
+    // The connection drops just as the server's answer arrives.
+    const internals = upload as unknown as { uploadInfo: () => Promise<unknown>; pauseFor: (reason: "offline") => void };
+    internals.uploadInfo = async () => {
+      internals.pauseFor("offline");
+      return { status: "FAILED" };
+    };
+
+    await upload.run();
+    await upload.settled();
+
+    expect(upload.getSnapshot().state).toBe("failed");
+    expect(upload.getSnapshot().paused).toBeUndefined();
+  });
+
+  it("sizes new uploads from the speed of all the uploads running together", () => {
+    const connection = fakeConnection();
+    const first = {};
+    const second = {};
+    connection.reportSpeed(first, 200 * 1024);
+    connection.reportSpeed(second, 200 * 1024);
+    expect(connection.measuredBps).toBe(400 * 1024);
+    expect(preferredPartBytes(connection.measuredBps)).toBe(8 * MIB);
+
+    // A finished upload stops counting from the next measurement on.
+    connection.forgetSpeed(first);
+    expect(connection.measuredBps).toBe(400 * 1024);
+    connection.reportSpeed(second, 300 * 1024);
+    expect(connection.measuredBps).toBe(300 * 1024);
   });
 });

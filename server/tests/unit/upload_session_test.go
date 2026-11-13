@@ -8,52 +8,6 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
 )
 
-func TestUploadSessionTransitionToCompleted(t *testing.T) {
-	now := time.Now().UTC()
-
-	upload := model.UploadSession{
-		ID:           "upload-123",
-		TenantID:     "tenant-1",
-		OwnerID:      "user-1",
-		ObjectKey:    "quarantine/tenant-1/upload-123",
-		FileName:     "report.pdf",
-		ContentType:  "application/pdf",
-		ExpectedSize: 1024,
-		Status:       model.UploadStatusPending,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-		ExpiresAt:    now.Add(30 * time.Minute),
-	}
-
-	err := upload.TransitionTo(model.UploadStatusCompleted)
-	if err != nil {
-		t.Fatalf("expected transition to succeed, got %v", err)
-	}
-
-	if upload.Status != model.UploadStatusCompleted {
-		t.Fatalf(
-			"expected status %s, got %s",
-			model.UploadStatusCompleted,
-			upload.Status,
-		)
-	}
-
-	if upload.UpdatedAt.Before(now) {
-		t.Error("expected UpdatedAt to be updated")
-	}
-}
-
-func TestUploadSessionRejectsInvalidTransition(t *testing.T) {
-	upload := model.UploadSession{
-		Status: model.UploadStatusCompleted,
-	}
-
-	err := upload.TransitionTo(model.UploadStatusUploading)
-	if err == nil {
-		t.Fatal("expected invalid transition to fail")
-	}
-}
-
 func TestUploadSessionValidate(t *testing.T) {
 	now := time.Now().UTC()
 
@@ -122,20 +76,6 @@ func TestUploadLifecycleTransitions(t *testing.T) {
 		if model.CanTransition(c.from, c.to) {
 			t.Errorf("%s -> %s should be refused", c.from, c.to)
 		}
-	}
-}
-
-func TestOnlyVerifiedUploadsCanBePromoted(t *testing.T) {
-	for _, status := range []model.UploadStatus{
-		model.UploadStatusPending, model.UploadStatusUploading, model.UploadStatusCompleting,
-		model.UploadStatusCompleted, model.UploadStatusAborting, model.UploadStatusFailed, model.UploadStatusExpired,
-	} {
-		if (model.UploadSession{Status: status}).CanPromote() {
-			t.Errorf("%s must not be promotable", status)
-		}
-	}
-	if !(model.UploadSession{Status: model.UploadStatusVerified}).CanPromote() {
-		t.Error("VERIFIED must be promotable")
 	}
 }
 

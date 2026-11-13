@@ -301,19 +301,31 @@ type SwitchedAsset struct {
 	ETag               string
 }
 
-// SwitchConnection moves a dataset's assets to the target connection in
-// one transaction: every asset stored at a migrated object (its sharers
-// too), packed or not, now reads from the copy. Adopted objects become the
-// platform's own copies. The dataset's new uploads go to the target.
-func (r *CopyRepository) SwitchConnection(ctx context.Context, tenantID, datasetID, targetID string, moved []SwitchedAsset, now time.Time) (int64, error) {
+// FinishMigration moves a dataset's assets to the target connection and
+// completes the job with report, in one transaction: every asset stored at
+// a migrated object (its sharers too), packed or not, now reads from the
+// copy. Adopted objects become the platform's own copies. The dataset's new
+// uploads go to the target. The switch cannot be undone, so it happens only
+// while the job is still RUNNING under owner's lease: a job cancelled
+// meanwhile switches nothing (model.ErrCopyJobEnded), and the job's row
+// stays locked until the switch commits, so a cancel cannot slip in after.
+func (r *CopyRepository) FinishMigration(ctx context.Context, job model.CopyJob, owner string, moved []SwitchedAsset, report map[string]any, now time.Time) error {
+	tenantID, datasetID, targetID := job.TenantID, job.DatasetID, job.TargetConnectionID
 	tx, err := r.db.Pool.Begin(ctx)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+	tag, err := tx.Exec(ctx, `UPDATE copy_jobs SET updated_at = $3 WHERE id = $1 AND lease_owner = $2 AND state = 'RUNNING'`, job.ID, owner, now)
+	if err != nil {
+		return fmt.Errorf("hold the migration job: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return model.ErrCopyJobEnded
+	}
 	// Assets' storage bindings are fixed (000015), but for this switch.
 	if _, err := tx.Exec(ctx, `SELECT set_config('osp.migrating_assets', 'on', true)`); err != nil {
-		return 0, err
+		return err
 	}
 	var switched int64
 	for _, m := range moved {
@@ -324,19 +336,19 @@ func (r *CopyRepository) SwitchConnection(ctx context.Context, tenantID, dataset
 			WHERE tenant_id = $1 AND coalesce(storage_connection_id, 'platform') = $2 AND object_key = $7 AND status = 'AVAILABLE'
 			RETURNING id`, tenantID, m.SourceConnectionID, targetID, m.TargetKey, m.VersionID, m.ETag, m.SourceKey, now)
 		if err != nil {
-			return 0, fmt.Errorf("switch assets: %w", err)
+			return fmt.Errorf("switch assets: %w", err)
 		}
 		for rows.Next() {
 			var id string
 			if err := rows.Scan(&id); err != nil {
 				rows.Close()
-				return 0, err
+				return err
 			}
 			ids = append(ids, id)
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
-			return 0, fmt.Errorf("switch assets: %w", err)
+			return fmt.Errorf("switch assets: %w", err)
 		}
 		switched += int64(len(ids))
 		if len(ids) == 0 {
@@ -345,22 +357,31 @@ func (r *CopyRepository) SwitchConnection(ctx context.Context, tenantID, dataset
 		// Packed assets now read their own copy, not the pack.
 		if _, err := tx.Exec(ctx, `UPDATE pack_entries SET state = 'DELETED', deleted_at = $3, updated_at = $3
 			WHERE tenant_id = $1 AND asset_id = ANY($2) AND state = 'PUBLISHED'`, tenantID, ids, now); err != nil {
-			return 0, fmt.Errorf("release migrated pack entries: %w", err)
+			return fmt.Errorf("release migrated pack entries: %w", err)
 		}
 		// So do chunked ones; the chunk store deletes what nothing else needs.
 		if _, err := tx.Exec(ctx, `UPDATE chunked_assets SET state = 'RELEASED', released_at = $3
 			WHERE tenant_id = $1 AND asset_id = ANY($2) AND state <> 'RELEASED'`, tenantID, ids, now); err != nil {
-			return 0, fmt.Errorf("release migrated chunked assets: %w", err)
+			return fmt.Errorf("release migrated chunked assets: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `DELETE FROM chunk_refs WHERE tenant_id = $1 AND asset_id = ANY($2)`, tenantID, ids); err != nil {
-			return 0, fmt.Errorf("release migrated chunks: %w", err)
+			return fmt.Errorf("release migrated chunks: %w", err)
 		}
 	}
 	if _, err := tx.Exec(ctx, `UPDATE datasets SET storage_connection_id = $3, updated_at = $4 WHERE tenant_id = $1 AND id = $2`,
 		tenantID, datasetID, targetID, now); err != nil {
-		return 0, fmt.Errorf("point the dataset at the target: %w", err)
+		return fmt.Errorf("point the dataset at the target: %w", err)
 	}
-	return switched, tx.Commit(ctx)
+	report["switched"] = switched
+	body, err := json.Marshal(report)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE copy_jobs SET state = 'COMPLETED', error = '', report = $2, updated_at = $3, finished_at = $3,
+		lease_owner = NULL, lease_expires_at = NULL WHERE id = $1`, job.ID, body, now); err != nil {
+		return fmt.Errorf("finish copy job: %w", err)
+	}
+	return tx.Commit(ctx)
 }
 
 // ─── Replicas ─────────────────────────────────────────────────────────

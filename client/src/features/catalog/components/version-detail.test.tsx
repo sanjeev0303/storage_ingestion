@@ -1,3 +1,4 @@
+import { QueryClient } from "@tanstack/react-query";
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
@@ -101,5 +102,30 @@ describe("VersionDetail", () => {
     const confirm = screen.getByRole("button", { name: "Delete version" });
     expect(confirm).toBeDisabled();
     expect(screen.getByText(/longer than you request/)).toBeInTheDocument();
+  });
+
+  it("drops a download link made for one version when another version is shown", async () => {
+    server.use(
+      http.get(`${API}/catalog/objects/obj-1/versions/1`, () =>
+        HttpResponse.json(makeVersion({ version: 1, current: false, asset_id: "asset-1" })),
+      ),
+      http.get(`${API}/assets/asset-1/lifecycle`, () => HttpResponse.json({ ...lifecycle, asset_id: "asset-1" })),
+      http.post(`${API}/assets/asset-1/download-url`, () =>
+        HttpResponse.json({ url: "https://s3.example/one?sig=1", expires_at: "2026-06-01T10:05:00Z", delivery: "storage", revocable: false }),
+      ),
+    );
+    // A client that keeps answers, so switching back shows the cached version at once.
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { rerender } = renderWithProviders(<VersionDetail object={makeObject()} selector="current" title="Version 2" />, { client });
+    await screen.findByRole("button", { name: /Create download link/ });
+
+    rerender(<VersionDetail object={makeObject()} selector={1} title="Version 1" />);
+    await screen.findByText("Version 1");
+    await userEvent.click(await screen.findByRole("button", { name: /Create download link/ }));
+    expect(await screen.findByRole("link", { name: /Download/ })).toHaveAttribute("href", "https://s3.example/one?sig=1");
+
+    rerender(<VersionDetail object={makeObject()} selector="current" title="Version 2" />);
+    expect(await screen.findByText("Version 2")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Download/ })).not.toBeInTheDocument();
   });
 });

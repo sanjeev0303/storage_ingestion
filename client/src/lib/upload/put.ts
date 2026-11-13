@@ -1,5 +1,9 @@
 import { abortError } from "./sha256";
 
+// How S3, GCS and Azure word an expired signature or a skewed clock.
+const EXPIRED_URL =
+  /Request has expired|ExpiredToken|token has expired|signature (has )?expired|not valid in the specified time frame|RequestTimeTooSkewed/i;
+
 export class UploadHttpError extends Error {
   readonly status: number;
   readonly body: string;
@@ -12,8 +16,10 @@ export class UploadHttpError extends Error {
   }
 
   // A presigned URL that has expired or was signed for a skewed clock. Ask the API for a new URL.
+  // S3 sends an expired URL as AccessDenied with "Request has expired", so the
+  // code alone says nothing: a plain AccessDenied is a real refusal.
   get urlExpired() {
-    return this.status === 403 && /expired|RequestTimeTooSkewed|AccessDenied/i.test(this.body);
+    return this.status === 403 && EXPIRED_URL.test(this.body);
   }
 }
 

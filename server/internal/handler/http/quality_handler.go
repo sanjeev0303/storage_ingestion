@@ -34,6 +34,8 @@ func (h *DatasetHandler) failQuality(w nethttp.ResponseWriter, err error) {
 		writeJSON(w, nethttp.StatusConflict, problem{Error: err.Error(), Code: "profile_not_ready"})
 	case errors.Is(err, model.ErrReleaseTaken):
 		writeJSON(w, nethttp.StatusConflict, problem{Error: err.Error(), Code: "release_taken"})
+	case errors.Is(err, model.ErrVersionExpired):
+		writeJSON(w, nethttp.StatusConflict, problem{Error: err.Error(), Code: "version_expired"})
 	case errors.Is(err, model.ErrNoRelease):
 		writeJSON(w, nethttp.StatusNotFound, problem{Error: "not found", Code: "not_found"})
 	case errors.Is(err, dataset.ErrQualityOff):

@@ -14,6 +14,7 @@ import { Table, Td, Th } from "@/components/ui/table";
 import { Time } from "@/components/ui/time";
 import { notify } from "@/components/ui/toast";
 import { saveBlob } from "@/features/evidence/api";
+import { getGovernance } from "@/features/governance/api";
 import { useOrganizationId, useSession } from "@/lib/auth/session";
 import { orgKey } from "@/lib/query/keys";
 import { formatBytes, formatNumber } from "@/lib/utils/format";
@@ -90,9 +91,10 @@ function FindPanel({ onCreated }: { onCreated: (id: string) => void }) {
   const sel = selector();
   const badHash = sel.sha256s.find((h) => !/^[0-9a-f]{64}$/.test(h));
   const any = sel.subject_ids.length + sel.sha256s.length + sel.object_ids.length > 0;
-  const find = useMutation({ mutationFn: () => search(selector()), onError: notify.error });
+  const find = useMutation({ mutationFn: (searched: Selector) => search(searched), onError: notify.error });
+  // Records exactly what was searched and shown, not whatever the boxes say now.
   const create = useMutation({
-    mutationFn: () => createErasure({ ...selector(), ...request, reason: request.reason.trim() }),
+    mutationFn: (searched: Selector) => createErasure({ ...searched, ...request, reason: request.reason.trim() }),
     onSuccess: (e) => {
       notify.success("Erasure request recorded");
       refresh();
@@ -104,7 +106,7 @@ function FindPanel({ onCreated }: { onCreated: (id: string) => void }) {
 
   function submit(e: FormEvent) {
     e.preventDefault();
-    if (any && !badHash) find.mutate();
+    if (any && !badHash) find.mutate(selector());
   }
 
   return (
@@ -142,7 +144,7 @@ function FindPanel({ onCreated }: { onCreated: (id: string) => void }) {
             <form
               onSubmit={(e) => {
                 e.preventDefault();
-                if (request.reason.trim()) create.mutate();
+                if (request.reason.trim() && find.variables) create.mutate(find.variables);
               }}
               className="flex flex-col gap-4"
             >
@@ -286,19 +288,33 @@ function RequestsPanel({ openId, onOpen }: { openId: string | null; onOpen: (id:
 function ErasureDetail({ id }: { id: string }) {
   const { organizationId, refresh } = useErasureKeys();
   const { user } = useSession();
-  const [confirm, setConfirm] = useState(false);
+  const [confirm, setConfirm] = useState<"erase" | "cancel" | null>(null);
   const erasure = useQuery({
     queryKey: orgKey(organizationId, "erasure", "detail", id),
     queryFn: ({ signal }) => getErasure(id, signal),
     enabled: Boolean(organizationId),
-    refetchInterval: (q) => (q.state.data?.state === "DELETING" ? 10_000 : false),
+    refetchInterval: (q) => {
+      const state = q.state.data?.state;
+      if (state === "DELETING") return 10_000;
+      // A hold can be released at any time; check now and then.
+      if (state === "WAITING_ON_HOLD") return 60_000;
+      return false;
+    },
+  });
+  // Same query as the governance panel. Execute refuses a PLANNED erasure
+  // while every deletion needs approval (server/docs/erasure.md).
+  const governance = useQuery({
+    queryKey: orgKey(organizationId, "governance", "settings"),
+    queryFn: ({ signal }) => getGovernance(signal),
+    enabled: Boolean(organizationId),
   });
   const done = (message: string) => () => {
     notify.success(message);
     refresh();
   };
   const approve = useMutation({ mutationFn: () => approveErasure(id, ""), onSuccess: done("Approved"), onError: notify.error });
-  const cancel = useMutation({ mutationFn: () => cancelErasure(id), onSuccess: done("Cancelled"), onError: notify.error });
+  // A failure is shown in the confirmation dialog.
+  const cancel = useMutation({ mutationFn: () => cancelErasure(id), onSuccess: done("Cancelled") });
   const certificate = useMutation({
     mutationFn: () => getCertificate(id),
     onSuccess: (c) => saveBlob(new Blob([JSON.stringify(c, null, 2)], { type: "application/json" }), `erasure-${id}-certificate.json`),
@@ -309,6 +325,10 @@ function ErasureDetail({ id }: { id: string }) {
   if (erasure.isError) return <ErrorState error={erasure.error} onRetry={() => erasure.refetch()} />;
   const e = erasure.data;
   const open = e.state === "PLANNED" || e.state === "APPROVED";
+  // A failed erasure never finishes on its own, so it can be dropped too.
+  const cancellable = open || e.state === "FAILED";
+  const approvalNeeded = !governance.data || governance.data.approve_deletes || governance.data.profile === "GXP_VAULT";
+  const canErase = e.state === "APPROVED" || (e.state === "PLANNED" && !approvalNeeded);
   const unfinished = (e.items ?? []).filter((i) => i.state !== "DESTROYED");
 
   return (
@@ -365,13 +385,13 @@ function ErasureDetail({ id }: { id: string }) {
               Approve
             </Button>
           )}
-          {open && (
-            <Button variant="accent" onClick={() => setConfirm(true)}>
+          {canErase && (
+            <Button variant="accent" onClick={() => setConfirm("erase")}>
               Erase
             </Button>
           )}
-          {open && (
-            <Button variant="ghost" onClick={() => cancel.mutate()} loading={cancel.isPending}>
+          {cancellable && (
+            <Button variant="ghost" onClick={() => setConfirm("cancel")} loading={cancel.isPending}>
               Cancel request
             </Button>
           )}
@@ -382,9 +402,24 @@ function ErasureDetail({ id }: { id: string }) {
           )}
         </div>
       </div>
+      {open && e.state === "PLANNED" && approvalNeeded && governance.data && (
+        <p className="mt-4 text-sm text-muted">Every deletion needs approval here, so another member approves this before it can be erased.</p>
+      )}
       <ConfirmDialog
-        open={confirm}
-        onOpenChange={setConfirm}
+        open={confirm === "cancel"}
+        onOpenChange={(next) => !next && setConfirm(null)}
+        title="Cancel this erasure request?"
+        description={
+          e.state === "FAILED"
+            ? "Files already destroyed stay destroyed, and nothing more is erased. The request stays in the list as cancelled; record a new one if the rest still needs erasing."
+            : "Nothing is erased. The request stays in the list as cancelled and cannot be carried out later; record a new one if it is needed again."
+        }
+        confirmLabel="Cancel request"
+        onConfirm={() => cancel.mutateAsync()}
+      />
+      <ConfirmDialog
+        open={confirm === "erase"}
+        onOpenChange={(next) => !next && setConfirm(null)}
         title="Erase for good?"
         description={`${formatNumber(e.plan.objects.length)} files are deleted everywhere a legal hold allows, ${formatNumber(
           e.plan.versions.length,

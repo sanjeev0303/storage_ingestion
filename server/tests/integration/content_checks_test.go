@@ -170,6 +170,30 @@ func TestLocalStackContentChecksAndRescan(t *testing.T) {
 		t.Fatalf("re-scanned twice: %+v", again)
 	}
 
+	// An archived asset cannot be read, so it waits for newer signatures
+	// until it is restored instead of failing a re-scan every hour.
+	cold := stack.upload(t, "cold.txt", "text/plain", []byte("nothing to see here\n"))
+	runCycle(t, svc)
+	coldAsset, coldJob := stack.assetFor(t, cold)
+	if _, err := stack.env.db.Pool.Exec(ctx, `UPDATE assets SET storage_tier = 'ARCHIVE' WHERE id = $1`, coldAsset.ID); err != nil {
+		t.Fatal(err)
+	}
+	scanner.update("sigs-3", []byte("AKIAIOSFODNN7EXAMPLE"))
+	if archived := runCycle(t, svc); archived.Rescanned != 0 {
+		t.Fatalf("re-scanned an archived asset: %+v", archived)
+	}
+	var claimed *time.Time
+	stack.env.db.Pool.QueryRow(ctx, `SELECT rescanned_at FROM processing_jobs WHERE id = $1`, coldJob.ID).Scan(&claimed)
+	if claimed != nil {
+		t.Fatalf("an archived asset was claimed for a re-scan at %s", claimed)
+	}
+	if _, err := stack.env.db.Pool.Exec(ctx, `UPDATE assets SET readable_until = now() + interval '1 day' WHERE id = $1`, coldAsset.ID); err != nil {
+		t.Fatal(err)
+	}
+	if restored := runCycle(t, svc); restored.Rescanned != 1 {
+		t.Fatalf("a restored asset with old signatures: %+v", restored)
+	}
+
 	// Blast radius: the asset and its downloads, by its bytes.
 	radius, err := checks.BlastRadius(ctx, stack.env.tenant, asset.ID, 100)
 	if err != nil || radius.ChecksumSHA256 != asset.ChecksumSHA256 || len(radius.Assets) != 1 || radius.Assets[0].AssetID != asset.ID {
@@ -204,6 +228,27 @@ func TestHTTPContentChecks(t *testing.T) {
 		t.Fatalf("blast radius: %+v", radius)
 	}
 	s.expect(t, dev, "", http.MethodGet, "/api/v1/assets/"+asset.ID+"/blast-radius", "", http.StatusForbidden, nil)
+
+	// A block is cleared only by someone who may release quarantine, with a
+	// reason, once; the clearing is audited with the block it lifted.
+	if err := postgres.NewContentCheckRepository(s.db).BlockAsset(context.Background(), acme.org.ID, asset.ID, model.RejectMalwareDetected, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	unblock := "/api/v1/assets/" + asset.ID + "/unblock"
+	s.expect(t, dev, "", http.MethodPost, unblock, `{"reason":"false positive"}`, http.StatusForbidden, nil)
+	s.expect(t, outsider, "", http.MethodPost, unblock, `{"reason":"false positive"}`, http.StatusNotFound, nil)
+	s.expect(t, owner, "", http.MethodPost, unblock, `{"reason":"  "}`, http.StatusBadRequest, nil)
+	s.expect(t, owner, "", http.MethodPost, unblock, `{"reason":"false positive, checked by hand"}`, http.StatusOK, nil)
+	s.expect(t, owner, "", http.MethodPost, unblock, `{"reason":"again"}`, http.StatusConflict, nil)
+	cleared := 0
+	for _, ev := range s.auditEvents(t, acme.org.ID, "asset.unblock") {
+		if ev.Details["blocked_reason"] == model.RejectMalwareDetected {
+			cleared++
+		}
+	}
+	if cleared != 1 {
+		t.Fatalf("the clearing is audited once with the block it lifted: %d", cleared)
+	}
 
 	var policy struct {
 		Policy struct {

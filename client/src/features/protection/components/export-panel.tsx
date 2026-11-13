@@ -5,7 +5,7 @@ import { useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Field, Input, Select } from "@/components/ui/field";
 import { Panel } from "@/components/ui/panel";
-import { SkeletonRows } from "@/components/ui/states";
+import { ErrorState, SkeletonRows } from "@/components/ui/states";
 import { SubmitButton } from "@/components/ui/submit-button";
 import { Time } from "@/components/ui/time";
 import { notify } from "@/components/ui/toast";
@@ -35,6 +35,8 @@ export function ExportPanel() {
     >
       {schedule.isPending ? (
         <SkeletonRows rows={2} />
+      ) : schedule.isError ? (
+        <ErrorState error={schedule.error} onRetry={() => schedule.refetch()} />
       ) : (
         <ScheduleForm
           key={schedule.data?.connection_id ?? "none"}
@@ -66,7 +68,8 @@ function ScheduleForm({
   onSaved: () => void;
 }) {
   const [target, setTarget] = useState(connection);
-  const [every, setEvery] = useState(String(hours || 24));
+  // A saved schedule shows its interval, 0 when stopped; a new one suggests a day.
+  const [every, setEvery] = useState(String(connection ? hours : 24));
   const save = useMutation({ mutationFn: putSchedule });
   const now = useMutation({ mutationFn: () => startExport(target) });
   const everyValid = Number.isInteger(Number(every)) && Number(every) >= 0 && Number(every) <= 8760;

@@ -30,6 +30,23 @@ const anchor = (seq: number, extra: object = {}) => ({
   signature_ok: true, chain_ok: true, ...extra,
 });
 
+// Records the names files are saved under: saveBlob clicks a link with a download name.
+function captureSaves() {
+  const names: string[] = [];
+  URL.createObjectURL = vi.fn(() => "blob:file");
+  URL.revokeObjectURL = vi.fn();
+  const spy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+    names.push(this.download);
+  });
+  return { names, restore: () => spy.mockRestore() };
+}
+
+function gated() {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  return { gate, release };
+}
+
 describe("EvidenceScreen", () => {
   it("lists checked anchors, anchors now and saves the settings", async () => {
     let saved: Record<string, unknown> | undefined;
@@ -76,6 +93,47 @@ describe("EvidenceScreen", () => {
     await userEvent.type(start, "20");
     expect(screen.getByRole("button", { name: "Save settings" })).toBeDisabled();
     expect(screen.getByText("Fix the fields marked above.")).toBeInTheDocument();
+  });
+
+  it("names the export after the format chosen when Download was clicked", async () => {
+    const saves = captureSaves();
+    const { gate, release } = gated();
+    let asked = false;
+    server.use(
+      http.get(`${API}/organization/audit/anchors`, () => HttpResponse.json({ anchors: [] })),
+      http.get(`${API}/evidence-settings`, () => HttpResponse.json(settings)),
+      http.get(`${API}/storage-connections`, () => HttpResponse.json({ connections: [] })),
+      http.get(`${API}/organization/audit/export`, async () => {
+        asked = true;
+        await gate;
+        return new HttpResponse("{}", { headers: { "Content-Type": "application/x-ndjson" } });
+      }),
+    );
+    renderWithProviders(<EvidenceScreen />, { permissions: ["audit.read", "org.manage"] });
+    await userEvent.click(await screen.findByRole("button", { name: "Download export" }));
+    await waitFor(() => expect(asked).toBe(true));
+    await userEvent.selectOptions(screen.getByLabelText("Format"), "cef");
+    release();
+    await waitFor(() => expect(saves.names).toEqual(["audit-export.jsonl"]));
+    saves.restore();
+  });
+
+  it("keeps unsaved settings through a refetch and says someone else changed them", async () => {
+    let current = settings;
+    server.use(
+      http.get(`${API}/organization/audit/anchors`, () => HttpResponse.json({ anchors: [] })),
+      http.get(`${API}/evidence-settings`, () => HttpResponse.json(current)),
+      http.get(`${API}/storage-connections`, () => HttpResponse.json({ connections: [] })),
+    );
+    const { client } = renderWithProviders(<EvidenceScreen />, { permissions: ["audit.read", "org.manage"] });
+    const zone = await screen.findByLabelText("Time zone");
+    await userEvent.clear(zone);
+    await userEvent.type(zone, "Europe/London");
+
+    current = { ...settings, review_every_days: 14, updated_at: "2026-10-30T11:00:00Z" };
+    await client.invalidateQueries();
+    expect(await screen.findByText(/Someone else changed the evidence settings after you started editing/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Time zone")).toHaveValue("Europe/London");
   });
 });
 
@@ -137,6 +195,30 @@ describe("ComplianceScreen", () => {
     renderWithProviders(<ComplianceScreen />, { permissions: ["audit.read"] });
     await screen.findByText("NIST");
     expect(screen.queryByText("Regulator access")).not.toBeInTheDocument();
+  });
+
+  it("names the evidence file after the framework chosen when Download was clicked", async () => {
+    const saves = captureSaves();
+    const { gate, release } = gated();
+    let asked = false;
+    server.use(
+      http.get(`${API}/compliance/frameworks`, () =>
+        HttpResponse.json({ frameworks: [{ id: "nist-800-171", name: "NIST SP 800-171" }, { id: "sec-17a-4", name: "SEC 17a-4" }] })),
+      http.get(`${API}/compliance/:framework`, ({ params }) => HttpResponse.json({ id: params.framework, name: String(params.framework), controls: [] })),
+      http.get(`${API}/compliance/nist-800-171/evidence`, async () => {
+        asked = true;
+        await gate;
+        return new HttpResponse(new Uint8Array([80, 75]), { headers: { "Content-Type": "application/zip" } });
+      }),
+    );
+    renderWithProviders(<ComplianceScreen />, { permissions: ["audit.read"] });
+    await screen.findByRole("option", { name: "SEC 17a-4" });
+    await userEvent.click(screen.getByRole("button", { name: "Download evidence" }));
+    await waitFor(() => expect(asked).toBe(true));
+    await userEvent.selectOptions(screen.getByLabelText("Framework"), "sec-17a-4");
+    release();
+    await waitFor(() => expect(saves.names).toEqual(["nist-800-171-evidence.zip"]));
+    saves.restore();
   });
 });
 

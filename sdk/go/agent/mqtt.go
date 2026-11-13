@@ -126,6 +126,11 @@ func (a *Agent) runMQTT(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		// Only a session rolls the open file, so roll it here too, or what
+		// it holds waits for the broker to come back.
+		if err := w.rollIfDue(); err != nil {
+			a.log.Warn("mqtt: closing the open file", "error", err)
+		}
 		if time.Since(started) > time.Minute {
 			backoff = time.Second
 		}

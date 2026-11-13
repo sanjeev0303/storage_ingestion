@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"fmt"
 	"strconv"
 	"strings"
@@ -62,6 +63,11 @@ type Auth struct {
 	// SAMLACSURL is where identity providers post SAML responses: the
 	// console's assertion consumer route. Empty turns SAML off.
 	SAMLACSURL string
+
+	// APITokenPepper keys the HMAC that API tokens are stored as, so a
+	// copy of the token table, or a row written into it, is no use without
+	// it. Empty stores and finds tokens by plain SHA-256, as before.
+	APITokenPepper []byte
 }
 
 // RateRule allows Requests per Window.
@@ -161,6 +167,16 @@ func LoadSecurity() (Security, error) {
 	s.Auth.SelfRegistration = strings.EqualFold(getEnv("AUTH_SELF_REGISTRATION", "false"), "true")
 	s.Auth.SSORedirectURIs = splitList(getEnv("AUTH_SSO_REDIRECT_URIS", ""))
 	s.Auth.SAMLACSURL = strings.TrimSpace(getEnv("AUTH_SAML_ACS_URL", ""))
+	if raw := strings.TrimSpace(getEnv("API_TOKEN_PEPPER", "")); raw != "" {
+		pepper, err := base64.StdEncoding.DecodeString(raw)
+		if err != nil {
+			pepper, err = base64.URLEncoding.DecodeString(raw)
+		}
+		if err != nil || len(pepper) < 32 {
+			return Security{}, fmt.Errorf("API_TOKEN_PEPPER must be the base64 of at least 32 random bytes")
+		}
+		s.Auth.APITokenPepper = pepper
+	}
 
 	s.Rates = map[string]RateRule{}
 	for op, fallback := range defaultRates {

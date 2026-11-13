@@ -141,7 +141,7 @@ func (s *Service) restores(ctx context.Context, st *Stats) error {
 
 func (s *Service) advance(ctx context.Context, x model.ArchiveRestore, st *Stats) error {
 	fail := func(reason string) error {
-		x.State, x.Error, x.UpdatedAt = "FAILED", reason, s.now()
+		x.State, x.Error, x.UpdatedAt = model.RestoreFailed, reason, s.now()
 		st.RestoresFailed++
 		return s.deps.Store.UpdateRestore(ctx, x)
 	}
@@ -170,18 +170,18 @@ func (s *Service) advance(ctx context.Context, x model.ArchiveRestore, st *Stats
 	if !ok || !model.ArchiveNeedsRestore(provider, a.StorageTier) {
 		// Nothing to restore: the object reads as it is.
 		now := s.now()
-		x.State, x.ReadyAt, x.UpdatedAt = "READY", &now, now
+		x.State, x.ReadyAt, x.UpdatedAt = model.RestoreReady, &now, now
 		st.RestoresReady++
 		return s.deps.Store.UpdateRestore(ctx, x)
 	}
-	if x.State == "PENDING" {
+	if x.State == model.RestorePending {
 		if err := tierer.Restore(ctx, bucket, key, version, x.Days, x.Speed); err != nil {
 			if retry.IsPermanent(err) {
 				return fail("the provider refused the restore: " + retry.Sanitize(err))
 			}
 			return nil
 		}
-		x.State, x.UpdatedAt = "RESTORING", s.now()
+		x.State, x.UpdatedAt = model.RestoreRestoring, s.now()
 		st.RestoresStarted++
 		return s.deps.Store.UpdateRestore(ctx, x)
 	}
@@ -207,7 +207,7 @@ func (s *Service) advance(ctx context.Context, x model.ArchiveRestore, st *Stats
 	if err != nil {
 		return err
 	}
-	x.State, x.ReadyAt, x.ReadableUntil, x.UpdatedAt = "READY", &now, until, now
+	x.State, x.ReadyAt, x.ReadableUntil, x.UpdatedAt = model.RestoreReady, &now, until, now
 	st.RestoresReady++
 	s.deps.Log.Info("archived asset readable", "tenant_id", a.TenantID, "asset_id", a.ID, "until", until.Format(time.RFC3339))
 	return s.deps.Store.UpdateRestore(ctx, x)

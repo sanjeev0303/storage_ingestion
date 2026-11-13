@@ -1,6 +1,7 @@
 import base64
 import io
 import json
+import pickle
 import tarfile
 import unittest
 
@@ -111,6 +112,13 @@ class ShardStreamTest(unittest.TestCase):
         self.assertEqual(picked, [p for p in paths if v2.wants(p)])
         self.assertTrue(60 < len(picked) < 140, len(picked))
         self.assertTrue(v1.check("not-sampled", b"x", "wrong") or v1.wants("not-sampled"))
+
+    def test_a_verifier_is_copied_to_workers_with_a_lock_of_its_own(self):
+        v = shards.Verifier()
+        v.fail("a", "sha256 mismatch")
+        copy = pickle.loads(pickle.dumps(v))
+        copy.fail("b", "sha256 mismatch")
+        self.assertEqual((v.failed, copy.failed, len(copy.failures)), (1, 2, 2))
 
     def test_a_cut_stream_is_never_taken_as_complete(self):
         self.cut = True

@@ -131,11 +131,19 @@ func (s *Service) postureAfterTest(ctx context.Context, c model.StorageConnectio
 	return &report
 }
 
-// recordTest stores a test's outcome and audits it.
+// recordTest stores a test's outcome and audits it. The outcome of a
+// credential replaced while it ran is dropped: it says nothing of the new one.
 func (s *Service) recordTest(ctx context.Context, p model.Principal, c model.StorageConnection, result TestResult, probe bool) (model.StorageConnection, TestResult, error) {
 	stored, err := s.deps.Connections.RecordTest(ctx, p.TenantID, c.ID, interfaces.ConnectionTestRecord{
 		OK: result.OK, ErrorCategory: result.Category, Capabilities: result.Capabilities, At: result.TestedAt,
+		CredentialVersion: c.CredentialVersion,
 	})
+	if errors.Is(err, model.ErrCredentialChanged) {
+		s.deps.Log.Info("connection test result dropped: the credentials changed while it ran", "connection_id", c.ID,
+			"tested_version", c.CredentialVersion)
+		latest, getErr := s.deps.Connections.GetConnection(ctx, p.TenantID, c.ID)
+		return latest, result, getErr
+	}
 	if err != nil {
 		return model.StorageConnection{}, result, err
 	}
@@ -162,6 +170,9 @@ func (s *Service) runTest(ctx context.Context, c model.StorageConnection, secret
 // check runs a connection test. Its error is the platform's own failure
 // (the database); the provider's failures are in the result.
 func (s *Service) check(ctx context.Context, c model.StorageConnection, build func(context.Context) (interfaces.StorageProvider, func(), error), probe bool) (TestResult, error) {
+	if err := s.throttleProbe(c.TenantID); err != nil {
+		return TestResult{}, err
+	}
 	held, err := s.deps.Connections.HeldObject(ctx, c.TenantID, c.ID)
 	if err != nil {
 		return TestResult{}, err

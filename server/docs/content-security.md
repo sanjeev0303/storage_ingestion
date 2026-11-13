@@ -106,7 +106,7 @@ per asset (partial unique index).
 
 | Status | Meaning | Leaves by |
 |---|---|---|
-| HELD | asset kept out of delivery; job EXHAUSTED | job succeeds after `-requeue` (RELEASED), or is rejected (REJECTED) |
+| HELD | asset kept out of delivery; job EXHAUSTED | job succeeds after `-requeue` (RELEASED), or is rejected (REJECTED). A requeue needs the asset still `QUARANTINED` or `PROCESSING`, checked in the statement that requeues it, and a deletion checks the job again under the asset's lock: a requeue and a deletion never both win |
 | RELEASED | held asset later passed every check | terminal |
 | REJECTED | permanent; object kept until `retain_until` for investigation | purge after `QUARANTINE_RETENTION` (PURGED) |
 | PURGED | quarantined object deleted | terminal |

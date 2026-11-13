@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
 )
 
@@ -39,5 +40,50 @@ func (db *DB) OperationsStatus(ctx context.Context, tenantID string, now time.Ti
 		return model.OperationsStatus{}, fmt.Errorf("operations status: %w", err)
 	}
 	status.OldestProcessingWait = time.Duration(oldestSeconds * float64(time.Second))
+
+	status.Workers, err = db.workerHeartbeats(ctx, now)
+	if err != nil {
+		return model.OperationsStatus{}, err
+	}
 	return status, nil
+}
+
+// workerHeartbeats reads the heartbeats of the last day, newest first.
+// Older rows are processes that stopped long ago.
+func (db *DB) workerHeartbeats(ctx context.Context, now time.Time) ([]model.WorkerHeartbeat, error) {
+	rows, err := db.Pool.Query(ctx, `
+		SELECT kind, instance, started_at, last_seen_at
+		FROM worker_heartbeats
+		WHERE last_seen_at > $1
+		ORDER BY kind, last_seen_at DESC
+	`, now.Add(-24*time.Hour))
+	if err != nil {
+		return nil, fmt.Errorf("worker heartbeats: %w", err)
+	}
+	return collect(rows, func(row pgx.Row) (model.WorkerHeartbeat, error) {
+		var h model.WorkerHeartbeat
+		err := row.Scan(&h.Kind, &h.Instance, &h.StartedAt, &h.LastSeenAt)
+		return h, err
+	})
+}
+
+// BeatWorker records that a worker process is alive.
+func (db *DB) BeatWorker(ctx context.Context, kind, instance string, startedAt, now time.Time) error {
+	_, err := db.Pool.Exec(ctx, `
+		INSERT INTO worker_heartbeats (kind, instance, started_at, last_seen_at)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (kind, instance) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at
+	`, kind, instance, startedAt, now)
+	if err != nil {
+		return fmt.Errorf("worker heartbeat: %w", err)
+	}
+	return nil
+}
+
+// PruneWorkerHeartbeats deletes the rows of processes silent since before.
+func (db *DB) PruneWorkerHeartbeats(ctx context.Context, before time.Time) error {
+	if _, err := db.Pool.Exec(ctx, `DELETE FROM worker_heartbeats WHERE last_seen_at < $1`, before); err != nil {
+		return fmt.Errorf("prune worker heartbeats: %w", err)
+	}
+	return nil
 }

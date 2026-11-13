@@ -28,7 +28,7 @@ func (r *StreamingRepository) Layout(ctx context.Context, tenantID, versionID, a
 	rows, err := r.db.Pool.Query(ctx, `
 		SELECT vm.ordinal, vm.path, vm.asset_id, vm.size_bytes, COALESCE(vm.checksum_sha256, ''), COALESCE(e.pack_id, '')
 		FROM dataset_version_members vm
-		JOIN assets a ON a.id = vm.asset_id AND a.tenant_id = vm.tenant_id AND a.status = 'AVAILABLE'
+		JOIN assets a ON a.id = vm.asset_id AND a.tenant_id = vm.tenant_id AND a.status = 'AVAILABLE' AND a.blocked_reason IS NULL
 		LEFT JOIN pack_entries e ON e.asset_id = vm.asset_id AND e.tenant_id = vm.tenant_id AND e.state = 'PUBLISHED'
 		WHERE vm.tenant_id = $1 AND vm.version_id = $2
 		  AND (vm.path COLLATE "C", vm.ordinal) > ($3 COLLATE "C", $4)

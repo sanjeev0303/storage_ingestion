@@ -1,6 +1,6 @@
 import { describeError, isApiError } from "@/lib/api/errors";
 import { splitList } from "@/lib/utils/forgive";
-import type { LifecycleStatus, MemberRequest, Split, ValidationStatus } from "./types";
+import type { LifecycleStatus, ManifestImport, MemberRequest, Split, ValidationStatus } from "./types";
 
 export const NAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 export const TAG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
@@ -89,6 +89,17 @@ export function parseMemberLines(text: string) {
   if (members.length === 0) return { members, error: "Paste at least one JSON line." };
   if (members.length > 1000) return { members, error: "A single request takes at most 1000 members." };
   return { members, error: null };
+}
+
+// A staged import waits for its manifest only while the upload link lasts
+// (15 minutes from creation). After that nothing will arrive, so it is not
+// worth polling for.
+const UPLOAD_LINK_MS = 15 * 60_000;
+
+export function uploadWaitOver(job: ManifestImport, now: number) {
+  if (job.state !== "AWAITING_UPLOAD") return false;
+  const deadline = job.upload_expires_at ? Date.parse(job.upload_expires_at) : Date.parse(job.created_at) + UPLOAD_LINK_MS;
+  return now > deadline;
 }
 
 export function isCode(error: unknown, code: string) {

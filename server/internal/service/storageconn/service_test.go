@@ -15,12 +15,14 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sanjeev0303/object-storage-platform/internal/infrastructure/storage/memory"
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/config"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/netguard"
+	"github.com/sanjeev0303/object-storage-platform/internal/platform/ratelimit"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/secretbox"
 	memoryrepo "github.com/sanjeev0303/object-storage-platform/internal/repository/memory"
 )
@@ -179,16 +181,31 @@ func TestCreateSealsCredentialsBoundToTheConnection(t *testing.T) {
 	if bytes.Contains(sealed.Ciphertext, []byte(secrets.SecretAccessKey)) {
 		t.Fatal("the credential is stored in plaintext")
 	}
-	plain, err := f.keyring.Open(secretbox.Sealed{KeyVersion: sealed.KeyVersion, Nonce: sealed.Nonce, Ciphertext: sealed.Ciphertext}, c.CredentialAAD(1))
+	// An envelope: the credential has its own data key, and only that key
+	// is sealed by the master key.
+	stored := secretbox.Sealed{KeyVersion: sealed.KeyVersion, Nonce: sealed.Nonce, Ciphertext: sealed.Ciphertext, WrappedKey: sealed.WrappedKey}
+	if len(sealed.WrappedKey) == 0 {
+		t.Fatal("the credential is not in an envelope")
+	}
+	if _, err := f.keyring.Open(stored, c.CredentialAAD(1)); err == nil {
+		t.Fatal("the master key alone opened the credential")
+	}
+	envelope := secretbox.NewEnvelope(f.keyring)
+	plain, err := envelope.Open(stored, c.CredentialAAD(1))
 	if err != nil || !bytes.Contains(plain, []byte(secrets.SecretAccessKey)) {
 		t.Fatalf("the sealed credential opens with its own associated data: %v", err)
 	}
 	other := c
 	other.TenantID = "t2"
-	if _, err := f.keyring.Open(secretbox.Sealed{KeyVersion: sealed.KeyVersion, Nonce: sealed.Nonce, Ciphertext: sealed.Ciphertext}, other.CredentialAAD(1)); err == nil {
+	if _, err := envelope.Open(stored, other.CredentialAAD(1)); err == nil {
 		t.Fatal("another tenant's associated data must not open it")
 	}
-	if _, err := f.keyring.Open(secretbox.Sealed{KeyVersion: sealed.KeyVersion, Nonce: sealed.Nonce, Ciphertext: sealed.Ciphertext}, c.CredentialAAD(2)); err == nil {
+	other = c
+	other.ID = "sc_other"
+	if _, err := envelope.Open(stored, other.CredentialAAD(1)); err == nil {
+		t.Fatal("another connection's associated data must not open it")
+	}
+	if _, err := envelope.Open(stored, c.CredentialAAD(2)); err == nil {
 		t.Fatal("another credential version's associated data must not open it")
 	}
 	f.leaks(t, c)
@@ -506,5 +523,66 @@ func TestSecretsNeverPrint(t *testing.T) {
 	slog.New(slog.NewJSONHandler(&buf, nil)).Info("x", "secrets", secrets)
 	if strings.Contains(buf.String(), secrets.SecretAccessKey) {
 		t.Fatalf("logged: %s", buf.String())
+	}
+}
+
+// Some S3-compatible services echo the access key, or worse, in their
+// error messages. A failing test must not pass that on anywhere.
+func TestAFailingTestNeverRepeatsTheProvidersMessage(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	c, err := f.svc.Create(ctx, admin, minioInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.clients.fail = fmt.Errorf("SignatureDoesNotMatch: AWSAccessKeyId %s, secret %s: %w",
+		secrets.AccessKeyID, secrets.SecretAccessKey, interfaces.ErrStorageCredentialsRejected)
+	stored, result, err := f.svc.Test(ctx, admin, c.ID, true)
+	if err != nil || result.OK || result.Category != CategoryInvalidCredentials {
+		t.Fatalf("test: %+v %v", result, err)
+	}
+	f.leaks(t, stored, result)
+
+	rotated := model.StorageSecrets{AccessKeyID: "AKIDROTATED", SecretAccessKey: "rotated-secret-456"}
+	f.clients.fail = fmt.Errorf("bad key rotated-secret-456: %w", interfaces.ErrStorageCredentialsRejected)
+	_, result, err = f.svc.RotateCredentials(ctx, admin, c.ID, c.Revision, rotated)
+	if !errors.Is(err, ErrTestFailed) {
+		t.Fatalf("rotate: %v", err)
+	}
+	f.leaks(t, result, err.Error())
+}
+
+func TestConnectionTestsAreRateLimitedPerOrganization(t *testing.T) {
+	f := newFixture(t)
+	f.svc.deps.Limiter = ratelimit.New()
+	f.svc.deps.ProbeRule = ratelimit.Rule{Requests: 2, Window: time.Minute}
+	ctx := context.Background()
+	c, err := f.svc.Create(ctx, admin, minioInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.svc.Test(ctx, admin, c.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	c, _ = f.repo.GetConnection(ctx, "t1", c.ID)
+	rotated := model.StorageSecrets{AccessKeyID: "AKIDROTATED", SecretAccessKey: "rotated-secret-456"}
+	if _, _, err := f.svc.RotateCredentials(ctx, admin, c.ID, c.Revision, rotated); err != nil {
+		t.Fatal(err)
+	}
+	// Tests, rotations and the rest share the organization's budget.
+	var limited *model.RateLimitError
+	if _, _, err := f.svc.Test(ctx, admin, c.ID, false); !errors.As(err, &limited) {
+		t.Fatalf("a third test in the window: %v", err)
+	}
+	if _, err := f.svc.CheckPosture(ctx, admin, c.ID, false); !errors.As(err, &limited) && !errors.Is(err, ErrPostureOff) {
+		t.Fatalf("a posture check in the window: %v", err)
+	}
+	// Another organization has its own.
+	other, err := f.svc.Create(ctx, stranger, minioInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.svc.Test(ctx, stranger, other.ID, false); err != nil {
+		t.Fatalf("another organization: %v", err)
 	}
 }

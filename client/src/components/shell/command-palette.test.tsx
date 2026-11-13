@@ -20,6 +20,17 @@ describe("CommandPalette", () => {
     expect(push).toHaveBeenCalledWith("/app/audit");
   });
 
+  it("opens empty again after being closed with Ctrl K", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<CommandPalette />, { permissions: ["datasets.read", "audit.read"] });
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.type(screen.getByRole("combobox"), "aud");
+    await user.keyboard("{Control>}k{/Control}");
+    await user.keyboard("{Control>}k{/Control}");
+    expect(screen.getByRole("combobox")).toHaveValue("");
+  });
+
   it("hides pages the role cannot open", async () => {
     const user = userEvent.setup();
     renderWithProviders(<CommandPalette />, { permissions: ["datasets.read"] });

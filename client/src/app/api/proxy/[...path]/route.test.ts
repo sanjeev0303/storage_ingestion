@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { http, HttpResponse } from "msw";
 import { NextRequest } from "next/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { server } from "@/test/server";
 import { DELETE, GET, POST } from "./route";
 
@@ -266,5 +266,115 @@ describe("API proxy", () => {
     });
     await GET(req, { params: Promise.resolve({ path: ["auth", "login?x"] }) });
     expect(seenPath).toBe("/api/v1/auth/login%3Fx");
+  });
+  it("renews before reading the body, so a slow body never presents a stale refresh token", async () => {
+    const order: string[] = [];
+    server.use(
+      http.post(`${BACKEND}/auth/refresh`, () => {
+        order.push("refresh");
+        return HttpResponse.json(freshTokens("early"));
+      }),
+      http.post(`${BACKEND}/uploads`, () => HttpResponse.json({}, { status: 201 })),
+    );
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        order.push("body");
+        controller.enqueue(new TextEncoder().encode("{}"));
+        controller.close();
+      },
+    }, { highWaterMark: 0 });
+    const req = new NextRequest("http://localhost:3100/api/proxy/uploads", {
+      method: "POST",
+      headers: { cookie: "orb_rt=srt_slow_body", origin: "http://localhost:3100" },
+      body,
+      duplex: "half",
+    } as ConstructorParameters<typeof NextRequest>[1]);
+    const res = await POST(req, { params: Promise.resolve({ path: ["uploads"] }) });
+    expect(res.status).toBe(201);
+    expect(order[0]).toBe("refresh");
+  });
+
+  it("asks for a retry instead of presenting a refresh token that arrived too long ago", async () => {
+    let refreshed = false;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      server.use(
+        http.post(`${BACKEND}/auth/refresh`, () => {
+          refreshed = true;
+          return HttpResponse.json(freshTokens("late"));
+        }),
+        http.post(`${BACKEND}/uploads`, () => {
+          // The request took longer than the window in which a concurrent
+          // rotation's answer is still cached.
+          vi.setSystemTime(Date.now() + 6_000);
+          return HttpResponse.json({ error: "no", code: "unauthenticated" }, { status: 401 });
+        }),
+      );
+      const res = await call(POST, "uploads", {
+        method: "POST",
+        body: "{}",
+        cookie: "orb_at=sat_expired_in_flight; orb_rt=srt_late",
+        headers: { origin: "http://localhost:3100" },
+      });
+      expect(res.status).toBe(503);
+      expect(refreshed).toBe(false);
+      expect(res.headers.getSetCookie()).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("answers 503 and does not present the refresh token again after a refresh got no answer", async () => {
+    let calls = 0;
+    server.use(
+      http.post(`${BACKEND}/auth/refresh`, () => {
+        calls++;
+        return new HttpResponse(null, { status: 502 });
+      }),
+    );
+    const first = await call(GET, "catalog/objects", { cookie: "orb_rt=srt_lost_answer" });
+    const second = await call(GET, "catalog/objects", { cookie: "orb_rt=srt_lost_answer" });
+    expect(first.status).toBe(503);
+    expect(second.status).toBe(503);
+    expect(calls).toBe(1);
+    expect(first.headers.getSetCookie()).toEqual([]);
+  });
+
+  it("keeps the session on a 401 that is not about the session, such as a wrong current password", async () => {
+    let refreshed = false;
+    server.use(
+      http.post(`${BACKEND}/auth/refresh`, () => {
+        refreshed = true;
+        return HttpResponse.json(freshTokens("pw"));
+      }),
+      http.post(`${BACKEND}/auth/password`, () =>
+        HttpResponse.json({ error: "invalid credentials", code: "invalid_credentials" }, { status: 401 }),
+      ),
+    );
+    const res = await call(POST, "auth/password", {
+      method: "POST",
+      body: "{}",
+      cookie: "orb_at=sat_pw; orb_rt=srt_pw",
+      headers: { origin: "http://localhost:3100" },
+    });
+    expect(res.status).toBe(401);
+    expect(await res.json()).toMatchObject({ code: "invalid_credentials" });
+    expect(refreshed).toBe(false);
+    expect(res.headers.getSetCookie()).toEqual([]);
+  });
+
+  it("clears the session, and sets no new cookies, when the API refuses even the renewed token", async () => {
+    server.use(
+      http.post(`${BACKEND}/auth/refresh`, () => HttpResponse.json(freshTokens("refused"))),
+      http.get(`${BACKEND}/catalog/objects`, () =>
+        HttpResponse.json({ error: "session revoked", code: "unauthenticated" }, { status: 401 }),
+      ),
+    );
+    const res = await call(GET, "catalog/objects", { cookie: "orb_at=sat_old_r; orb_rt=srt_refused" });
+    expect(res.status).toBe(401);
+    const cookies = res.headers.getSetCookie().join(" ");
+    expect(cookies).not.toContain("sat_refused");
+    expect(cookies).toContain("orb_at=;");
+    expect(cookies).toContain("orb_rt=;");
   });
 });

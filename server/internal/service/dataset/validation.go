@@ -222,7 +222,8 @@ func (s *Service) Findings(ctx context.Context, p model.Principal, reportID, sev
 
 // RunValidation runs a validation named by its event. The event's tenant
 // must be the job's.
-func (s *Service) RunValidation(ctx context.Context, owner, tenantID, jobID string) (string, error) {
+func (s *Service) RunValidation(ctx context.Context, worker, tenantID, jobID string) (string, error) {
+	owner := claimOwner(worker)
 	jobs, err := s.deps.Repo.ClaimValidations(ctx, owner, jobID, s.now(), s.cfg.Lease, s.cfg.RunningPerTenant, 1)
 	if err != nil {
 		return "", err
@@ -240,7 +241,8 @@ func (s *Service) RunValidation(ctx context.Context, owner, tenantID, jobID stri
 
 // RunDueValidations claims due validations, up to slots, and runs them
 // side by side.
-func (s *Service) RunDueValidations(ctx context.Context, owner string, slots int) (int, error) {
+func (s *Service) RunDueValidations(ctx context.Context, worker string, slots int) (int, error) {
+	owner := claimOwner(worker)
 	jobs, err := s.deps.Repo.ClaimValidations(ctx, owner, "", s.now(), s.cfg.Lease, s.cfg.RunningPerTenant, slots)
 	if err != nil {
 		return 0, err
@@ -296,6 +298,14 @@ func (s *Service) runValidation(ctx context.Context, owner string, job model.Val
 		return note
 	case errors.Is(err, model.ErrValidationState):
 		return "lost the validation's lease"
+	case errors.Is(ctx.Err(), context.Canceled):
+		// Shutting down: the next worker carries on from the checkpoint,
+		// and this attempt is not counted against the job. (A handler that
+		// ran out of time is a failed attempt, and is retried as one.)
+		if rerr := s.deps.Repo.ReleaseValidation(context.WithoutCancel(ctx), job.ID, owner, s.now()); rerr != nil {
+			log.Warn("releasing an interrupted validation failed", "error", retry.Sanitize(rerr))
+		}
+		return "interrupted by shutdown"
 	case retry.IsPermanent(err):
 		return fail(retry.Sanitize(err))
 	}

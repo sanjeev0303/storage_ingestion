@@ -43,4 +43,4 @@ Text contamination is compared where the text is: `osp leakage EVAL_DATASET EVAL
 
 ## Releases
 
-`PUT /api/v1/datasets/{id}/versions/{versionID}/release {"label", "notes"}` (`datasets.manage`) names a version a release, once: `DR1`, `2026.10`, `v3` (1 to 40 letters, digits, `.`, `_`, `-`, unique in the dataset). `GET /api/v1/datasets/{id}/releases` lists them in order. `GET /api/v1/datasets/{id}/releases/{label}/diff[?against=LABEL]` compares a release with the one before it: files added, removed, changed and relabelled, the first 50 of them, and the drift between their profiles.
+`PUT /api/v1/datasets/{id}/versions/{versionID}/release {"label", "notes"}` (`datasets.manage`) names a version a release, once: `DR1`, `2026.10`, `v3` (1 to 40 letters, digits, `.`, `_`, `-`, unique in the dataset). An expired version (docs/tiering.md) cannot be released: **409** `version_expired`. `GET /api/v1/datasets/{id}/releases` lists them in order. `GET /api/v1/datasets/{id}/releases/{label}/diff[?against=LABEL]` compares a release with the one before it: files added, removed, changed and relabelled, the first 50 of them, and the drift between their profiles.

@@ -99,25 +99,44 @@ func (r *GovernanceRepository) ListApprovals(ctx context.Context, tenantID, stat
 }
 
 // Decide moves a PENDING, unexpired approval to state, once: of two
-// deciders racing, one wins and the other gets ErrApprovalDecided.
+// deciders racing, one wins and the other gets ErrApprovalDecided. Approving
+// (moving to EXECUTING) is never done by the member who asked. An approval
+// past its expiry is never decided: it is marked EXPIRED instead.
 func (r *GovernanceRepository) Decide(ctx context.Context, tenantID, id, state, by, note string, at time.Time) (model.Approval, error) {
 	a, err := scanApproval(r.db.Pool.QueryRow(ctx, `
 		UPDATE governance_approvals SET state = $3, decided_by = $4, decision_note = $5, decided_at = $6
 		WHERE tenant_id = $1 AND id = $2 AND state = 'PENDING' AND expires_at > $6
+		  AND ($3 <> 'EXECUTING' OR requested_by <> $4)
 		RETURNING `+approvalColumns, tenantID, id, state, by, note, at))
-	if errors.Is(err, model.ErrApprovalNotFound) {
-		if _, getErr := r.GetApproval(ctx, tenantID, id); getErr != nil {
-			return a, getErr
-		}
-		return a, model.ErrApprovalDecided
+	if !errors.Is(err, model.ErrApprovalNotFound) {
+		return a, err
 	}
-	return a, err
+	if _, err := r.db.Pool.Exec(ctx, `
+		UPDATE governance_approvals SET state = 'EXPIRED', decided_at = $3
+		WHERE tenant_id = $1 AND id = $2 AND state = 'PENDING' AND expires_at <= $3`, tenantID, id, at); err != nil {
+		return a, fmt.Errorf("expire approval: %w", err)
+	}
+	current, err := r.GetApproval(ctx, tenantID, id)
+	if err != nil {
+		return a, err
+	}
+	if current.State == model.ApprovalPending && current.RequestedBy == by {
+		return a, model.ErrSelfApproval
+	}
+	return a, model.ErrApprovalDecided
 }
 
-// Finish records how an executed approval ended.
+// Finish records how an executing approval ended, once.
 func (r *GovernanceRepository) Finish(ctx context.Context, id, state, result string) error {
-	_, err := r.db.Pool.Exec(ctx, `UPDATE governance_approvals SET state = $2, result = $3 WHERE id = $1`, id, state, result)
-	return err
+	tag, err := r.db.Pool.Exec(ctx, `UPDATE governance_approvals SET state = $2, result = $3 WHERE id = $1 AND state = 'EXECUTING'`,
+		id, state, result)
+	if err != nil {
+		return fmt.Errorf("finish approval: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("finish approval %s: %w", id, model.ErrApprovalDecided)
+	}
+	return nil
 }
 
 // PutCertificate stores a deletion's certificate once; a retried

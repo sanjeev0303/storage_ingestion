@@ -179,9 +179,17 @@ func (r *ErasureRepository) Successor(ctx context.Context, tenantID, versionID s
 		WHERE tenant_id = $1 AND id = $2`, tenantID, versionID).Scan(&datasetID, &version, &superseded); err != nil {
 		return model.Successor{}, false, fmt.Errorf("read version: %w", err)
 	}
-	d, err := lockDraft(ctx, tx, tenantID, datasetID)
+	// Locked without lockDraft's archive check: an erasure supersedes
+	// snapshots of archived datasets too.
+	var nextVersion int
+	var currentVersionID string
+	err = tx.QueryRow(ctx, `SELECT next_version, COALESCE(current_version_id, '') FROM datasets WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
+		tenantID, datasetID).Scan(&nextVersion, &currentVersionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return model.Successor{}, false, model.ErrDatasetNotFound
+	}
 	if err != nil {
-		return model.Successor{}, false, err
+		return model.Successor{}, false, fmt.Errorf("lock dataset: %w", err)
 	}
 	var removed int64
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM dataset_version_members WHERE tenant_id = $1 AND version_id = $2 AND asset_id = ANY($3)`,
@@ -197,7 +205,7 @@ func (r *ErasureRepository) Successor(ctx context.Context, tenantID, versionID s
 		                              created_by, created_at)
 		SELECT $3, tenant_id, dataset_id, $4, 'FINALIZED', 0, 0, '', manifest_format, members_revision, profile_id, profile_version,
 		       config, id, $5, $6
-		FROM dataset_versions WHERE tenant_id = $1 AND id = $2`, tenantID, versionID, successorID, d.NextVersion, actor, now); err != nil {
+		FROM dataset_versions WHERE tenant_id = $1 AND id = $2`, tenantID, versionID, successorID, nextVersion, actor, now); err != nil {
 		return model.Successor{}, false, fmt.Errorf("create successor: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
@@ -219,12 +227,18 @@ func (r *ErasureRepository) Successor(ctx context.Context, tenantID, versionID s
 		return model.Successor{}, false, fmt.Errorf("seal successor: %w", err)
 	}
 	reason := "erasure " + erasureID
-	if _, err := tx.Exec(ctx, `UPDATE dataset_versions SET superseded_by = $3, superseded_at = $4, superseded_reason = $5
-		WHERE tenant_id = $1 AND id = $2`, tenantID, versionID, successorID, now, reason); err != nil {
+	// The superseded check above ran before the dataset lock; a successor
+	// made meanwhile wins, and this one is rolled back.
+	tag, err := tx.Exec(ctx, `UPDATE dataset_versions SET superseded_by = $3, superseded_at = $4, superseded_reason = $5
+		WHERE tenant_id = $1 AND id = $2 AND superseded_at IS NULL`, tenantID, versionID, successorID, now, reason)
+	if err != nil {
 		return model.Successor{}, false, fmt.Errorf("supersede version: %w", err)
 	}
+	if tag.RowsAffected() == 0 {
+		return model.Successor{}, false, nil
+	}
 	current := ""
-	if d.CurrentVersionID == versionID {
+	if currentVersionID == versionID {
 		current = successorID
 	}
 	if _, err := tx.Exec(ctx, `UPDATE datasets SET next_version = next_version + 1, current_version_id = COALESCE(NULLIF($3, ''), current_version_id),
@@ -249,8 +263,33 @@ func (r *ErasureRepository) Successor(ctx context.Context, tenantID, versionID s
 		SuccessorVersion: v.Version, Removed: removed}, true, nil
 }
 
+// SuccessorsOf lists the snapshots an erasure superseded, read back from
+// the versions themselves, so a preparation run again (or two at once)
+// reports every successor, whichever run made it.
+func (r *ErasureRepository) SuccessorsOf(ctx context.Context, tenantID, erasureID string) ([]model.Successor, error) {
+	rows, err := r.db.Pool.Query(ctx, `
+		SELECT v.dataset_id, v.id, v.version, s.id, s.version, v.member_count - s.member_count
+		FROM dataset_versions v JOIN dataset_versions s ON s.tenant_id = v.tenant_id AND s.id = v.superseded_by
+		WHERE v.tenant_id = $1 AND v.superseded_reason = $2
+		ORDER BY v.dataset_id, v.version`, tenantID, "erasure "+erasureID)
+	if err != nil {
+		return nil, fmt.Errorf("list successors: %w", err)
+	}
+	defer rows.Close()
+	out := []model.Successor{}
+	for rows.Next() {
+		var s model.Successor
+		if err := rows.Scan(&s.DatasetID, &s.VersionID, &s.Version, &s.SuccessorID, &s.SuccessorVersion, &s.Removed); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // RemoveFromDrafts takes erased assets out of every draft: members pinned
-// to one, or following an object whose current version is one.
+// to one, or following an object whose current version is one. Run again,
+// it finds nothing left to remove.
 func (r *ErasureRepository) RemoveFromDrafts(ctx context.Context, tenantID string, erased []string, actor string, now time.Time) (int64, error) {
 	tx, err := r.db.Pool.Begin(ctx)
 	if err != nil {
@@ -349,14 +388,14 @@ func (r *ErasureRepository) TombstoneSeq(ctx context.Context, tenantID, erasureI
 
 const erasureColumns = `id, tenant_id, kind, state, reason, reference, institution, subject_ids, subject_hashes, sha256s, object_ids,
 	subject_key, plan, successors, requested_by, COALESCE(approved_by, ''), approved_note, approved_at, COALESCE(executed_by, ''),
-	executed_at, completed_at, note, certificate_body IS NOT NULL, created_at, updated_at`
+	executed_at, prepared_at, completed_at, note, certificate_body IS NOT NULL, created_at, updated_at`
 
 func scanErasure(row pgx.Row) (model.Erasure, error) {
 	var e model.Erasure
 	var subjects, hashes, sums, objects, plan, successors []byte
 	err := row.Scan(&e.ID, &e.TenantID, &e.Kind, &e.State, &e.Reason, &e.Reference, &e.Institution, &subjects, &hashes, &sums, &objects,
 		&e.Selector.SubjectKey, &plan, &successors, &e.RequestedBy, &e.ApprovedBy, &e.ApprovedNote, &e.ApprovedAt, &e.ExecutedBy,
-		&e.ExecutedAt, &e.CompletedAt, &e.Note, &e.Certified, &e.CreatedAt, &e.UpdatedAt)
+		&e.ExecutedAt, &e.PreparedAt, &e.CompletedAt, &e.Note, &e.Certified, &e.CreatedAt, &e.UpdatedAt)
 	if err != nil {
 		return e, err
 	}
@@ -415,7 +454,8 @@ func (r *ErasureRepository) List(ctx context.Context, tenantID, state string, li
 	return out, rows.Err()
 }
 
-// Open lists erasures still deleting or waiting, for the worker.
+// Open lists erasures still deleting, waiting or failed, for the worker,
+// those it looked at longest ago first.
 func (r *ErasureRepository) Open(ctx context.Context, limit int) ([]model.Erasure, error) {
 	rows, err := r.db.Pool.Query(ctx, `SELECT `+erasureColumns+` FROM erasure_requests
 		WHERE state IN ('DELETING', 'WAITING_ON_HOLD', 'FAILED') ORDER BY updated_at LIMIT $1`, limit)
@@ -434,22 +474,80 @@ func (r *ErasureRepository) Open(ctx context.Context, limit int) ([]model.Erasur
 	return out, rows.Err()
 }
 
+// Touch marks an erasure looked at, so Open reaches the others before it
+// comes round again.
+func (r *ErasureRepository) Touch(ctx context.Context, tenantID, id string) error {
+	if _, err := r.db.Pool.Exec(ctx, `UPDATE erasure_requests SET updated_at = now() WHERE tenant_id = $1 AND id = $2`, tenantID, id); err != nil {
+		return fmt.Errorf("touch erasure: %w", err)
+	}
+	return nil
+}
+
 // Transition moves an erasure from one of the states to another,
-// atomically; false when it was not in any of them.
+// atomically; false when it was not in any of them. It writes only the
+// fields a transition changes: the plan, the executor and the successors
+// belong to Claim and SetPrepared, and a stale read must not undo them.
 func (r *ErasureRepository) Transition(ctx context.Context, tenantID, id string, from []string, to string, change func(*model.Erasure)) (bool, error) {
 	e, err := r.Get(ctx, tenantID, id)
 	if err != nil {
 		return false, err
 	}
 	change(&e)
-	tag, err := r.db.Pool.Exec(ctx, `UPDATE erasure_requests SET state = $4, plan = $5, successors = $6, approved_by = NULLIF($7, ''),
-		approved_note = $8, approved_at = $9, executed_by = NULLIF($10, ''), executed_at = $11, completed_at = $12, note = $13,
-		subject_ids = $14, updated_at = now()
+	tag, err := r.db.Pool.Exec(ctx, `UPDATE erasure_requests SET state = $4, approved_by = NULLIF($5, ''),
+		approved_note = $6, approved_at = $7, completed_at = $8, note = $9, subject_ids = $10, updated_at = now()
 		WHERE tenant_id = $1 AND id = $2 AND state = ANY($3)`,
-		tenantID, id, from, to, jsonOf(e.Plan), jsonOf(e.Successors), e.ApprovedBy, e.ApprovedNote, e.ApprovedAt, e.ExecutedBy,
-		e.ExecutedAt, e.CompletedAt, e.Note, jsonOf(e.Selector.SubjectIDs))
+		tenantID, id, from, to, e.ApprovedBy, e.ApprovedNote, e.ApprovedAt, e.CompletedAt, e.Note, jsonOf(e.Selector.SubjectIDs))
 	if err != nil {
 		return false, fmt.Errorf("update erasure: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// Claim moves an erasure from one of the states to DELETING before any of
+// its work is done, recording the plan and who executes it, and lists its
+// objects as items in the same transaction, so the worker never sees a
+// DELETING erasure without them. With secondPerson, only a request
+// approved by someone other than its requester is claimed. False when the
+// row did not qualify: cancelled, executed or unapproved meanwhile.
+func (r *ErasureRepository) Claim(ctx context.Context, tenantID, id string, from []string, secondPerson bool, plan model.ErasurePlan,
+	executor string, items []model.ErasureItem, now time.Time) (bool, error) {
+	tx, err := r.db.Pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	tag, err := tx.Exec(ctx, `UPDATE erasure_requests SET state = 'DELETING', plan = $5, executed_by = $6, executed_at = $7, updated_at = now()
+		WHERE tenant_id = $1 AND id = $2 AND state = ANY($3)
+		  AND (NOT $4 OR (approved_by IS NOT NULL AND approved_by <> requested_by))`,
+		tenantID, id, from, secondPerson, jsonOf(plan), executor, now)
+	if err != nil {
+		return false, fmt.Errorf("claim erasure: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return false, nil
+	}
+	for _, i := range items {
+		if _, err := tx.Exec(ctx, `INSERT INTO erasure_items (erasure_id, tenant_id, asset_id, object_id, object_version, path, sha256,
+			size_bytes, connection_id, state, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (erasure_id, asset_id) DO NOTHING`,
+			id, tenantID, i.AssetID, i.ObjectID, i.ObjectVersion, i.Path, i.SHA256, i.SizeBytes, i.ConnectionID, i.State, now); err != nil {
+			return false, fmt.Errorf("record erasure items: %w", err)
+		}
+	}
+	return true, tx.Commit(ctx)
+}
+
+// SetPrepared records the successor snapshots and marks the erasure
+// prepared, once its drafts are emptied too. False when it was prepared
+// already, by a concurrent run that recorded the same successors, or is
+// no longer open. Rows from before migration 000054 may be waiting or
+// failed and still unprepared, so those states qualify too.
+func (r *ErasureRepository) SetPrepared(ctx context.Context, tenantID, id string, successors []model.Successor, at time.Time) (bool, error) {
+	tag, err := r.db.Pool.Exec(ctx, `UPDATE erasure_requests SET successors = $3, prepared_at = $4, updated_at = now()
+		WHERE tenant_id = $1 AND id = $2 AND prepared_at IS NULL AND state IN ('DELETING', 'WAITING_ON_HOLD', 'FAILED')`,
+		tenantID, id, jsonOf(successors), at)
+	if err != nil {
+		return false, fmt.Errorf("record successors: %w", err)
 	}
 	return tag.RowsAffected() == 1, nil
 }
@@ -482,7 +580,8 @@ func (r *ErasureRepository) PutItems(ctx context.Context, tenantID, erasureID st
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 			ON CONFLICT (erasure_id, asset_id) DO UPDATE SET deletion_id = EXCLUDED.deletion_id, state = EXCLUDED.state,
 			    reason = EXCLUDED.reason, certificate_id = EXCLUDED.certificate_id, destroyed_at = EXCLUDED.destroyed_at,
-			    updated_at = EXCLUDED.updated_at`,
+			    updated_at = EXCLUDED.updated_at
+			WHERE erasure_items.state <> 'DESTROYED'`,
 			erasureID, tenantID, i.AssetID, i.ObjectID, i.ObjectVersion, i.Path, i.SHA256, i.SizeBytes, i.ConnectionID, i.DeletionID,
 			i.State, i.Reason, i.CertificateID, i.DestroyedAt, now)
 	}

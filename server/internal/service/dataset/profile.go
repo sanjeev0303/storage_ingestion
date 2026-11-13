@@ -26,6 +26,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
+	"github.com/sanjeev0303/object-storage-platform/internal/platform/csvlimit"
 )
 
 // Column profiling: what each column of a version's tables holds, kept
@@ -39,6 +40,7 @@ const (
 	profileColumns  = 500   // columns profiled per table
 	profileTables   = 500   // tables profiled per version
 	jsonLineMax     = 16 << 20
+	csvRecordMax    = 16 << 20 // one CSV/TSV record; encoding/csv holds it whole
 	parquetBatchRow = 8192
 )
 
@@ -284,7 +286,7 @@ func parseCell(s string) value {
 }
 
 func profileDelimited(r io.Reader, sep rune, t *tableStats) error {
-	cr := csv.NewReader(r)
+	cr := csv.NewReader(csvlimit.Reader(r, csvRecordMax))
 	cr.Comma = sep
 	cr.FieldsPerRecord = -1
 	cr.LazyQuotes = true

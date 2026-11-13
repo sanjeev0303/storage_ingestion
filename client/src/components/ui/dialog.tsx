@@ -58,6 +58,8 @@ type ConfirmProps = {
   onConfirm: () => Promise<unknown> | unknown;
   // Typing this word is required before the action is enabled. For irreversible actions.
   confirmText?: string;
+  // Keeps the action disabled, for example until a choice in the description is made.
+  confirmDisabled?: boolean;
 };
 
 export function ConfirmDialog({
@@ -68,11 +70,21 @@ export function ConfirmDialog({
   confirmLabel,
   onConfirm,
   confirmText,
+  confirmDisabled = false,
 }: ConfirmProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [typed, setTyped] = useState("");
-  const blocked = Boolean(confirmText) && typed.trim() !== confirmText;
+  const blocked = confirmDisabled || (Boolean(confirmText) && typed.trim() !== confirmText);
+
+  // Start clean every time it opens or closes, whether the dialog or the
+  // parent (through `open`) did it.
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    setError(null);
+    setTyped("");
+  }
 
   async function run() {
     setBusy(true);
@@ -93,10 +105,6 @@ export function ConfirmDialog({
       open={open}
       onOpenChange={(next) => {
         if (busy) return;
-        if (!next) {
-          setError(null);
-          setTyped("");
-        }
         onOpenChange(next);
       }}
     >

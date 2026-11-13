@@ -16,7 +16,8 @@ import { notify } from "@/components/ui/toast";
 import { useOrganizationId, useSession } from "@/lib/auth/session";
 import { orgKey } from "@/lib/query/keys";
 import { formatBytes, formatNumber } from "@/lib/utils/format";
-import { useDataset, useUpdateDataset, useVersions } from "@/features/datasets/hooks";
+import { isCode } from "@/features/datasets/helpers";
+import { useDataset, useRefreshDatasets, useUpdateDataset, useVersions } from "@/features/datasets/hooks";
 import type { Dataset } from "@/features/datasets/types";
 import { useStorageConnections } from "@/features/storage-connections/hooks";
 import { StorageLayoutPanel } from "@/features/streaming/components/storage-layout-panel";
@@ -73,7 +74,7 @@ export function ProtectionScreen({ id }: { id: string }) {
         <CleanPointPanel dataset={dataset.data} />
       </div>
       <div className="flex min-w-0 flex-col gap-6">
-        <SettingsPanel key={dataset.data.revision} dataset={dataset.data} />
+        <SettingsPanel dataset={dataset.data} />
         <StorageLayoutPanel datasetId={id} />
         <DatasetLifecycle datasetId={id} />
         <DatasetProvenance datasetId={id} />
@@ -128,10 +129,35 @@ function ReplicaPanel({ dataset }: { dataset: Dataset }) {
 }
 
 function SettingsPanel({ dataset }: { dataset: Dataset }) {
+  // The form restarts with the latest values after a save, or once a refused
+  // save has brought in a newer revision. A background refetch alone keeps the edits.
+  const [reloads, setReloads] = useState(0);
+  const [refusedRevision, setRefusedRevision] = useState<number | null>(null);
+  if (refusedRevision !== null && dataset.revision !== refusedRevision) {
+    setRefusedRevision(null);
+    setReloads(reloads + 1);
+  }
+  return <SettingsForm key={reloads} latest={dataset} onSaved={() => setReloads(reloads + 1)} onRefused={setRefusedRevision} />;
+}
+
+function SettingsForm({
+  latest,
+  onSaved,
+  onRefused,
+}: {
+  latest: Dataset;
+  onSaved: () => void;
+  onRefused: (revision: number) => void;
+}) {
   const { can } = useSession();
   const connections = useStorageConnections();
-  const update = useUpdateDataset(dataset.id);
-  const refresh = useProtectionKeys(dataset.id);
+  const update = useUpdateDataset(latest.id);
+  const refresh = useProtectionKeys(latest.id);
+  // The dataset as it was when editing started. Changes are worked out against
+  // it and sent with its revision, so a change made elsewhere since is refused
+  // rather than overwritten.
+  const [dataset] = useState(latest);
+  const changedElsewhere = !update.isSuccess && latest.revision !== dataset.revision;
   const [replica, setReplica] = useState(dataset.replica_connection_id ?? "");
   const [escrow, setEscrow] = useState(Boolean(dataset.escrow));
   const [vault, setVault] = useState(String(dataset.vault_retention_days ?? 0));
@@ -162,8 +188,12 @@ function SettingsPanel({ dataset }: { dataset: Dataset }) {
         onSuccess: async () => {
           await refresh();
           notify.success("Protection saved");
+          onSaved();
         },
-        onError: notify.error,
+        onError: (error) => {
+          notify.error(error);
+          if (isCode(error, "revision_conflict")) onRefused(dataset.revision);
+        },
       },
     );
   }
@@ -171,6 +201,12 @@ function SettingsPanel({ dataset }: { dataset: Dataset }) {
   return (
     <Panel title="Protection settings" tone="in">
       <form onSubmit={submit} className="flex flex-col gap-4">
+        {changedElsewhere && (
+          <p role="status" className="neo-in-sm p-3 text-base">
+            Someone else changed this dataset after you started editing. Your edits are kept, but saving them will be refused and
+            the form will load the latest values.
+          </p>
+        )}
         <fieldset disabled={!editable} className="flex flex-col gap-4">
           <Field label="Replica connection" hint="A connection at another provider or account than the dataset's own.">
             {(props) => (
@@ -379,17 +415,19 @@ function RestoreForm({ id, onDone }: { id: string; onDone: () => void }) {
 
 function MigrateForm({ dataset, onDone }: { dataset: Dataset; onDone: () => void }) {
   const [target, setTarget] = useState("");
-  const [plan, setPlan] = useState<MigrationPlan | null>(null);
+  // Kept with the target it was made for, so a late answer for an earlier target is never shown.
+  const [estimate, setEstimate] = useState<{ target: string; plan: MigrationPlan } | null>(null);
   const [confirming, setConfirming] = useState(false);
-  const preview = useMutation({ mutationFn: () => planMigration(dataset.id, target) });
+  const preview = useMutation({ mutationFn: (to: string) => planMigration(dataset.id, to) });
+  const plan = estimate?.target === target ? estimate.plan : null;
   return (
     <div className="neo-in-sm mb-4 flex flex-col gap-3 p-3">
-      <ConnectionSelect name="migration_target" value={target} onChange={(v) => { setTarget(v); setPlan(null); }} exclude={dataset.storage_connection_id} />
+      <ConnectionSelect name="migration_target" value={target} onChange={setTarget} exclude={dataset.storage_connection_id} />
       <Button
         className="self-start"
         disabled={!target}
         loading={preview.isPending}
-        onClick={() => preview.mutate(undefined, { onSuccess: (r) => setPlan(r.plan), onError: notify.error })}
+        onClick={() => preview.mutate(target, { onSuccess: (r, to) => setEstimate({ target: to, plan: r.plan }), onError: notify.error })}
       >
         Estimate
       </Button>
@@ -429,6 +467,8 @@ function CleanPointPanel({ dataset }: { dataset: Dataset }) {
   const { can } = useSession();
   const versions = useVersions(dataset.id);
   const refresh = useProtectionKeys(dataset.id);
+  // The clean point lives on the dataset, so its detail is refreshed too.
+  const refreshDatasets = useRefreshDatasets();
   const [version, setVersion] = useState(dataset.clean_version_id ?? "");
   const diff = useQuery({
     queryKey: orgKey(organizationId, "protection", dataset.id, "clean", dataset.clean_version_id ?? ""),
@@ -447,7 +487,14 @@ function CleanPointPanel({ dataset }: { dataset: Dataset }) {
           className="mb-4 flex flex-wrap items-end gap-3"
           onSubmit={(e) => {
             e.preventDefault();
-            mark.mutate(undefined, { onSuccess: () => { notify.success("Clean point set"); refresh(); }, onError: notify.error });
+            mark.mutate(undefined, {
+              onSuccess: () => {
+                notify.success("Clean point set");
+                refresh();
+                refreshDatasets();
+              },
+              onError: notify.error,
+            });
           }}
         >
           <Field label="Known-good version" className="w-56">

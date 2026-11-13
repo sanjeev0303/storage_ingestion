@@ -328,6 +328,13 @@ func (r *TenancyRepository) ChangeMember(ctx context.Context, c interfaces.Membe
 				return err
 			}
 		}
+		// The caller checked the role before the organization's lock; a
+		// DeleteRole since then (it counts holders under that lock) wins.
+		if _, builtIn := model.BuiltInRole(c.RoleID); c.RoleID != "" && !builtIn {
+			if err := liveRole(ctx, tx, c.OrgID, c.RoleID); err != nil {
+				return err
+			}
+		}
 
 		next := current
 		if c.RoleID != "" {
@@ -339,15 +346,24 @@ func (r *TenancyRepository) ChangeMember(ctx context.Context, c interfaces.Membe
 		wasOwner := current.RoleID == model.RoleOwner && current.Status == model.MembershipActive
 		staysOwner := !c.Remove && next.RoleID == model.RoleOwner && next.Status == model.MembershipActive
 		if wasOwner && !staysOwner {
-			// Only owners who can still sign in count.
-			var others int
-			if err := tx.QueryRow(ctx, `
-				SELECT count(*) FROM memberships AS m JOIN users AS u ON u.id = m.user_id
+			// Only owners who can still sign in count. Their accounts are
+			// share-locked, so a deactivation in flight is waited for and
+			// then not counted (lock order: organization, then users, as in
+			// keepOwners).
+			rows, err := tx.Query(ctx, `
+				SELECT u.id FROM memberships AS m JOIN users AS u ON u.id = m.user_id
 				WHERE m.org_id = $1 AND m.user_id <> $2 AND m.role_id = 'owner' AND m.status = 'ACTIVE' AND u.status = 'ACTIVE'
-			`, c.OrgID, c.UserID).Scan(&others); err != nil {
+				ORDER BY u.id
+				FOR SHARE OF u
+			`, c.OrgID, c.UserID)
+			if err != nil {
 				return fmt.Errorf("count owners: %w", err)
 			}
-			if others == 0 {
+			others, err := pgx.CollectRows(rows, pgx.RowTo[string])
+			if err != nil {
+				return fmt.Errorf("count owners: %w", err)
+			}
+			if len(others) == 0 {
 				return model.ErrLastOwner
 			}
 		}
@@ -463,10 +479,34 @@ func (r *TenancyRepository) DeleteRole(ctx context.Context, orgID, roleID string
 	})
 }
 
+// liveRole answers model.ErrRoleNotFound unless the organization's custom
+// role exists and is not deleted.
+func liveRole(ctx context.Context, tx pgx.Tx, orgID, roleID string) error {
+	var live bool
+	err := tx.QueryRow(ctx, `SELECT true FROM org_roles WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL`, orgID, roleID).Scan(&live)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return model.ErrRoleNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("check role: %w", err)
+	}
+	return nil
+}
+
 // ─── Invitations ──────────────────────────────────────────────────────
 
 func (r *TenancyRepository) CreateInvitation(ctx context.Context, inv model.Invitation, tokenHash []byte, audit ...model.AuditEvent) error {
 	return withTx(ctx, r.db, func(tx pgx.Tx) error {
+		// The organization's lock, the one DeleteRole counts holders under:
+		// a role deleted since the caller checked it is refused here.
+		if _, err := scanOrg(tx.QueryRow(ctx, `SELECT `+orgColumns+` FROM organizations AS o WHERE o.id = $1 FOR UPDATE`, inv.OrgID)); err != nil {
+			return err
+		}
+		if _, builtIn := model.BuiltInRole(inv.RoleID); !builtIn {
+			if err := liveRole(ctx, tx, inv.OrgID, inv.RoleID); err != nil {
+				return err
+			}
+		}
 		var members int
 		if err := tx.QueryRow(ctx, `
 			SELECT count(*) FROM memberships AS m JOIN users AS u ON u.id = m.user_id

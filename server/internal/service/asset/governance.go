@@ -440,7 +440,8 @@ func (s *Service) ApprovalsFor(ctx context.Context, p model.Principal, state str
 }
 
 // DecideFor approves (and so carries out) or rejects a pending change. The
-// member who asked cannot approve it.
+// member who asked cannot approve it. An approved change is EXECUTING while
+// it is made, then EXECUTED or FAILED.
 func (s *Service) DecideFor(ctx context.Context, p model.Principal, id string, approve bool, note string) (model.Approval, error) {
 	if err := audit.Require(ctx, s.security, p, model.PermRetentionManage, "governance.approval_decide", "approval", id); err != nil {
 		return model.Approval{}, err
@@ -457,7 +458,7 @@ func (s *Service) DecideFor(ctx context.Context, p model.Principal, id string, a
 	}
 	state := model.ApprovalRejected
 	if approve {
-		state = model.ApprovalExecuted
+		state = model.ApprovalExecuting
 	}
 	a, err := s.deps.Governance.Decide(ctx, p.TenantID, id, state, "user:"+p.UserID, note, s.now())
 	if err != nil {
@@ -468,11 +469,13 @@ func (s *Service) DecideFor(ctx context.Context, p model.Principal, id string, a
 		return a, nil
 	}
 	result, err := s.execute(ctx, p, a)
-	a.Result = result
+	a.State, a.Result = model.ApprovalExecuted, result
 	if err != nil {
 		a.State, a.Result = model.ApprovalFailed, err.Error()
 	}
 	if finishErr := s.deps.Governance.Finish(ctx, a.ID, a.State, a.Result); finishErr != nil {
+		// The outcome is not recorded: the approval still says EXECUTING.
+		a.State = model.ApprovalExecuting
 		return a, finishErr
 	}
 	return a, err

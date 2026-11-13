@@ -407,7 +407,7 @@ func (h *IngestionHandler) fail(w nethttp.ResponseWriter, err error) {
 		status = nethttp.StatusRequestEntityTooLarge
 	case errors.Is(err, ingestion.ErrManifestChecksum):
 		status = nethttp.StatusUnprocessableEntity
-	case errors.Is(err, model.ErrDatasetConflict), errors.Is(err, model.ErrIngestionConflict),
+	case errors.Is(err, model.ErrDatasetConflict), errors.Is(err, model.ErrIngestionConflict), errors.Is(err, model.ErrDatasetArchived),
 		errors.Is(err, model.ErrManifestConflict), errors.Is(err, model.ErrInvalidJobState),
 		errors.Is(err, model.ErrInvalidEntryState), errors.Is(err, model.ErrManifestIncomplete),
 		errors.Is(err, ingestion.ErrManifestNotStaged), errors.Is(err, ingestion.ErrUploadNotAttached),

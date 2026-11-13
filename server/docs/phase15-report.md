@@ -219,12 +219,13 @@ The pack tables' constraints, indexes and the `tr_pack_entries_immutable` trigge
 - The queue said "Catalog says SCANNING" for a status the upload reports, not the catalog. It now says "Held in quarantine until the checks finish" and "Available in the catalog".
 - **No simulated features.** Resume after a reload uses IndexedDB, and "Imports started in this browser" uses `localStorage`. Both work over real API features, and both say on screen that they are local to the browser.
 - No endpoints were added. Still missing and still stated in the matrix: listing uploads or imports, worker and queue health, reconciliation and packing status, object-to-dataset lookup, reading retention policies and holds.
+- **Follow-up (2026-11-12).** Listing uploads (`GET /uploads`), imports (`GET /ingestion/jobs`, `GET /datasets/{id}/manifests`), the object-to-dataset lookup and reading retention policies and holds had been added since; the matrix says so. The upload list now also carries `updated_at` and `asset_id`, and the object lookup pages each list (`part`, `cursor`). Worker health: each worker process (upload, processing, packing, dataset, outbox, cleanup, reconciliation, compaction, webhook) upserts a row in `worker_heartbeats` (migration `000050_read_features.sql`) every 30 seconds, and `GET /operations/status` reports each kind as `RUNNING`, `STALE` (silent for 2 minutes) or `NOT_SEEN`. The beat runs beside each worker's loop, so it proves the process and its database connection are alive, not that a cycle finished. Process names go to platform administrators only. Queue depth and per-run results are still logs and metrics only.
 
 ## 11. Security and operations
 
 An audit of the console proxy, the session routes and the API middleware found two HIGH defects. Both are fixed:
 
-- **Spoofed client addresses.** With `AUTH_TRUST_PROXY_HEADERS=true` the API took the first `X-Forwarded-For` entry, which the caller controls. That made per-address sign-in throttling and audit addresses spoofable. It now takes the last entry, the one the trusted proxy added (`middleware/security.go`). The console sends exactly one address: the right-most entry after `TRUSTED_PROXY_HOPS` (default 0, the socket address), and nothing that is not an address. Refresh calls forward it too.
+- **Spoofed client addresses.** With `AUTH_TRUST_PROXY_HEADERS=true` the API took the first `X-Forwarded-For` entry, which the caller controls. That made per-address sign-in throttling and audit addresses spoofable. It now takes the last entry, the one the trusted proxy added (`middleware/security.go`). The console sends exactly one address: the right-most entry after `TRUSTED_PROXY_HOPS` (default 0: the last `X-Forwarded-For` entry it received, which a caller who reaches the console directly writes itself, so put an appending proxy in front), and nothing that is not an address. Sign-in also caps failures per account whatever the address. Refresh calls forward it too.
 - **Every console user throttled as one address.** With the defaults, the API saw every user as the console's own address, so one person's failed sign-ins throttled everyone. The local stack now sets `AUTH_TRUST_PROXY_HEADERS=true`, and `server/.env.example` and `docs/security.md` say to set it whenever the API is reached only through the console.
 
 Lower-severity fixes:
@@ -282,11 +283,11 @@ Docs: `README.md` (Node versions), `docs/security.md`, `docs/api-capability-matr
 
 1. The homepage motion tests (§5): decide what the slider should show on focus, and wait for the fade before measuring contrast or start without it.
 2. Concurrent ranged reads of one pack are slower than separate objects on MinIO (§7). Measure on a real provider before relying on packing for read-heavy tenants.
-3. Packing leases depend on the clocks agreeing. Consider database time for lease checks.
-4. `BuildingPacks` fairness across tenants.
-5. Verification should use the `MaxEntries` recorded at planning time.
-6. Confirm or rule out `ReleaseAsset` racing a rewrite.
-7. No unpack tool, so rolling back 000017 after retirement loses data.
+3. ~~Packing leases depend on the clocks agreeing.~~ Fixed 2026-11-12: claims, renewals and expiry use the database's `now()` (`postgres/pack_repository.go`; `TestPackingLeasesFollowTheDatabaseClock`).
+4. ~~`BuildingPacks` fairness across tenants.~~ Fixed 2026-11-12: rewrites and repacks take tenants in turn and the planner looks past busy tenants (`TestPackingRepacksTakeTenantsInTurn`, `TestPackingRewritesTakeTenantsInTurn`, `TestPlanRewritesLooksPastBusyTenants`).
+5. ~~Verification should use the `MaxEntries` recorded at planning time.~~ Fixed 2026-11-12: `verify` checks against the pack's planned `entry_count` (`TestPackingVerifiesWithThePlannedEntryCount`).
+6. ~~Confirm or rule out `ReleaseAsset` racing a rewrite.~~ Confirmed and fixed 2026-11-12: `ReleaseAsset` locks the asset row and `PublishPack` locks reserved entries' assets (`TestPackingReleaseWaitsForARewriteBeingPublished`).
+7. ~~No unpack tool.~~ Fixed 2026-11-12: `pack-worker unpack -tenant <id> (-pack <id> | -all) [-dry-run]`; unpack before rolling back 000017 (`docs/packing.md` §11, `docs/migrations.md`).
 8. The security items listed at the end of §11.
 9. Upload engine unit tests still mock `/catalog/lookup`, versions and `/assets/{id}`, which the engine no longer calls. msw's default `warn` policy would let a stray call reach the network, so set `onUnhandledRequest: "error"` before removing them.
 10. The S3 copy above 5 GiB, live-provider runs, and versioned deletion on real GCS and Azure: all still unverified.

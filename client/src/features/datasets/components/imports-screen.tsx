@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Field, Select } from "@/components/ui/field";
 import { Panel } from "@/components/ui/panel";
@@ -91,22 +91,40 @@ function StartImport({ datasetId }: { datasetId: string }) {
   // One key per file choice; retrying the same attempt reuses it.
   const key = useRef(newIdempotencyKey());
   const abort = useRef<AbortController | null>(null);
+  // Only the latest file's check may report; an earlier, slower one is stopped.
+  const checkAbort = useRef<AbortController | null>(null);
+
+  // Leaving the page stops the import's hashing and upload, and keeps a
+  // request that still finishes from navigating somewhere the user has left.
+  useEffect(
+    () => () => {
+      abort.current?.abort();
+      checkAbort.current?.abort();
+    },
+    [],
+  );
 
   async function choose(event: ChangeEvent<HTMLInputElement>) {
     const picked = event.target.files?.[0] ?? null;
+    checkAbort.current?.abort();
+    checkAbort.current = null;
     setFile(picked);
     setCheck(null);
     setError(null);
+    setChecking(false);
     key.current = newIdempotencyKey();
     if (!picked) return;
     setMode(picked.size > INLINE_LIMIT_BYTES ? "staged" : "inline");
+    const controller = new AbortController();
+    checkAbort.current = controller;
     setChecking(true);
     try {
-      setCheck(await preflightManifest(picked));
+      const result = await preflightManifest(picked, controller.signal);
+      if (!controller.signal.aborted) setCheck(result);
     } catch {
-      setError("The file could not be read. Choose it again.");
+      if (!controller.signal.aborted) setError("The file could not be read. Choose it again.");
     } finally {
-      setChecking(false);
+      if (checkAbort.current === controller) setChecking(false);
     }
   }
 
@@ -114,22 +132,31 @@ function StartImport({ datasetId }: { datasetId: string }) {
     event.preventDefault();
     if (!file || !valid) return;
     setError(null);
-    abort.current = new AbortController();
+    const controller = new AbortController();
+    abort.current = controller;
     try {
       setStep("hashing");
-      const sha256 = await sha256Blob(file, { signal: abort.current.signal });
+      const sha256 = await sha256Blob(file, { signal: controller.signal });
       setStep("sending");
       let job;
       if (mode === "inline") {
         job = await api.startInlineImport(datasetId, file, key.current, policy, sha256);
       } else {
         job = await api.startStagedImport(datasetId, key.current, file.size, policy, sha256);
+        if (job.state === "AWAITING_UPLOAD" && !job.upload_url) {
+          // Without a link the manifest can never arrive, and the job page
+          // would wait for nothing. A new key starts a fresh import next time.
+          key.current = newIdempotencyKey();
+          setError("The import was created but the server gave no upload link. Start the import again.");
+          setStep("idle");
+          return;
+        }
         if (job.state === "AWAITING_UPLOAD" && job.upload_url) {
           setStep("uploading");
           setProgress(0);
           await putBlob(job.upload_url, file, {
             headers: { "Content-Type": "application/x-ndjson" },
-            signal: abort.current.signal,
+            signal: controller.signal,
             onProgress: setProgress,
           });
           setStep("submitting");
@@ -137,6 +164,7 @@ function StartImport({ datasetId }: { datasetId: string }) {
         }
       }
       refresh();
+      if (controller.signal.aborted) return;
       router.push(`/app/datasets/${datasetId}/imports/${job.id}`);
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") setError("Stopped. Nothing was imported.");

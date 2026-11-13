@@ -170,12 +170,11 @@ func (s *Service) SetUserStatus(ctx context.Context, p model.Principal, userID s
 		if userID == p.UserID {
 			return model.User{}, s.deny(ctx, p, action, "user", userID, fmt.Errorf("%w: you cannot deactivate yourself", model.ErrForbidden))
 		}
-		if err := s.keepAnAdmin(ctx, user); err != nil {
-			return model.User{}, err
-		}
 	}
+	// The last-administrator and last-owner checks run in the repository,
+	// in the transaction that changes the status.
 	e := s.platformEvent(ctx, p, action, "user", userID, map[string]any{"before": string(user.Status), "after": string(status)})
-	return s.deps.Users.SetUserStatus(ctx, userID, status, s.now(), e)
+	return s.deps.Users.SetUserStatus(ctx, userID, user.Status, status, s.now(), e)
 }
 
 // SetPlatformRole grants or removes a platform role.
@@ -190,30 +189,9 @@ func (s *Service) SetPlatformRole(ctx context.Context, p model.Principal, userID
 	if err != nil {
 		return err
 	}
-	if role != model.PlatformAdmin {
-		if err := s.keepAnAdmin(ctx, user); err != nil {
-			return err
-		}
-	}
 	e := s.platformEvent(ctx, p, "user.platform_role", "user", userID,
 		map[string]any{"before": string(user.PlatformRole), "after": string(role)})
 	return s.deps.Users.SetPlatformRole(ctx, userID, role, s.now(), e)
-}
-
-// keepAnAdmin refuses a change that would leave no active platform
-// administrator.
-func (s *Service) keepAnAdmin(ctx context.Context, user model.User) error {
-	if user.PlatformRole != model.PlatformAdmin || user.Status != model.UserActive {
-		return nil
-	}
-	admins, err := s.deps.Users.CountPlatformAdmins(ctx)
-	if err != nil {
-		return err
-	}
-	if admins <= 1 {
-		return fmt.Errorf("%w: the platform must keep one active administrator", model.ErrForbidden)
-	}
-	return nil
 }
 
 // ListUsers pages accounts for a platform administrator.

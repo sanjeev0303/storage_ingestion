@@ -49,11 +49,12 @@ const uploadColumns = `
 	staging_connection_id
 `
 
-func scanUpload(row pgx.Row) (*model.UploadSession, error) {
+// scanUpload reads uploadColumns, then any extra columns a query adds.
+func scanUpload(row pgx.Row, extra ...any) (*model.UploadSession, error) {
 	var upload model.UploadSession
 	var metadata []byte
 
-	err := row.Scan(
+	dest := []any{
 		&upload.ID,
 		&upload.TenantID,
 		&upload.OwnerID,
@@ -77,7 +78,8 @@ func scanUpload(row pgx.Row) (*model.UploadSession, error) {
 		&metadata,
 		&upload.StorageConnectionID,
 		&upload.StagingConnectionID,
-	)
+	}
+	err := row.Scan(append(dest, extra...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -136,6 +138,19 @@ type execer interface {
 // insertUploadSession stores a session. With reserved set, its declared
 // size is recorded as the tenant quota it holds (see QuotaRepository).
 func insertUploadSession(ctx context.Context, q execer, upload *model.UploadSession, idempotencyKey string, reserved, multipart bool) error {
+	sql, args, err := uploadSessionInsert(upload, idempotencyKey, reserved, multipart)
+	if err != nil {
+		return err
+	}
+	if _, err := q.Exec(ctx, sql, args...); err != nil {
+		return mapDatabaseError(bindingError(err))
+	}
+	return nil
+}
+
+// uploadSessionInsert is the statement insertUploadSession runs, so a batch
+// reservation can queue the same insert for many sessions in one round trip.
+func uploadSessionInsert(upload *model.UploadSession, idempotencyKey string, reserved, multipart bool) (string, []any, error) {
 	var quotaState any
 	var reservedBytes int64
 	if reserved {
@@ -143,9 +158,9 @@ func insertUploadSession(ctx context.Context, q execer, upload *model.UploadSess
 	}
 	metadata, err := encodeMetadata(upload.Metadata)
 	if err != nil {
-		return err
+		return "", nil, err
 	}
-	_, err = q.Exec(ctx, `
+	return `
 		INSERT INTO upload_sessions (
 			id, tenant_id, owner_id, object_key,
 			file_name, content_type, expected_size,
@@ -162,36 +177,32 @@ func insertUploadSession(ctx context.Context, q execer, upload *model.UploadSess
 			NULLIF($19, ''), NULLIF($20, ''), $21, $22,
 			COALESCE(NULLIF($23, ''), 'platform'), COALESCE(NULLIF($24, ''), 'platform')
 		)
-	`,
-		upload.ID,
-		upload.TenantID,
-		upload.OwnerID,
-		upload.ObjectKey,
-		upload.FileName,
-		upload.ContentType,
-		upload.ExpectedSize,
-		upload.ChecksumSHA256,
-		upload.Status,
-		idempotencyKey,
-		upload.ExpiresAt,
-		upload.CreatedAt,
-		upload.UpdatedAt,
-		upload.StorageUploadID,
-		upload.Dataset,
-		quotaState,
-		reservedBytes,
-		multipart,
-		upload.Path,
-		upload.ObjectID,
-		upload.CreateOnly,
-		metadata,
-		upload.StorageConnectionID,
-		upload.StagingConnectionID,
-	)
-	if err != nil {
-		return mapDatabaseError(bindingError(err))
-	}
-	return nil
+	`, []any{
+			upload.ID,
+			upload.TenantID,
+			upload.OwnerID,
+			upload.ObjectKey,
+			upload.FileName,
+			upload.ContentType,
+			upload.ExpectedSize,
+			upload.ChecksumSHA256,
+			upload.Status,
+			idempotencyKey,
+			upload.ExpiresAt,
+			upload.CreatedAt,
+			upload.UpdatedAt,
+			upload.StorageUploadID,
+			upload.Dataset,
+			quotaState,
+			reservedBytes,
+			multipart,
+			upload.Path,
+			upload.ObjectID,
+			upload.CreateOnly,
+			metadata,
+			upload.StorageConnectionID,
+			upload.StagingConnectionID,
+		}, nil
 }
 
 func (r *UploadRepository) GetByID(
@@ -222,7 +233,8 @@ func (r *UploadRepository) List(ctx context.Context, tenantID string, status mod
 		return nil, "", err
 	}
 	rows, err := r.db.Pool.Query(ctx, `
-		SELECT `+uploadColumns+`
+		SELECT `+uploadColumns+`,
+		  COALESCE((SELECT a.id FROM assets AS a WHERE a.upload_id = upload_sessions.id), '')
 		FROM upload_sessions
 		WHERE tenant_id = $1
 		  AND ($2 = '' OR status = $2)
@@ -237,10 +249,12 @@ func (r *UploadRepository) List(ctx context.Context, tenantID string, status mod
 
 	var uploads []model.UploadSession
 	for rows.Next() {
-		upload, err := scanUpload(rows)
+		var assetID string
+		upload, err := scanUpload(rows, &assetID)
 		if err != nil {
 			return nil, "", fmt.Errorf("scan upload session: %w", err)
 		}
+		upload.AssetID = assetID
 		uploads = append(uploads, *upload)
 	}
 	if err := rows.Err(); err != nil {
@@ -276,52 +290,6 @@ func (r *UploadRepository) GetByIdempotencyKey(
 	}
 
 	return upload, nil
-}
-
-func (r *UploadRepository) Update(
-	ctx context.Context,
-	upload *model.UploadSession,
-) error {
-	if upload == nil {
-		return errors.New("upload session must not be nil")
-	}
-
-	tag, err := r.db.Pool.Exec(ctx, `
-		UPDATE upload_sessions
-		SET object_key = $3,
-		    file_name = $4,
-		    content_type = $5,
-		    expected_size = $6,
-		    checksum_sha256 = NULLIF($7, ''),
-		    status = $8,
-		    expires_at = $9,
-		    updated_at = $10,
-		    storage_upload_id = NULLIF($11, ''),
-		    failure_reason = NULLIF($12, '')
-		WHERE tenant_id = $1 AND id = $2
-	`,
-		upload.TenantID,
-		upload.ID,
-		upload.ObjectKey,
-		upload.FileName,
-		upload.ContentType,
-		upload.ExpectedSize,
-		upload.ChecksumSHA256,
-		upload.Status,
-		upload.ExpiresAt,
-		upload.UpdatedAt,
-		upload.StorageUploadID,
-		upload.FailureReason,
-	)
-	if err != nil {
-		return mapDatabaseError(err)
-	}
-
-	if tag.RowsAffected() == 0 {
-		return model.ErrUploadNotFound
-	}
-
-	return nil
 }
 
 func (r *UploadRepository) TransitionStatus(

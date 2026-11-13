@@ -81,15 +81,21 @@ func (r *AdoptionRepository) ClaimJob(ctx context.Context, owner string, now tim
 	return j, err == nil, err
 }
 
-// SetState moves a job on while owner holds it; terminal states release it
-// and give back the quota it still has reserved.
+// SetState moves a job on while owner holds it, only along
+// model.AdoptionFrom; terminal states release it and give back the quota it
+// still has reserved. ErrLeaseLost: the lease is gone, or the job is no
+// longer in a state the move starts from.
 func (r *AdoptionRepository) SetState(ctx context.Context, id, owner, state, message string, now time.Time) error {
+	from, ok := model.AdoptionFrom[state]
+	if !ok {
+		return fmt.Errorf("%w: a worker cannot move a job to %s", model.ErrInvalidAdoption, state)
+	}
 	return withTx(ctx, r.db, func(tx pgx.Tx) error {
 		var tenantID string
 		var bytes, assets int64
 		err := tx.QueryRow(ctx, `
 			WITH old AS (SELECT id, reserved_bytes, reserved_assets FROM adoption_jobs
-				WHERE id = $1 AND lease_owner = $2 AND state NOT IN ('COMPLETED', 'FAILED', 'CANCELLED') FOR UPDATE)
+				WHERE id = $1 AND lease_owner = $2 AND state = ANY($6) FOR UPDATE)
 			UPDATE adoption_jobs AS j SET state = $3, error = $4, updated_at = $5,
 				finished_at = CASE WHEN $3 IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN $5::timestamptz END,
 				lease_owner = CASE WHEN $3 IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN NULL ELSE j.lease_owner END,
@@ -100,7 +106,7 @@ func (r *AdoptionRepository) SetState(ctx context.Context, id, owner, state, mes
 			RETURNING j.tenant_id,
 				CASE WHEN $3 IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN old.reserved_bytes ELSE 0 END,
 				CASE WHEN $3 IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN old.reserved_assets ELSE 0 END`,
-			id, owner, state, message, now).Scan(&tenantID, &bytes, &assets)
+			id, owner, state, message, now, from).Scan(&tenantID, &bytes, &assets)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return model.ErrLeaseLost
 		}
@@ -263,14 +269,20 @@ func (r *AdoptionRepository) Entries(ctx context.Context, tenantID, jobID string
 	return collect(rows, scanAdoptionEntry)
 }
 
+// FinishEntry records an entry's outcome while its job is RUNNING.
+// ErrLeaseLost: the job ended (cancelled, say) and takes no more outcomes.
 func (r *AdoptionRepository) FinishEntry(ctx context.Context, e model.AdoptionEntry, now time.Time) error {
-	_, err := r.db.Pool.Exec(ctx, `
+	tag, err := r.db.Pool.Exec(ctx, `
 		UPDATE adoption_entries SET state = $3, code = $4, detail = $5, asset_id = $6, upload_id = $7, sha256 = $8,
 			attempts = $9, updated_at = $10, size_bytes = GREATEST(size_bytes, $11)
-		WHERE job_id = $1 AND line = $2`,
+		WHERE job_id = $1 AND line = $2
+		  AND EXISTS (SELECT 1 FROM adoption_jobs j WHERE j.id = $1 AND j.state = 'RUNNING')`,
 		e.JobID, e.Line, e.State, e.Code, truncateText(e.Detail, 500), e.AssetID, e.UploadID, e.SHA256, e.Attempts, now, e.SizeBytes)
 	if err != nil {
 		return fmt.Errorf("record entry outcome: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return model.ErrLeaseLost
 	}
 	return nil
 }

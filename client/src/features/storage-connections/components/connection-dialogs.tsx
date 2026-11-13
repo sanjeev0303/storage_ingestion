@@ -36,11 +36,22 @@ type DialogProps = {
   onOpenChange: (open: boolean) => void;
 };
 
-const STALE =
+export const STALE =
   "Someone else changed this connection while you were editing. It has been reloaded; check the values and try again.";
+
+export const CHANGED_ELSEWHERE =
+  "Someone else changed this connection after you started editing. Your edits are kept, but saving them will be refused and the form will reload the latest values.";
 
 export function EditDialog({ connection, open, onOpenChange }: DialogProps) {
   const [notice, setNotice] = useState<string | null>(null);
+  // The form restarts only once a refused save has brought in a newer
+  // revision. A background refetch alone must not wipe what the user typed.
+  const [reloads, setReloads] = useState(0);
+  const [refusedRevision, setRefusedRevision] = useState<number | null>(null);
+  if (refusedRevision !== null && connection.revision !== refusedRevision) {
+    setRefusedRevision(null);
+    setReloads(reloads + 1);
+  }
 
   function handleOpenChange(next: boolean) {
     if (!next) setNotice(null);
@@ -55,10 +66,13 @@ export function EditDialog({ connection, open, onOpenChange }: DialogProps) {
       description="The provider, authentication method, bucket and prefixes cannot be changed. Create a new connection to move data."
     >
       <EditBody
-        key={connection.revision}
+        key={reloads}
         connection={connection}
         notice={notice}
-        onStale={() => setNotice(STALE)}
+        onStale={(revision) => {
+          setNotice(STALE);
+          setRefusedRevision(revision);
+        }}
         onClose={() => handleOpenChange(false)}
       />
     </Modal>
@@ -73,27 +87,33 @@ function EditBody({
 }: {
   connection: StorageConnection;
   notice: string | null;
-  onStale: () => void;
+  onStale: (revision: number) => void;
   onClose: () => void;
 }) {
   const refresh = useRefreshStorage();
   const [formError, setFormError] = useState<string | null>(null);
   const [refused, setRefused] = useState<TestResponse | null>(null);
+  // The connection as it was when editing started. Changes are worked out
+  // against it and sent with its revision, so a change made elsewhere since
+  // is refused (412) rather than silently overwritten.
+  const [base] = useState(connection);
   const form = useForm<EditForm>({
-    resolver: zodResolver<EditForm>(editSchema(connection)),
-    defaultValues: editDefaults(connection),
+    resolver: zodResolver<EditForm>(editSchema(base)),
+    defaultValues: editDefaults(base),
     mode: "onTouched",
   });
-  const save = useMutation({ mutationFn: (values: EditForm) => updateConnection(connection.id, buildUpdateRequest(connection, values)) });
+  const save = useMutation({ mutationFn: (values: EditForm) => updateConnection(base.id, buildUpdateRequest(base, values)) });
 
-  const fields = fieldsFor(connection.provider, connection.auth_method);
+  // Our own save also moves the revision; that is not a change made elsewhere.
+  const changedElsewhere = !save.isSuccess && connection.revision !== base.revision;
+  const fields = fieldsFor(base.provider, base.auth_method);
   const current = useWatch({ control: form.control });
-  const retests = connection.status !== "PENDING" && changesReachability(buildUpdateRequest(connection, { ...editDefaults(connection), ...current }));
+  const retests = base.status !== "PENDING" && changesReachability(buildUpdateRequest(base, { ...editDefaults(base), ...current }));
 
   async function submit(values: EditForm) {
     setFormError(null);
     setRefused(null);
-    if (Object.keys(buildUpdateRequest(connection, values)).length === 1) return onClose();
+    if (Object.keys(buildUpdateRequest(base, values)).length === 1) return onClose();
     try {
       await save.mutateAsync(values);
       await refresh();
@@ -102,8 +122,8 @@ function EditBody({
       const result = testResultFromError(error);
       if (result) return setRefused(result);
       if (isApiError(error) && error.code === "revision_conflict") {
-        refresh();
-        return onStale();
+        await refresh();
+        return onStale(base.revision);
       }
       if (isApiError(error) && error.code === "conflict") {
         return form.setError("name", { message: "A connection with this name already exists." });
@@ -117,6 +137,11 @@ function EditBody({
       {notice && (
         <p role="alert" className="neo-in-sm p-3 text-base font-medium">
           {notice}
+        </p>
+      )}
+      {changedElsewhere && (
+        <p role="status" className="neo-in-sm p-3 text-base">
+          {CHANGED_ELSEWHERE}
         </p>
       )}
       <Field label="Name" required error={form.formState.errors.name?.message}>

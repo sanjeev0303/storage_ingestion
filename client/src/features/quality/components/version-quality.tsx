@@ -11,6 +11,7 @@ import { StateBadge } from "@/components/ui/status";
 import { SubmitButton } from "@/components/ui/submit-button";
 import { Table, Td, Th } from "@/components/ui/table";
 import { notify } from "@/components/ui/toast";
+import { isCode } from "@/features/datasets/helpers";
 import { useDatasets, useVersions } from "@/features/datasets/hooks";
 import { useOrganizationId, useSession } from "@/lib/auth/session";
 import { orgKey } from "@/lib/query/keys";
@@ -367,7 +368,10 @@ function ReleasePanel({ id, versionId }: { id: string; versionId: string }) {
       notify.success(`Released as ${r.label}`);
       client.invalidateQueries({ queryKey: key });
     },
-    onError: notify.error,
+    onError: (error) => {
+      if (isCode(error, "version_expired")) notify.info("This version has expired, so it cannot be released. Release a newer version instead.");
+      else notify.error(error);
+    },
   });
   const labelError = label.trim() !== "" && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/.test(label.trim()) ? "Letters, digits, '.', '_' and '-', up to 40." : undefined;
 

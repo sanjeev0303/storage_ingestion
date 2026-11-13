@@ -11,6 +11,8 @@ export const PART_LANES = 3;
 export const BROWSER_CONCURRENCY_CAP = 6;
 export const HEARTBEAT_MS = 5 * 60_000;
 const DEFAULT_WAIT_SECONDS = 5;
+// How often a wait between claims looks for a pause request.
+const PAUSE_CHECK_MS = 250;
 
 export type DriverApi = {
   claim: (max: number, signal: AbortSignal) => Promise<ClaimResponse>;
@@ -35,6 +37,10 @@ export type DriverEvent =
   | { type: "progress"; position: number; sent: number }
   | { type: "done"; position: number; state: string }
   | { type: "failed"; position: number; message: string }
+  // Sent, but the server had not settled the entry when the driver stopped checking.
+  | { type: "unconfirmed"; position: number; message: string }
+  // Something went wrong that did not stop the upload, such as a lost heartbeat.
+  | { type: "warning"; position: number; message: string }
   | { type: "skipped"; position: number; message: string };
 
 export type DriverOptions = {
@@ -54,7 +60,8 @@ export type DriverOptions = {
 };
 
 // "unmatched": ten claimed entries in a row had no usable local file.
-export type DriverEnd = "finished" | "paused" | "job_not_running" | "unmatched";
+// "stopped": the signal was aborted; uploads under way did not finish.
+export type DriverEnd = "finished" | "paused" | "stopped" | "job_not_running" | "unmatched";
 const MAX_SKIPS_IN_A_ROW = 10;
 
 function messageOf(error: unknown) {
@@ -183,16 +190,35 @@ export async function runDriver(options: DriverOptions): Promise<DriverEnd> {
     return finished.map((p) => ({ part_number: p.part_number, etag: p.etag }));
   }
 
+  // Waits like wait(), but returns early once a pause is requested.
+  async function waitUnlessPaused(ms: number) {
+    const paused = new AbortController();
+    const check = setInterval(() => {
+      if (options.shouldPause()) paused.abort();
+    }, PAUSE_CHECK_MS);
+    try {
+      await wait(ms, AbortSignal.any([signal, paused.signal]));
+    } catch (error) {
+      if (signal.aborted || !paused.signal.aborted) throw error;
+    } finally {
+      clearInterval(check);
+    }
+  }
+
+  const stillSending = (e: IngestionEntry) => e.state === "SCHEDULED" || e.state === "UPLOADING";
+
+  // The entry once the server has settled it, or null if it still had not
+  // by the last check.
   async function settle(entry: IngestionEntry, status: number) {
     let current = entry;
     let confirming = status === 202;
     for (let tries = 0; tries < 60; tries++) {
-      if (!confirming && current.state !== "SCHEDULED" && current.state !== "UPLOADING") return current;
+      if (!confirming && !stillSending(current)) return current;
       await wait(pollMs, signal);
       current = await api.getEntry(entry.position);
       confirming = false;
     }
-    return current;
+    return stillSending(current) ? null : current;
   }
 
   async function handle(grant: Grant) {
@@ -222,14 +248,27 @@ export async function runDriver(options: DriverOptions): Promise<DriverEnd> {
       strategy: entry.strategy ?? "SINGLE",
     });
     const beat = setInterval(() => {
-      api.heartbeat(entry.position).catch(() => undefined);
+      api.heartbeat(entry.position).catch((error) => {
+        if (signal.aborted) return;
+        onEvent({
+          type: "warning",
+          position: entry.position,
+          message: `The lease on this entry could not be renewed, so another uploader may take it over. ${messageOf(error)}`,
+        });
+      });
     }, heartbeatMs);
 
     try {
       const parts = entry.strategy === "MULTIPART" ? await uploadMultipart(grant, file) : await uploadSingle(grant, file);
       const { status, entry: after } = await api.complete(entry.position, parts);
       const final = await settle(after, status);
-      if (final.state === "FAILED" || final.state === "FAILED_RETRYABLE") {
+      if (!final) {
+        onEvent({
+          type: "unconfirmed",
+          position: entry.position,
+          message: "The file was sent, but the server had not confirmed it when this page stopped checking. It carries on by itself; its state shows in the entries below.",
+        });
+      } else if (final.state === "FAILED" || final.state === "FAILED_RETRYABLE") {
         onEvent({ type: "failed", position: entry.position, message: final.error_detail || final.error_code || "The server rejected the upload." });
       } else {
         onEvent({ type: "done", position: entry.position, state: final.state });
@@ -270,7 +309,7 @@ export async function runDriver(options: DriverOptions): Promise<DriverEnd> {
       if (!throttled && !offline) throw error;
       const seconds = (isApiError(error) && error.retryAfter) || DEFAULT_WAIT_SECONDS;
       onEvent({ type: "waiting", seconds, reason: throttled ? "The API asked to slow down." : "The API could not be reached." });
-      await wait(seconds * 1000, signal);
+      await waitUnlessPaused(seconds * 1000);
       continue;
     }
 
@@ -294,9 +333,9 @@ export async function runDriver(options: DriverOptions): Promise<DriverEnd> {
     }
     const seconds = result.retry_after_seconds || DEFAULT_WAIT_SECONDS;
     onEvent({ type: "waiting", seconds, reason: result.limited_by ?? "nothing to claim" });
-    await wait(seconds * 1000, signal);
+    await waitUnlessPaused(seconds * 1000);
   }
 
   await Promise.allSettled(active);
-  return "paused";
+  return "stopped";
 }

@@ -37,6 +37,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/service/storageconn"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/tiering"
 	cleanupworker "github.com/sanjeev0303/object-storage-platform/internal/worker/cleanup"
+	"github.com/sanjeev0303/object-storage-platform/internal/worker/heartbeat"
 )
 
 func main() {
@@ -429,6 +430,7 @@ func run() error {
 			}
 		}
 	}()
+	go heartbeat.Run(ctx, db, "cleanup", owner, log)
 	cleanupworker.Run(ctx, lifecycle, cleanup, phases, lc.PollInterval, log)
 	wg.Wait()
 	log.Info("cleanup worker stopped")

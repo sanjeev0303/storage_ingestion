@@ -8,7 +8,7 @@ export default async function CatalogObjectPage({ params }: PageProps<"/app/cata
   const { id } = await params;
   return (
     <Suspense>
-      <ObjectDetail id={id} />
+      <ObjectDetail key={id} id={id} />
     </Suspense>
   );
 }

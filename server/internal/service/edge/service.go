@@ -228,7 +228,9 @@ func (s *Service) Confirm(ctx context.Context, p model.Principal, path, sha256 s
 	switch model.AssetStatus(f.Status) {
 	case model.AssetStatusAvailable:
 		return FileState{State: "AVAILABLE"}, nil
-	case model.AssetStatusRejected:
+	case model.AssetStatusRejected, model.AssetStatusBlocked:
+		// A blocked file is refused like a rejected one: sending it again
+		// gives the same bytes.
 		return FileState{State: "REJECTED", Reason: f.Reason}, nil
 	case model.AssetStatusSoftDeleted:
 		return FileState{State: "MISSING"}, nil
@@ -285,6 +287,8 @@ func (s *Service) AddChunk(ctx context.Context, p model.Principal, recordingID s
 		return RecordingDetail{}, err
 	}
 	switch {
+	case e.State == model.RecordingComplete:
+		return RecordingDetail{}, model.ErrRecordingComplete
 	case !strings.HasPrefix(c.Path, d.PathPrefix):
 		return RecordingDetail{}, model.ErrOutsideDevicePath
 	case !sha256Hex.MatchString(c.SHA256) || c.SizeBytes < 0:
@@ -360,7 +364,10 @@ func (s *Service) Close(ctx context.Context, p model.Principal, recordingID stri
 			e.Missing = e.Missing[:1000]
 		}
 		e.State = model.RecordingIncomplete
-		if err := s.deps.Store.CloseRecording(ctx, e); err != nil {
+		if err := s.deps.Store.CloseRecording(ctx, e, len(chunks)); errors.Is(err, model.ErrRecordingComplete) {
+			// Another close completed it meanwhile.
+			return s.detail(ctx, p.TenantID, recordingID)
+		} else if err != nil {
 			return RecordingDetail{}, err
 		}
 		s.record(ctx, p, "edge.recording_incomplete", "edge_recording", recordingID, map[string]any{"problems": len(problems)})
@@ -369,12 +376,21 @@ func (s *Service) Close(ctx context.Context, p model.Principal, recordingID stri
 	if _, err := s.deps.Datasets.AddMembers(ctx, service, d.DatasetID, inputs, model.DuplicateReplace); err != nil {
 		return RecordingDetail{}, err
 	}
-	v, _, err := s.deps.Datasets.Snapshot(ctx, service, d.DatasetID, "edge-"+e.ID)
+	// The key names the chunk count too: a close run again after a chunk
+	// arrived gets a snapshot with it, not the one made without it.
+	v, _, err := s.deps.Datasets.Snapshot(ctx, service, d.DatasetID, fmt.Sprintf("edge-%s-%d", e.ID, len(chunks)))
 	if err != nil {
 		return RecordingDetail{}, err
 	}
+	// Two closes racing here make one snapshot (the idempotency key is the
+	// recording's), and the second finds the recording COMPLETE.
 	e.State, e.VersionID, e.Missing = model.RecordingComplete, v.ID, []string{}
-	if err := s.deps.Store.CloseRecording(ctx, e); err != nil {
+	if err := s.deps.Store.CloseRecording(ctx, e, len(chunks)); errors.Is(err, model.ErrRecordingComplete) {
+		return s.detail(ctx, p.TenantID, recordingID)
+	} else if errors.Is(err, model.ErrRecordingChanged) {
+		// A chunk arrived after the chunks were read: close again with it.
+		return s.Close(ctx, p, recordingID, expected, missing)
+	} else if err != nil {
 		return RecordingDetail{}, err
 	}
 	s.record(ctx, p, "edge.recording_complete", "edge_recording", recordingID, map[string]any{"version_id": v.ID, "files": len(chunks)})

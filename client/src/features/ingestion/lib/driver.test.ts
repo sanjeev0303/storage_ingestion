@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { ApiError } from "@/lib/api/errors";
 import { MIB } from "@/lib/upload/parts";
 import { UploadHttpError } from "@/lib/upload/put";
 import { runDriver, type DriverApi, type DriverEvent, type Putter } from "./driver";
@@ -182,5 +183,61 @@ describe("runDriver", () => {
     expect(end).toBe("paused");
     expect(t.api.claim).toHaveBeenCalledTimes(1);
     expect(t.api.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it("notices a pause during a long wait between claims instead of sitting it out", async () => {
+    const t = setup([{ grants: [], limited_by: "tenant_slots", retry_after_seconds: 600 }]);
+    let paused = false;
+    const end = await t.run({
+      shouldPause: () => paused,
+      // Like the real sleep: never done early unless its signal aborts.
+      sleep: (_ms, signal) =>
+        new Promise((_resolve, reject) => {
+          paused = true;
+          signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+        }),
+    });
+    expect(end).toBe("paused");
+    expect(t.api.claim).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports an abort as stopped, not paused", async () => {
+    const controller = new AbortController();
+    const t = setup([], {
+      claim: vi.fn(async () => {
+        controller.abort();
+        throw new DOMException("Aborted", "AbortError");
+      }),
+    });
+    expect(await t.run({ signal: controller.signal })).toBe("stopped");
+  });
+
+  it("does not call an entry done while the server is still confirming it", async () => {
+    const t = setup([{ grants: [{ entry: entry(1), upload_url: "https://store/1" }] }], {
+      complete: vi.fn(async () => ({ status: 202, entry: entry(1, { state: "UPLOADING" }) })),
+      getEntry: vi.fn(async () => entry(1, { state: "UPLOADING" })),
+    });
+    await t.run();
+    expect(t.events.some((e) => e.type === "done")).toBe(false);
+    expect(t.events.find((e) => e.type === "unconfirmed")).toMatchObject({ position: 1 });
+  });
+
+  it("reports a heartbeat that fails instead of swallowing it", async () => {
+    vi.useFakeTimers();
+    try {
+      const t = setup([{ grants: [{ entry: entry(1), upload_url: "https://store/1" }] }], {
+        heartbeat: vi.fn(async () => {
+          throw new ApiError({ status: 409, message: "the lease has expired", code: "lease_expired" });
+        }),
+      });
+      (t.put as ReturnType<typeof vi.fn>).mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve({ status: 200, etag: null }), 30)));
+      const running = t.run({ heartbeatMs: 10 });
+      await vi.advanceTimersByTimeAsync(30);
+      await running;
+      expect(t.events.find((e) => e.type === "warning")).toMatchObject({ position: 1 });
+      expect(t.events.some((e) => e.type === "done")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

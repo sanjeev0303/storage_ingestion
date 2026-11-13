@@ -32,6 +32,10 @@ type LegalHoldRepository interface {
 	// (when not empty) and the asset (when not empty).
 	Active(ctx context.Context, tenantID, dataset, assetID string) ([]model.LegalHold, error)
 	List(ctx context.Context, tenantID string, includeReleased bool) ([]model.LegalHold, error)
+	// Page returns up to limit of the tenant's holds, newest placed first
+	// (placed_at, then ID, both descending), after the hold placed at
+	// beforeAt with ID beforeID when beforeID is not empty.
+	Page(ctx context.Context, tenantID string, includeReleased bool, beforeAt time.Time, beforeID string, limit int) ([]model.LegalHold, error)
 }
 
 // DeletionRepository runs the durable deletion workflow. Every method that
@@ -69,6 +73,8 @@ type DeletionRepository interface {
 	ExpediteProtected(ctx context.Context, tenantID, holdID string, now time.Time) (int, error)
 
 	// Protect parks the operation as PROTECTED until next and releases it.
+	// A started one (RETRY_WAIT) stays RETRY_WAIT, so it never becomes
+	// restorable.
 	Protect(ctx context.Context, operationID, owner string, now, next time.Time, reason string) error
 	// Wait parks a started operation until next and gives back the attempt
 	// Start counted: waiting for a pack to let go of the asset's bytes is

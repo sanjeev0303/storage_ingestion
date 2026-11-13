@@ -2,6 +2,9 @@
 // with AES-256-GCM under a versioned keyring. A sealed value is bound to
 // its context through the associated data: opened under another tenant,
 // connection, provider or credential version, it fails to open.
+//
+// Envelope adds a layer: each value gets its own random data key, and only
+// that data key is sealed by the keyring (or a KMS behind Sealer).
 package secretbox
 
 import (
@@ -28,6 +31,10 @@ type Sealed struct {
 	KeyVersion int
 	Nonce      []byte
 	Ciphertext []byte
+	// WrappedKey is the value's own data key, sealed by the master key
+	// KeyVersion names (Envelope). Empty means the value was sealed by the
+	// master key directly, as every value was before envelopes.
+	WrappedKey []byte
 }
 
 // Sealer seals and opens secrets. The keyring below implements it with
@@ -68,11 +75,7 @@ func NewKeyring(keys map[int][]byte, current int) (*Keyring, error) {
 			return nil, fmt.Errorf("key versions %d and %d are the same key", other, version)
 		}
 		seen[string(key)] = version
-		block, err := aes.NewCipher(key)
-		if err != nil {
-			return nil, err
-		}
-		aead, err := cipher.NewGCM(block)
+		aead, err := newGCM(key)
 		if err != nil {
 			return nil, err
 		}
@@ -138,6 +141,144 @@ func (k *Keyring) Open(sealed Sealed, associatedData []byte) ([]byte, error) {
 		return nil, ErrOpen
 	}
 	return plaintext, nil
+}
+
+// Envelope seals each value under a fresh random data key and seals only
+// that key with the master sealer. A master-key rotation then re-wraps the
+// small data keys (Rewrap) without opening the secrets themselves, and a
+// KMS can stand in for the keyring as the master. Values sealed directly
+// by the master key still open, so older rows keep working.
+type Envelope struct {
+	master Sealer
+}
+
+var _ Sealer = (*Envelope)(nil)
+
+// NewEnvelope seals under master: the keyring, or anything else that
+// implements Sealer.
+func NewEnvelope(master Sealer) *Envelope { return &Envelope{master: master} }
+
+func (e *Envelope) Seal(plaintext, associatedData []byte) (Sealed, error) {
+	dataKey := make([]byte, KeySize)
+	if _, err := rand.Read(dataKey); err != nil {
+		return Sealed{}, err
+	}
+	defer Wipe(dataKey)
+	nonce, ciphertext, err := sealWith(dataKey, plaintext, associatedData)
+	if err != nil {
+		return Sealed{}, err
+	}
+	wrapped, err := e.master.Seal(dataKey, wrapContext(associatedData))
+	if err != nil {
+		return Sealed{}, err
+	}
+	return Sealed{KeyVersion: wrapped.KeyVersion, Nonce: nonce, Ciphertext: ciphertext, WrappedKey: joinWrapped(wrapped)}, nil
+}
+
+func (e *Envelope) Open(sealed Sealed, associatedData []byte) ([]byte, error) {
+	if len(sealed.WrappedKey) == 0 {
+		return e.master.Open(sealed, associatedData)
+	}
+	dataKey, err := e.unwrap(sealed, associatedData)
+	if err != nil {
+		return nil, err
+	}
+	defer Wipe(dataKey)
+	return openWith(dataKey, sealed.Nonce, sealed.Ciphertext, associatedData)
+}
+
+// Rewrap seals the value's data key again with the master's current key
+// and leaves the sealed secret as it is. A value sealed directly by the
+// master key is moved into an envelope.
+func (e *Envelope) Rewrap(sealed Sealed, associatedData []byte) (Sealed, error) {
+	if len(sealed.WrappedKey) == 0 {
+		plaintext, err := e.master.Open(sealed, associatedData)
+		if err != nil {
+			return Sealed{}, err
+		}
+		defer Wipe(plaintext)
+		return e.Seal(plaintext, associatedData)
+	}
+	dataKey, err := e.unwrap(sealed, associatedData)
+	if err != nil {
+		return Sealed{}, err
+	}
+	defer Wipe(dataKey)
+	wrapped, err := e.master.Seal(dataKey, wrapContext(associatedData))
+	if err != nil {
+		return Sealed{}, err
+	}
+	sealed.KeyVersion, sealed.WrappedKey = wrapped.KeyVersion, joinWrapped(wrapped)
+	return sealed, nil
+}
+
+func (e *Envelope) unwrap(sealed Sealed, associatedData []byte) ([]byte, error) {
+	w := sealed.WrappedKey
+	if len(w) < 1 || len(w) < 1+int(w[0]) {
+		return nil, ErrOpen
+	}
+	nonceSize := int(w[0])
+	dataKey, err := e.master.Open(Sealed{KeyVersion: sealed.KeyVersion, Nonce: w[1 : 1+nonceSize], Ciphertext: w[1+nonceSize:]},
+		wrapContext(associatedData))
+	if err != nil {
+		return nil, err
+	}
+	if len(dataKey) != KeySize {
+		Wipe(dataKey)
+		return nil, ErrOpen
+	}
+	return dataKey, nil
+}
+
+// wrapContext is the associated data a data key is sealed under: the
+// value's own, set apart so a wrapped key can never pass for a value
+// sealed directly by the master key, or the other way round.
+func wrapContext(associatedData []byte) []byte {
+	return append([]byte("data-key|"), associatedData...)
+}
+
+// joinWrapped stores a wrapped key as one byte of nonce length, the nonce
+// and the ciphertext. A KMS without a separate nonce stores length 0.
+func joinWrapped(w Sealed) []byte {
+	out := make([]byte, 0, 1+len(w.Nonce)+len(w.Ciphertext))
+	out = append(out, byte(len(w.Nonce)))
+	out = append(out, w.Nonce...)
+	return append(out, w.Ciphertext...)
+}
+
+func sealWith(key, plaintext, associatedData []byte) ([]byte, []byte, error) {
+	aead, err := newGCM(key)
+	if err != nil {
+		return nil, nil, err
+	}
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, nil, err
+	}
+	return nonce, aead.Seal(nil, nonce, plaintext, associatedData), nil
+}
+
+func openWith(key, nonce, ciphertext, associatedData []byte) ([]byte, error) {
+	aead, err := newGCM(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(nonce) != aead.NonceSize() {
+		return nil, ErrOpen
+	}
+	plaintext, err := aead.Open(nil, nonce, ciphertext, associatedData)
+	if err != nil {
+		return nil, ErrOpen
+	}
+	return plaintext, nil
+}
+
+func newGCM(key []byte) (cipher.AEAD, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
 }
 
 // Wipe overwrites a buffer that held a secret.

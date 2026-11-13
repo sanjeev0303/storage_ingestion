@@ -8,5 +8,5 @@ type Props = { params: Promise<{ id: string }>; searchParams: Promise<{ version?
 export default async function DatasetValidationPage({ params, searchParams }: Props) {
   const { id } = await params;
   const { version } = await searchParams;
-  return <DatasetValidationScreen datasetId={id} versionId={version} />;
+  return <DatasetValidationScreen key={version ?? ""} datasetId={id} versionId={version} />;
 }

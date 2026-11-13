@@ -31,8 +31,9 @@ a provider call.
 | Active record, provider session gone | Completion answers 409; expiry and abort finish without the provider session. |
 | Concurrent completions | One claims COMPLETING; the others answer as retries (200 or 202). The provider completes once. |
 | Expired upload | Refuses part URLs and completion; the EXPIRE task aborts at the provider and marks it EXPIRED. |
+| Single-request start repeated with the same idempotency key | A `PENDING` session within its lifetime answers 200 with a fresh `upload_url`. A `COMPLETED` or `VERIFIED` one answers 200 with its status and no `upload_url`: there is nothing left to send. Any other (expired, aborted, failed, or past its lifetime) answers **409** `{"code": "session_ended", "error": "upload session is not active: it has ended; start again with a new idempotency key"}`. The SDKs read "not active" as: start again under a new key. |
 | Worker crash | Its leases expire; another worker claims the task. A stale worker's writes are refused. |
-| Retries | Exponential backoff with jitter up to `RECONCILIATION_MAX_ATTEMPTS`, then EXHAUSTED (kept for an operator, never re-run). Permanent provider errors exhaust at once. |
+| Retries | Exponential backoff with jitter up to `RECONCILIATION_MAX_ATTEMPTS`, then EXHAUSTED (kept for an operator, never re-run on its own). Permanent provider errors exhaust at once. See "Exhausted reconciliation tasks" below. |
 
 Discrepancy scans (each bounded per cycle, resuming from a cursor). The two
 listing scans run on every place uploads land: the platform's `quarantine/`,
@@ -71,6 +72,50 @@ is assembled, so the completion event, the asset and verification always
 have it. Verification is the same either way: the stored bytes are hashed
 and must match. Bulk ingestion manifests still require a checksum per entry;
 single-request uploads still declare it at creation.
+
+## Exhausted reconciliation tasks
+
+An EXHAUSTED task leaves its upload where it stopped, COMPLETING or ABORTING,
+with its quota still reserved, and no new task is made for that upload. Find
+them, fix the cause (credentials, a bucket policy, a provider outage), then
+requeue each one:
+
+```sql
+SELECT id, tenant_id, upload_id, operation, attempt_count, last_error, updated_at
+FROM reconciliation_tasks WHERE state = 'EXHAUSTED' ORDER BY updated_at;
+```
+
+```powershell
+.\bin\reconciliation-worker.exe -requeue <task id>
+```
+
+`-requeue` moves only an EXHAUSTED task back to PENDING, with its attempts
+reset to 0 and due at once; its `last_error` stays until the next attempt.
+Anything else (an unknown ID, a task already PENDING or SUCCEEDED) is refused
+and nothing changes. A running worker picks the task up on its next cycle.
+
+## Client behaviour (console)
+
+The console's upload engine (`client/src/features/uploads/engine`) keeps the
+work it has done whatever the network does. The SDKs do the same where it
+applies (docs/sdks.md, "Bad networks").
+
+| Situation | What the console does |
+|---|---|
+| Offline | The browser's `offline` event, or any request that cannot get through, triggers a check against the API (`GET /auth/me`; any answer counts). If the API cannot be reached, every upload pauses at once: requests in flight are aborted, finished parts are kept, and the row says "Paused: no connection" with the bytes kept. No retries are spent while offline. |
+| Back online | The `online` event is only a hint: uploads go on once the API answers, checked again every 2 s backing off to 30 s, or at once with "Check connection". |
+| By hand | Pause stops the parts in flight and keeps the rest; Resume goes on; Cancel aborts the upload at the API. Once `/complete` has been sent, Cancel is no longer offered: the server may publish the file whatever the console does, so the row follows the real outcome instead of claiming Cancelled. Retry and Start again start one attempt however often they are pressed. |
+| Organization | Each upload is pinned to the organization it started in (a resume uses the record's organization). Every request it makes, including the abort, names that organization, so switching organization mid-upload does not move it. |
+| Checking stopped | Status checks stop after their limit, whether the upload is finishing, verifying or processing; "Check again" starts them once more. It does nothing while checks are still running, so two loops never run side by side. |
+| Leaving the page | Leaving the uploads screen stops its uploads as closing the tab would: nothing is aborted at the API, a multipart upload keeps its resume record and can be continued from Unfinished uploads, and nothing keeps uploading unseen. Removing a queued file cancels it, so a running queue cannot start it. |
+| Stalled part | No upload progress for 20 s stops the PUT and sends the part again, with one fewer part in flight. There is no whole-request timeout, so a slow link that keeps moving is never cut off. |
+| Slow or fast link | Parts in flight start at 4 and follow the measured speed, between 1 and 6 (a browser's connections to one host): fewer when a part would take over a minute, more when under 15 s. New uploads are sized from the page's measured speed, the sum of the uploads sending at the time (they share one link): 5 MiB parts below 256 KiB/s, 16 MiB above 8 MiB/s, else 8 MiB, always within 5 MiB and 10,000 parts. The row shows speed, time left and "Slow connection" below 256 KiB/s. |
+| Retries | Network errors, 408, 429 and 5xx: up to 6 tries with full-jitter backoff (0 to 1 s, 2 s, 4 s ... capped at 30 s); an API `Retry-After` wins. An expired part URL (403 saying the request or token expired, the signature is outside its time frame, or the clock is skewed) gets a fresh URL for that part from `parts/urls` and goes again at once. A plain `AccessDenied` is a refusal and fails the upload. Other 4xx answers are not retried. Storage's own `Retry-After` is not readable from the browser's upload request, so storage 429/503 use the backoff. |
+| Closed tab or crash | The resume record in IndexedDB holds the confirmed parts and, from the moment each PUT finishes, the parts sent but not yet confirmed. On resume, after the person chooses the file again (a browser cannot reopen it on its own; the name, size and SHA-256 of the first MiB must match), the record's unconfirmed parts are confirmed first; the API checks them against the provider's list, and a refusal (400) sends them again. Only the missing parts are sent. The whole-file SHA-256 is read again only if it had not finished before the tab closed. |
+| Completion | Unchanged: completion sends every part and the file's SHA-256, and the upload counts as stored only when the API answers. |
+
+The API keeps no list of uploaded parts a client can read, so a resume
+skips only the parts this browser recorded.
 
 ## Environment
 
@@ -129,6 +174,7 @@ go build -o .\bin\reconciliation-worker.exe .\cmd\reconciliation-worker
 .\bin\reconciliation-worker.exe                        # continuous
 .\bin\reconciliation-worker.exe -once -dry-run         # report only, changes nothing
 .\bin\reconciliation-worker.exe -once                  # one real cycle, JSON report on stdout
+.\bin\reconciliation-worker.exe -requeue <task id>     # retry an EXHAUSTED task once its cause is fixed
 ```
 
 ## Example requests

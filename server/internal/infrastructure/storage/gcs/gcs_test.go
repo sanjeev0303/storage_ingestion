@@ -435,7 +435,9 @@ func TestEmulatorSignedPartUpload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(url, "http://127.0.0.1:4443/") || !strings.Contains(url, "X-Goog-Signature=") {
+	// Signed for whichever emulator TEST_GCS_ENDPOINT names (fake-gcs-server, floci-gcp).
+	emulatorURL := strings.TrimSuffix(os.Getenv("TEST_GCS_ENDPOINT"), "/") + "/"
+	if !strings.HasPrefix(url, emulatorURL) || !strings.Contains(url, "X-Goog-Signature=") {
 		t.Fatalf("the part URL is signed for the emulator: %s", url)
 	}
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPut, url, strings.NewReader("hello part"))

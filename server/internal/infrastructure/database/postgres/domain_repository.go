@@ -387,6 +387,12 @@ func (r *DomainRepository) DueUpstream(ctx context.Context, now time.Time, limit
 }
 
 // PutUpstream records a check.
+//
+// It is not guarded against a GONE source: the checker never turns GONE
+// back into WATCHING (DueUpstream skips GONE sources and checkSource only
+// moves to CHANGED or GONE), and there is no re-watch operation that
+// would need to. Two checkers racing on one due source can still let the
+// later write win; guard on state <> 'GONE' if a re-watch is ever added.
 func (r *DomainRepository) PutUpstream(ctx context.Context, u model.UpstreamSource) error {
 	_, err := r.db.Pool.Exec(ctx, `UPDATE upstream_sources SET state = $3, etag = $4, last_modified = $5, note = $6, checked_at = $7, changed_at = $8, next_check_at = $9
 		WHERE tenant_id = $1 AND url = $2`, u.TenantID, u.URL, u.State, u.ETag, u.LastModified, u.Note, u.CheckedAt, u.ChangedAt, u.NextCheckAt)
@@ -423,10 +429,18 @@ func (r *DomainRepository) AddPublication(ctx context.Context, p model.Publicati
 	return nil
 }
 
-// SetDOI records how registering a DOI went.
+// SetDOI records how registering a DOI went, while the publication is not
+// withdrawn.
 func (r *DomainRepository) SetDOI(ctx context.Context, tenantID, id, doi, failure string) error {
-	_, err := r.db.Pool.Exec(ctx, `UPDATE publications SET doi = $3, doi_error = $4 WHERE tenant_id = $1 AND id = $2`, tenantID, id, doi, failure)
-	return err
+	tag, err := r.db.Pool.Exec(ctx, `UPDATE publications SET doi = $3, doi_error = $4 WHERE tenant_id = $1 AND id = $2 AND withdrawn_at IS NULL`,
+		tenantID, id, doi, failure)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return model.ErrWithdrawn
+	}
+	return nil
 }
 
 func (r *DomainRepository) Withdraw(ctx context.Context, tenantID, id, reason string, at time.Time) error {

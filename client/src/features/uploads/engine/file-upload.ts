@@ -1,10 +1,10 @@
 import { apiRaw, getActiveOrganization, newIdempotencyKey, type RequestOptions } from "@/lib/api/client";
 import { ApiError, describeError, isApiError } from "@/lib/api/errors";
 import { reportProblem } from "@/lib/errors/report";
-import { choosePartSize, MIB, planParts, runPool, type Part } from "@/lib/upload/parts";
-import { isTransientPutError, MissingEtagError, putBlob, UploadHttpError } from "@/lib/upload/put";
-import { sleep as realSleep, withRetry } from "@/lib/upload/retry";
-import { isAbort, sha256Blob } from "@/lib/upload/sha256";
+import { choosePartSize, MIB, planParts, type Part } from "@/lib/upload/parts";
+import { isTransientPutError, MissingEtagError, putBlob, UploadHttpError, UploadNetworkError } from "@/lib/upload/put";
+import { sleep as realSleep } from "@/lib/upload/retry";
+import { abortError, isAbort, sha256Blob } from "@/lib/upload/sha256";
 import { formatBytes } from "@/lib/utils/format";
 import type {
   FailureKind,
@@ -18,9 +18,29 @@ import type {
   UploadSnapshot,
   UploadStatus,
 } from "../types";
+import {
+  backoffMs,
+  isNetworkFailure,
+  preferredPartBytes,
+  sharedConnection,
+  SLOW_BPS,
+  StalledError,
+  type ConnectionWatch,
+} from "./network";
 import { memoryStore, type ResumeStore } from "./store";
 
 export const SINGLE_LIMIT_BYTES = 16 * MIB;
+// The start of a file, hashed to tell the same file when it is chosen again.
+export const HEAD_BYTES = 1 * MIB;
+
+// Attempts for one PUT or API call before the upload fails.
+const PUT_ATTEMPTS = 6;
+const API_ATTEMPTS = 6;
+// Parts in flight: never fewer than one, and never more than the six
+// connections a browser opens to one host.
+const MIN_LANES = 1;
+const MAX_LANES = 6;
+const SPEED_WINDOW_MS = 8000;
 
 type Putter = typeof putBlob;
 
@@ -29,13 +49,18 @@ export type EngineOptions = {
   hash: typeof sha256Blob;
   sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   store: ResumeStore;
+  connection: ConnectionWatch;
   // How long to wait between status checks.
   pollMs: number;
   // How many status checks before the screen asks the person to check again.
   maxPolls: number;
+  // Parts in flight at the start; it then follows the measured speed.
   concurrency: number;
   // Parts are presigned and confirmed in groups of this size.
   partBatch: number;
+  // A PUT that sends nothing for this long is stopped and tried again.
+  stallMs: number;
+  random: () => number;
   // False when the connection has no multipart support.
   hasMultipart: boolean;
   // Azure blocks come back without an ETag and do not need one.
@@ -47,10 +72,13 @@ const defaults: EngineOptions = {
   hash: sha256Blob,
   sleep: realSleep,
   store: memoryStore(),
+  connection: sharedConnection(),
   pollMs: 3000,
   maxPolls: 40,
   concurrency: 4,
   partBatch: 16,
+  stallMs: 20_000,
+  random: Math.random,
   hasMultipart: true,
   requireEtag: true,
 };
@@ -63,8 +91,30 @@ async function call<T>(path: string, options: RequestOptions): Promise<Call<T>> 
   return { status: res.status, data: (text ? JSON.parse(text) : undefined) as T };
 }
 
+export function headSha256(file: Blob, hash: (blob: Blob) => Promise<string> = sha256Blob) {
+  return hash(file.slice(0, HEAD_BYTES));
+}
+
+// Whether a file chosen again is the one the record was made for: the same
+// name, size and first MiB. Records saved before the hash was kept compare
+// the last modified time instead.
+export async function isSameFile(file: File, record: ResumeRecord, hash: (blob: Blob) => Promise<string> = sha256Blob) {
+  if (file.name !== record.request.file_name || file.size !== record.file_size) return false;
+  if (!record.head_sha256) return file.lastModified === record.file_last_modified;
+  return (await headSha256(file, hash)) === record.head_sha256;
+}
+
 export function classifyFailure(error: unknown): { kind: FailureKind; message: string } {
   if (error instanceof MissingEtagError) return { kind: "cors", message: error.message };
+  if (error instanceof StalledError) {
+    return {
+      kind: "other",
+      message: "Nothing reached the storage provider for 20 seconds, several times in a row. Check the connection, then retry.",
+    };
+  }
+  if (error instanceof UploadNetworkError) {
+    return { kind: "other", message: "The storage provider could not be reached. Check the connection, then retry." };
+  }
 
   if (error instanceof ApiError) {
     const body = (error.body ?? {}) as { limit?: string; max?: number };
@@ -105,39 +155,60 @@ export function classifyFailure(error: unknown): { kind: FailureKind; message: s
 }
 
 // How long to wait before trying an API call again, or null to give up.
-function retryDelaySeconds(error: unknown, attempt: number): number | null {
-  if (!(error instanceof ApiError)) return null;
-  if (error.status === 429) return attempt < 6 ? (error.retryAfter ?? 5) : null;
-  if (error.status === 0 || error.status === 502 || error.status === 503 || error.status === 504) {
-    return attempt < 3 ? 2 ** (attempt + 1) : null;
-  }
-  if (error.status === 409 && /pending reconciliation|has not been uploaded/i.test(error.message)) {
-    return attempt < 5 ? 3 : null;
-  }
-  return null;
+// Only answers that can change are retried; Retry-After wins when given.
+function apiRetryDelayMs(error: unknown, attempt: number, random: () => number): number | null {
+  if (!(error instanceof ApiError) || attempt >= API_ATTEMPTS - 1) return null;
+  if (error.status === 409 && /pending reconciliation|has not been uploaded/i.test(error.message)) return 3000;
+  const retryable = error.status === 0 || error.status === 408 || error.status === 429 || error.status >= 500;
+  if (!retryable) return null;
+  if (error.retryAfter) return error.retryAfter * 1000;
+  return backoffMs(attempt, random);
 }
 
 const TERMINAL: UploadSnapshot["state"][] = ["available", "rejected", "failed", "cancelled"];
+// States that wait on the network, and so pause when it goes.
+const NETWORKED: UploadSnapshot["state"][] = ["uploading", "finalizing", "verifying", "processing"];
+
+type Target = { url: string; headers?: Record<string, string> };
 
 export class FileUpload {
   readonly file: File;
   private options: EngineOptions;
   private snap: UploadSnapshot;
   private listeners = new Set<() => void>();
+  // Lives as long as the attempt: cancelling aborts it.
   private controller = new AbortController();
+  // One stretch of network work: a pause aborts it, going on starts a new one.
+  private leg = new AbortController();
+  private wakers = new Set<() => void>();
+  private unfollow: (() => void) | undefined;
   private key = newIdempotencyKey();
   private sha: string | undefined;
   private sentByPart = new Map<number, number>();
   private resumedBytes = 0;
   private samples: { at: number; bytes: number }[] = [];
   private lastEmit = 0;
+  private lanes: number;
   private record: ResumeRecord | undefined;
+  private confirmed = new Map<number, StoredPart>();
+  private unconfirmed = new Map<number, StoredPart>();
+  private saving = Promise.resolve();
   private running = false;
   private watching: Promise<void> | undefined;
+  // A retry or restart on its way; a second press joins it.
+  private again: Promise<void> | undefined;
+  // The organization the upload started in. Every request names it, so
+  // switching organization meanwhile does not move the upload.
+  private org: string | undefined;
+  private stopped = false;
+  // A single upload's completion was sent under the current key. Unlike
+  // snap.completionSent, a retry does not clear it.
+  private sentCompletion = false;
 
   constructor(file: File, request: UploadRequest, options: Partial<EngineOptions> = {}) {
     this.file = file;
     this.options = { ...defaults, ...options };
+    this.lanes = this.options.concurrency;
     this.snap = {
       id: crypto.randomUUID(),
       fileName: file.name,
@@ -180,11 +251,14 @@ export class FileUpload {
   }
 
   async run(resume?: ResumeRecord) {
-    if (this.snap.state !== "queued" || this.running) return;
+    if (this.snap.state !== "queued" || this.running || this.stopped) return;
     this.running = true;
+    this.org ??= resume?.organization_id || getActiveOrganization() || undefined;
     this.controller = new AbortController();
+    this.leg = new AbortController();
+    this.follow();
     // Out of "queued" at once: the file has its slot, and the screen says so.
-    this.patch({ state: "hashing", hashedBytes: 0, failure: undefined, note: undefined, resumed: Boolean(resume) });
+    this.patch({ state: "hashing", hashedBytes: 0, failure: undefined, note: undefined, resumed: Boolean(resume), completionSent: false });
 
     try {
       if (resume) this.key = resume.idempotency_key;
@@ -202,7 +276,7 @@ export class FileUpload {
         // single request declares it up front.
         if (!this.sha) {
           this.sha = await this.options.hash(this.file, {
-            signal: this.signal,
+            signal: this.controller.signal,
             onProgress: (bytes) => this.throttled({ hashedBytes: bytes }),
           });
         }
@@ -218,47 +292,106 @@ export class FileUpload {
 
   // After a failure that can be repeated (network, provider refusal): keep the
   // same attempt, and for multipart pick up from the confirmed parts.
-  async retry() {
+  retry() {
+    this.again ??= this.retryOnce().finally(() => {
+      this.again = undefined;
+    });
+    return this.again;
+  }
+
+  // After the session expired or the size did not match: a brand new attempt.
+  restart() {
+    this.again ??= this.restartOnce().finally(() => {
+      this.again = undefined;
+    });
+    return this.again;
+  }
+
+  private async retryOnce() {
     if (this.snap.state !== "failed") return;
     const saved = this.snap.uploadId ? await this.options.store.get(this.snap.uploadId) : undefined;
     this.patch({ state: "queued" });
     await this.run(saved);
   }
 
-  // After the session expired or the size did not match: a brand new attempt.
-  async restart() {
+  private async restartOnce() {
     if (this.snap.state !== "failed") return;
+    // Let a save from the failed attempt land first, so it cannot write the
+    // old record back after it is let go.
+    await this.saving;
     this.key = newIdempotencyKey();
+    this.sentCompletion = false;
     this.record = undefined;
+    this.confirmed.clear();
+    this.unconfirmed.clear();
     this.sentByPart.clear();
     this.resumedBytes = 0;
     this.patch({ state: "queued", uploadId: undefined, sentBytes: 0, partsDone: 0, partsTotal: 0 });
     await this.run();
   }
 
+  // Stops the parts in flight. Parts already sent are kept; resume() sends the rest.
+  pause() {
+    if (this.snap.state !== "uploading" || this.snap.paused === "user") return;
+    this.pauseFor("user");
+  }
+
+  async resume() {
+    const paused = this.snap.paused;
+    if (!paused) return;
+    const connection = this.options.connection;
+    if (paused === "offline") {
+      // Check now rather than wait for the next scheduled check.
+      await connection.recheck();
+      return;
+    }
+    if (connection.offline) this.patch({ paused: "offline" });
+    else this.unpause();
+  }
+
   cancel() {
-    if (TERMINAL.includes(this.snap.state)) return;
+    // Once the completion is sent the server may publish the file whatever
+    // the console does, so the upload can no longer honestly say Cancelled.
+    if (TERMINAL.includes(this.snap.state) || this.snap.completionSent) return;
     const uploadId = this.snap.uploadId;
     const uploading = ["queued", "hashing", "uploading", "finalizing"].includes(this.snap.state);
 
     this.controller.abort();
-    this.patch({ state: "cancelled", note: undefined });
+    this.leg.abort();
+    this.patch({ state: "cancelled", note: undefined, paused: undefined });
     if (!uploadId || !uploading) return;
 
-    // Best effort: a 409 here means the upload had already completed.
-    call(`/uploads/${uploadId}/abort`, { method: "POST" }).catch(() => undefined);
-    this.options.store.remove(uploadId);
+    // Best effort: a 409 here means the session had already ended.
+    call(`/uploads/${uploadId}/abort`, { method: "POST", org: this.org }).catch(() => undefined);
+    // After any save still on its way, or that save would bring the record back.
+    void this.saving.then(() => this.options.store.remove(uploadId));
   }
 
   // Stops status polling for an upload that is already stored.
   stopWatching() {
     this.controller.abort();
-    this.patch({ pollingStopped: true });
+    this.leg.abort();
+    this.patch({ pollingStopped: true, paused: undefined });
+  }
+
+  // Leaving the page stops the upload as closing the tab would: nothing is
+  // aborted on the server, and a multipart upload keeps its saved record, so
+  // it can be continued from Unfinished uploads.
+  stop() {
+    this.stopped = true;
+    this.controller.abort();
+    this.leg.abort();
+    this.unfollow?.();
+    this.unfollow = undefined;
+    this.options.connection.forgetSpeed(this);
   }
 
   async checkNow() {
-    if (!["finalizing", "verifying", "processing"].includes(this.snap.state)) return;
+    // Only once checking stopped: otherwise a second loop would run next to the live one.
+    if (!this.snap.pollingStopped || !["finalizing", "verifying", "processing"].includes(this.snap.state)) return;
     this.controller = new AbortController();
+    this.leg = new AbortController();
+    this.follow();
     this.patch({ pollingStopped: false, failure: undefined });
     try {
       const info = await this.uploadInfo();
@@ -269,13 +402,21 @@ export class FileUpload {
     }
   }
 
+  // Network requests use this; a pause aborts it.
   private get signal() {
-    return this.controller.signal;
+    return this.leg.signal;
   }
 
   private patch(change: Partial<UploadSnapshot>) {
     if (this.snap.state === "cancelled" && change.state && change.state !== "cancelled") return;
     this.snap = { ...this.snap, ...change };
+    if (TERMINAL.includes(this.snap.state)) {
+      // A finished upload waits on nothing, so it cannot stay paused.
+      this.snap.paused = undefined;
+      this.unfollow?.();
+      this.unfollow = undefined;
+    }
+    if (this.snap.state !== "uploading" || this.snap.paused) this.options.connection.forgetSpeed(this);
     for (const listener of this.listeners) listener();
   }
 
@@ -293,41 +434,143 @@ export class FileUpload {
 
     const now = Date.now();
     this.samples.push({ at: now, bytes: sent });
-    this.samples = this.samples.filter((s) => now - s.at <= 5000);
+    // One sample from before the window stays, so a slow link that reports
+    // progress rarely still has a span to measure.
+    while (this.samples.length > 2 && now - this.samples[1].at > SPEED_WINDOW_MS) this.samples.shift();
     const first = this.samples[0];
-    const speedBps = now > first.at ? ((sent - first.bytes) / (now - first.at)) * 1000 : 0;
+    const span = now - first.at;
+    const speedBps = span > 0 ? Math.max(((sent - first.bytes) / span) * 1000, 0) : 0;
+    // A few seconds of samples first, so the start of a part is not called slow.
+    const measured = span >= 3000;
+    if (measured) this.options.connection.reportSpeed(this, speedBps);
 
-    const change = { sentBytes: sent, speedBps: Math.max(speedBps, 0) };
+    // Speed and time left are shown once measured; the first moments say little.
+    const change = { sentBytes: sent, speedBps: measured ? speedBps : 0, slow: measured && speedBps < SLOW_BPS };
     if (force) this.patch(change);
     else this.throttled(change);
+  }
+
+  // Aim for parts that take under a minute each. On a slow link, parts in
+  // parallel only split the same bandwidth: each one takes longer, is likelier
+  // to stall, and more half-sent bytes are lost when the connection drops.
+  private adjustLanes(partSize: number) {
+    const speed = this.snap.speedBps;
+    if (speed <= 0) return;
+    const secondsPerPart = (partSize * this.lanes) / speed;
+    if (secondsPerPart > 60 && this.lanes > MIN_LANES) this.lanes--;
+    else if (secondsPerPart < 15 && this.lanes < MAX_LANES) this.lanes++;
+  }
+
+  // Watches the connection while there is network work to do.
+  private follow() {
+    this.unfollow ??= this.options.connection.subscribe(this.onConnectionChange);
+  }
+
+  private onConnectionChange = () => {
+    if (this.options.connection.offline) {
+      if (!this.snap.paused && !this.snap.pollingStopped && NETWORKED.includes(this.snap.state)) this.pauseFor("offline");
+    } else if (this.snap.paused === "offline") {
+      this.unpause();
+    }
+  };
+
+  // Half-sent parts are lost when their requests stop, so only finished
+  // parts count as kept.
+  private pauseFor(reason: "user" | "offline") {
+    this.leg.abort();
+    if (this.snap.mode === "multipart") {
+      this.sentByPart.clear();
+      this.resumedBytes = 0;
+      for (const part of [...this.confirmed.values(), ...this.unconfirmed.values()]) this.resumedBytes += part.size;
+    } else {
+      this.sentByPart.set(1, 0);
+    }
+    this.patch({ paused: reason, sentBytes: this.resumedBytes, speedBps: 0, slow: false, note: undefined });
+  }
+
+  private unpause() {
+    this.leg = new AbortController();
+    this.samples = [];
+    this.patch({ paused: undefined });
+    for (const wake of this.wakers) wake();
+    this.wakers.clear();
+  }
+
+  private async whilePaused() {
+    while (this.snap.paused) {
+      const signal = this.controller.signal;
+      await new Promise<void>((resolve, reject) => {
+        if (signal.aborted) return reject(abortError());
+        const onAbort = () => reject(abortError());
+        signal.addEventListener("abort", onAbort, { once: true });
+        this.wakers.add(() => {
+          signal.removeEventListener("abort", onAbort);
+          resolve();
+        });
+      });
+    }
+  }
+
+  // A request could not get through. Resolves true when the API cannot be
+  // reached either: the upload is then paused until it can.
+  private async lostConnection() {
+    const offline = await this.options.connection.reportFailure();
+    if (offline && !this.snap.paused) this.pauseFor("offline");
+    return offline;
+  }
+
+  // Runs a step until it finishes. A pause stops the step part way; it runs
+  // again once the upload goes on, and skips the work already done.
+  private async keepGoing<T>(step: () => Promise<T>): Promise<T> {
+    for (;;) {
+      try {
+        return await step();
+      } catch (error) {
+        if (this.controller.signal.aborted) throw error;
+        // An abort that did not come from cancelling came from a pause.
+        const paused = Boolean(this.snap.paused) || isAbort(error) || (isNetworkFailure(error) && (await this.lostConnection()));
+        if (!paused) throw error;
+        await this.whilePaused();
+      }
+    }
+  }
+
+  private async wait(ms: number) {
+    if (ms >= 1000) this.patch({ note: `Waiting ${Math.round(ms / 1000)} seconds before trying again.` });
+    await this.options.sleep(ms, this.signal);
+    this.patch({ note: undefined });
   }
 
   private async request<T>(path: string, options: RequestOptions = {}): Promise<Call<T>> {
     for (let attempt = 0; ; attempt++) {
       try {
-        return await call<T>(path, { ...options, signal: this.signal });
+        return await call<T>(path, { ...options, org: this.org, signal: this.signal });
       } catch (error) {
-        const wait = retryDelaySeconds(error, attempt);
+        // Offline: stop here rather than use up the retries; keepGoing waits.
+        if (isNetworkFailure(error) && (await this.lostConnection())) throw error;
+        const wait = apiRetryDelayMs(error, attempt, this.options.random);
         if (wait === null) throw error;
-        this.patch({ note: `Waiting ${wait} seconds before trying again.` });
-        await this.options.sleep(wait * 1000, this.signal);
-        this.patch({ note: undefined });
+        await this.wait(wait);
       }
     }
   }
 
   private uploadInfo() {
-    return this.request<UploadInfo>(`/uploads/${this.snap.uploadId}`).then((r) => r.data);
+    return this.keepGoing(() => this.request<UploadInfo>(`/uploads/${this.snap.uploadId}`)).then((r) => r.data);
   }
 
   private async fail(error: unknown) {
-    if (isAbort(error) || this.signal.aborted) return;
+    if (isAbort(error) || this.controller.signal.aborted) return;
     const failure = classifyFailure(error);
     const uploadId = this.snap.uploadId;
     if (uploadId && (failure.kind === "session_expired" || failure.kind === "size_mismatch")) {
+      // Let go of the record first: a checksum still being read would save it
+      // again when it finishes.
+      this.record = undefined;
+      await this.saving;
       await this.options.store.remove(uploadId);
     }
-    this.patch({ state: "failed", failure, note: undefined, speedBps: 0 });
+    this.patch({ state: "failed", failure, note: undefined, speedBps: 0, paused: undefined, slow: false });
   }
 
   private body() {
@@ -346,46 +589,118 @@ export class FileUpload {
     };
   }
 
+  // Watches a PUT for progress instead of timing it as a whole: a slow link
+  // may need many minutes for a part, but one that sends nothing for stallMs
+  // is stuck, and is stopped so the part can go again.
+  private async putWatched(blob: Blob, target: Target, onProgress: (bytes: number) => void) {
+    const stop = new AbortController();
+    let stalled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const arm = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        stalled = true;
+        stop.abort();
+      }, this.options.stallMs);
+    };
+
+    arm();
+    try {
+      return await this.options.put(target.url, blob, {
+        headers: target.headers,
+        signal: AbortSignal.any([this.signal, stop.signal]),
+        timeoutMs: 0,
+        onProgress: (bytes) => {
+          arm();
+          onProgress(bytes);
+        },
+      });
+    } catch (error) {
+      if (stalled && !this.signal.aborted) throw new StalledError();
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // Sends a blob to a presigned URL, retrying what can pass: a network error
+  // or stall while the API still answers, 408, 429, 5xx, and an expired URL,
+  // which refresh() replaces. Anything else would fail the same way again.
+  private async putWithRetries(blob: Blob, target: () => Target, refresh: () => Promise<void>, onProgress: (bytes: number) => void) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.putWatched(blob, target(), onProgress);
+      } catch (error) {
+        onProgress(0);
+        if (isAbort(error) || this.signal.aborted) throw error;
+        const expired = error instanceof UploadHttpError && error.urlExpired;
+        const stalled = error instanceof StalledError;
+        if (!expired && !stalled && !isTransientPutError(error)) throw error;
+        if (attempt >= PUT_ATTEMPTS - 1) throw error;
+        if (stalled) this.lanes = Math.max(MIN_LANES, this.lanes - 1);
+        if (isNetworkFailure(error) && (await this.lostConnection())) throw error;
+        if (expired) {
+          await refresh();
+          continue;
+        }
+        await this.wait(backoffMs(attempt, this.options.random));
+      }
+    }
+  }
+
   private async uploadSingle() {
     this.patch({ state: "uploading", sentBytes: 0, partsTotal: 1, partsDone: 0 });
     const { request } = this.snap;
+    const create = async () => {
+      try {
+        return await this.request<SingleUploadResponse>("/uploads", { method: "POST", body: this.body() });
+      } catch (error) {
+        // A retry repeats the key, and the session it names has ended before
+        // its bytes arrived. Start a new one, as a multipart upload does when
+        // its session is gone. Not once a completion was sent: that session
+        // may still become the stored file.
+        if (!(isApiError(error) && error.code === "session_ended") || this.sentCompletion) throw error;
+        this.key = newIdempotencyKey();
+        this.patch({ note: "The earlier upload session had expired or was closed, so this upload starts again from the beginning." });
+        return this.request<SingleUploadResponse>("/uploads", { method: "POST", body: this.body() });
+      }
+    };
 
-    let created = (await this.request<SingleUploadResponse>("/uploads", { method: "POST", body: this.body() })).data;
+    let created = (await this.keepGoing(create)).data;
     this.patch({ uploadId: created.upload_id, storageConnectionId: created.storage_connection_id });
 
-    await withRetry(
-      async () => {
-        try {
-          // The URL signs the Content-Type, so it must match exactly.
-          await this.options.put(created.upload_url, this.file, {
-            headers: { ...created.upload_headers, "Content-Type": request.content_type },
-            signal: this.signal,
-            onProgress: (bytes) => {
-              this.sentByPart.set(1, bytes);
-              this.sendProgress();
-            },
-          });
-        } catch (error) {
-          if (error instanceof UploadHttpError && error.urlExpired) {
-            // Same idempotency key: the API hands back the same session with a new URL.
-            created = (await this.request<SingleUploadResponse>("/uploads", { method: "POST", body: this.body() })).data;
-          }
-          throw error;
-        }
-      },
-      {
-        signal: this.signal,
-        sleep: this.options.sleep,
-        shouldRetry: (error) => isTransientPutError(error) || (error instanceof UploadHttpError && error.urlExpired),
-        onRetry: () => this.sentByPart.set(1, 0),
-      },
+    // A retry after a completion that went through: the file is stored already.
+    if (!created.upload_url) {
+      this.patch({ completionSent: true, partsDone: 1, sentBytes: this.file.size });
+      this.watch(created.status);
+      return;
+    }
+
+    await this.keepGoing(() =>
+      this.putWithRetries(
+        this.file,
+        // The URL signs the Content-Type, so it must match exactly.
+        () => ({ url: created.upload_url, headers: { ...created.upload_headers, "Content-Type": request.content_type } }),
+        // Same idempotency key: the API hands back the same session with a new URL.
+        async () => {
+          created = (await create()).data;
+          this.patch({ uploadId: created.upload_id });
+        },
+        (bytes) => {
+          this.sentByPart.set(1, bytes);
+          this.sendProgress();
+        },
+      ),
     );
     this.sentByPart.set(1, this.file.size);
     this.patch({ partsDone: 1 });
     this.sendProgress(true);
 
-    this.patch({ state: "finalizing" });
-    const done = await this.request<{ status: UploadStatus }>(`/uploads/${created.upload_id}/complete`, { method: "POST" });
+    this.patch({ state: "finalizing", completionSent: true });
+    this.sentCompletion = true;
+    const done = await this.keepGoing(() =>
+      this.request<{ status: UploadStatus }>(`/uploads/${created.upload_id}/complete`, { method: "POST" }),
+    );
     this.watch(done.status === 202 ? "COMPLETING" : done.data.status);
   }
 
@@ -394,8 +709,9 @@ export class FileUpload {
     let record = resume;
 
     if (record) {
-      this.patch({ uploadId: record.upload_id });
-      const status = await this.checkResumable(record);
+      const saved = record;
+      this.patch({ uploadId: saved.upload_id });
+      const status = await this.keepGoing(() => this.checkResumable(saved));
       if (status === "gone") {
         this.key = newIdempotencyKey();
         record = undefined;
@@ -405,24 +721,30 @@ export class FileUpload {
           note: "The earlier upload session had expired or was closed, so this upload starts again from the beginning.",
         });
       } else if (status !== "open") {
-        await this.options.store.remove(record.upload_id);
+        this.patch({ completionSent: true });
+        await this.options.store.remove(saved.upload_id);
         this.watch(status);
         return;
       }
     }
 
     if (!record) {
-      const start = await this.request<MultipartStartResponse>("/uploads/multipart", { method: "POST", body: this.body() });
+      const head = await headSha256(this.file, (blob) => this.options.hash(blob, { signal: this.controller.signal }));
+      const start = await this.keepGoing(() =>
+        this.request<MultipartStartResponse>("/uploads/multipart", { method: "POST", body: this.body() }),
+      );
       record = {
         upload_id: start.data.upload_id,
-        organization_id: getActiveOrganization() ?? "",
+        organization_id: this.org ?? "",
         idempotency_key: this.key,
         request: this.snap.request,
         file_size: this.file.size,
         file_last_modified: this.file.lastModified,
         sha256: this.sha ?? "",
-        part_size: choosePartSize(this.file.size),
+        head_sha256: head,
+        part_size: choosePartSize(this.file.size, preferredPartBytes(this.options.connection.measuredBps)),
         parts: [],
+        unconfirmed: [],
         expires_at: start.data.expires_at,
         saved_at: new Date().toISOString(),
       };
@@ -430,6 +752,8 @@ export class FileUpload {
       await this.options.store.put(record);
     }
     this.record = record;
+    this.confirmed = new Map(record.parts.map((p) => [p.number, p]));
+    this.unconfirmed = new Map((record.unconfirmed ?? []).map((p) => [p.number, p]));
 
     // Runs alongside the parts and is only awaited at completion. A failure
     // is reported there, so it must not go unhandled before then.
@@ -437,39 +761,37 @@ export class FileUpload {
     hashing.catch(() => undefined);
 
     const plan = planParts(this.file.size, record.part_size);
-    const confirmed = new Map<number, StoredPart>(record.parts.map((p) => [p.number, p]));
-    this.sentByPart.clear();
-    this.resumedBytes = record.parts.reduce((sum, p) => sum + p.size, 0);
-    this.patch({ partsTotal: plan.length, partsDone: confirmed.size });
-    this.sendProgress(true);
-
-    const missing = plan.filter((p) => !confirmed.has(p.number));
-    for (let i = 0; i < missing.length; i += this.options.partBatch) {
-      await this.uploadBatch(missing.slice(i, i + this.options.partBatch), confirmed);
-    }
+    this.patch({ partsTotal: plan.length, partsDone: this.confirmed.size });
+    await this.keepGoing(() => this.sendMissingParts(plan));
 
     this.patch({ state: "finalizing" });
     const checksum = await hashing;
-    const parts = [...confirmed.values()]
+    const parts = [...this.confirmed.values()]
       .sort((a, b) => a.number - b.number)
       .map((p) => ({ part_number: p.number, etag: p.etag }));
     // The server records this checksum, or checks it against the one the
     // upload started with, and verifies the stored bytes against it.
-    const done = await this.request<{ status: UploadStatus }>(`/uploads/${record.upload_id}/complete`, {
-      method: "POST",
-      body: { parts, checksum_sha256: checksum },
-    });
-    await this.options.store.remove(record.upload_id);
+    const uploadId = record.upload_id;
+    this.patch({ completionSent: true });
+    const done = await this.keepGoing(() =>
+      this.request<{ status: UploadStatus }>(`/uploads/${uploadId}/complete`, {
+        method: "POST",
+        body: { parts, checksum_sha256: checksum },
+      }),
+    );
+    await this.saving;
+    await this.options.store.remove(uploadId);
     this.watch(done.status === 202 ? "COMPLETING" : done.data.status);
   }
 
   // Hashes the file while its parts upload. Progress has its own throttle so
   // it never crowds out the upload's own progress updates. The result is
   // saved with the resume record, so a resumed upload does not hash again.
+  // It runs on the attempt's signal, so a pause does not stop it.
   private async hashWhileUploading() {
     let lastEmit = 0;
     const sha = await this.options.hash(this.file, {
-      signal: this.signal,
+      signal: this.controller.signal,
       onProgress: (bytes) => {
         const now = Date.now();
         if (now - lastEmit < 250) return;
@@ -480,10 +802,25 @@ export class FileUpload {
     this.sha = sha;
     this.patch({ hashedBytes: this.file.size });
     if (this.record) {
-      this.record = { ...this.record, sha256: sha, saved_at: new Date().toISOString() };
-      await this.options.store.put(this.record);
+      this.record = { ...this.record, sha256: sha };
+      await this.save();
     }
     return sha;
+  }
+
+  // Saves in order, so two parts finishing together cannot leave the older
+  // record on disk.
+  private save() {
+    if (!this.record) return this.saving;
+    const record: ResumeRecord = {
+      ...this.record,
+      parts: [...this.confirmed.values()],
+      unconfirmed: [...this.unconfirmed.values()],
+      saved_at: new Date().toISOString(),
+    };
+    this.record = record;
+    this.saving = this.saving.then(() => this.options.store.put(record));
+    return this.saving;
   }
 
   // "open" means parts can still be sent; "gone" means start over.
@@ -500,41 +837,81 @@ export class FileUpload {
     }
   }
 
-  private async uploadBatch(batch: Part[], confirmed: Map<number, StoredPart>) {
-    const urls = await this.presign(batch.map((p) => p.number));
-    const finished: StoredPart[] = [];
+  // Runs again after every pause. Parts confirmed or already sent are skipped.
+  private async sendMissingParts(plan: Part[]) {
+    if (this.unconfirmed.size > 0) await this.confirmLeftovers();
 
-    try {
-      await runPool(
-        batch,
-        this.options.concurrency,
-        async (part) => {
-          const etag = await this.sendPart(part, urls);
-          finished.push({ number: part.number, etag, size: part.size });
-        },
-        this.signal,
-      );
-    } catch (error) {
-      // Keep the ETags of parts that did go through; they are lost with the page otherwise.
-      if (finished.length > 0 && !this.signal.aborted) await this.confirm(finished, confirmed).catch(() => undefined);
-      throw error;
+    this.sentByPart.clear();
+    this.resumedBytes = 0;
+    for (const part of [...this.confirmed.values(), ...this.unconfirmed.values()]) this.resumedBytes += part.size;
+    this.sendProgress(true);
+
+    const missing = plan.filter((p) => !this.confirmed.has(p.number) && !this.unconfirmed.has(p.number));
+    for (let i = 0; i < missing.length; i += this.options.partBatch) {
+      await this.uploadBatch(missing.slice(i, i + this.options.partBatch));
     }
-    this.signal.throwIfAborted();
-    await this.confirm(finished, confirmed);
   }
 
-  private async confirm(finished: StoredPart[], confirmed: Map<number, StoredPart>) {
-    const parts = [...finished]
-      .sort((a, b) => a.number - b.number)
-      .map((p) => ({ part_number: p.number, etag: p.etag, size_bytes: p.size }));
-    await this.request(`/uploads/${this.snap.uploadId}/parts/confirm`, { method: "POST", body: { parts } });
-
-    for (const part of finished) confirmed.set(part.number, part);
-    this.patch({ partsDone: confirmed.size });
-    if (this.record) {
-      this.record = { ...this.record, parts: [...confirmed.values()], saved_at: new Date().toISOString() };
-      await this.options.store.put(this.record);
+  // Parts sent before the connection dropped or the tab closed. The API checks
+  // each one against the provider's own list; if it refuses them, they go again.
+  private async confirmLeftovers() {
+    try {
+      await this.confirm([...this.unconfirmed.values()]);
+    } catch (error) {
+      if (!(isApiError(error) && error.status === 400)) throw error;
+      this.unconfirmed.clear();
+      await this.save();
     }
+  }
+
+  private async uploadBatch(batch: Part[]) {
+    const urls = await this.presign(batch.map((p) => p.number));
+    await this.sendAll(batch, async (part) => {
+      const etag = await this.sendPart(part, urls);
+      // Kept at once: if the page closes before the batch is confirmed, the
+      // part is confirmed on resume instead of being sent again.
+      this.unconfirmed.set(part.number, { number: part.number, etag, size: part.size });
+      await this.save();
+    });
+    await this.confirm([...this.unconfirmed.values()]);
+  }
+
+  // Like runPool, except the number of parts in flight follows this.lanes,
+  // which changes as the speed is measured.
+  private async sendAll(parts: Part[], send: (part: Part) => Promise<void>) {
+    const running = new Set<Promise<void>>();
+    let failure: { error: unknown } | undefined;
+
+    for (const part of parts) {
+      while (running.size >= this.lanes) await Promise.race(running);
+      if (failure || this.signal.aborted) break;
+      const job: Promise<void> = send(part)
+        .catch((error) => {
+          failure ??= { error };
+        })
+        .finally(() => running.delete(job));
+      running.add(job);
+    }
+    await Promise.all(running);
+    if (failure) throw failure.error;
+    this.signal.throwIfAborted();
+  }
+
+  private async confirm(parts: StoredPart[]) {
+    if (parts.length === 0) return;
+    const body = {
+      parts: [...parts]
+        .sort((a, b) => a.number - b.number)
+        .map((p) => ({ part_number: p.number, etag: p.etag, size_bytes: p.size })),
+    };
+    await this.request(`/uploads/${this.snap.uploadId}/parts/confirm`, { method: "POST", body });
+
+    for (const part of parts) {
+      this.confirmed.set(part.number, part);
+      this.unconfirmed.delete(part.number);
+    }
+    this.patch({ partsDone: this.confirmed.size });
+    await this.save();
   }
 
   private async presign(numbers: number[]) {
@@ -546,38 +923,24 @@ export class FileUpload {
   }
 
   private async sendPart(part: Part, urls: Map<number, string>) {
-    const blob = this.file.slice(part.start, part.end);
-
-    const result = await withRetry(
+    const result = await this.putWithRetries(
+      this.file.slice(part.start, part.end),
+      () => ({ url: urls.get(part.number)! }),
+      // Only this part gets a new URL; the rest of the upload carries on.
       async () => {
-        try {
-          return await this.options.put(urls.get(part.number)!, blob, {
-            signal: this.signal,
-            onProgress: (bytes) => {
-              this.sentByPart.set(part.number, bytes);
-              this.sendProgress();
-            },
-          });
-        } catch (error) {
-          if (error instanceof UploadHttpError && error.urlExpired) {
-            // Only this part gets a new URL; the rest of the upload carries on.
-            const fresh = await this.presign([part.number]);
-            urls.set(part.number, fresh.get(part.number)!);
-          }
-          throw error;
-        }
+        const fresh = await this.presign([part.number]);
+        urls.set(part.number, fresh.get(part.number)!);
       },
-      {
-        signal: this.signal,
-        sleep: this.options.sleep,
-        shouldRetry: (error) => isTransientPutError(error) || (error instanceof UploadHttpError && error.urlExpired),
-        onRetry: () => this.sentByPart.set(part.number, 0),
+      (bytes) => {
+        this.sentByPart.set(part.number, bytes);
+        this.sendProgress();
       },
     );
 
     if (!result.etag && this.options.requireEtag) throw new MissingEtagError();
     this.sentByPart.set(part.number, part.size);
     this.sendProgress(true);
+    this.adjustLanes(part.size);
     return result.etag ?? "";
   }
 
@@ -632,7 +995,7 @@ export class FileUpload {
         this.patch({ pollingStopped: true });
         return false;
       }
-      await this.options.sleep(this.pollDelay(polls), this.signal);
+      await this.options.sleep(this.pollDelay(polls), this.controller.signal);
       const info = await this.uploadInfo();
       if (this.rejected(info)) return false;
       status = info.status;
@@ -643,7 +1006,7 @@ export class FileUpload {
   // published, its catalog object. One request a check, however many files
   // are waiting, so a large batch does not crowd out the uploads still going.
   private async watchAsset() {
-    this.patch({ state: "processing", speedBps: 0 });
+    this.patch({ state: "processing", speedBps: 0, slow: false });
 
     for (let polls = 0; ; polls++) {
       const info = await this.uploadInfo();
@@ -661,7 +1024,7 @@ export class FileUpload {
         this.patch({ pollingStopped: true });
         return;
       }
-      await this.options.sleep(this.pollDelay(polls), this.signal);
+      await this.options.sleep(this.pollDelay(polls), this.controller.signal);
     }
   }
 }

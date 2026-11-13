@@ -31,6 +31,8 @@ The server keeps the protections:
 - **Code exchange:** the code is exchanged with the client secret over the guarded client.
 - **ID token:** its signature is checked against the provider's published keys (RS256/384/512, PS256, ES256/384, EdDSA). So are its issuer, its audience (and `azp` when there are several), its expiry and its nonce.
 - **Account link:** the provider's subject is linked to the account on its first sign-in. A later change of email at the provider does not move it to another account. A second subject cannot take an account already linked.
+- **Existing accounts:** a first sign-in links an existing account only if it belongs to this organization alone and has no platform role. An account that is a member elsewhere is refused, because an organization chooses its own identity provider and allowed domains, and neither proves it owns other people's accounts. SCIM never adds an existing account to an organization; invite it instead.
+- **The browser:** the console keeps the sign-in's state in an HttpOnly cookie (`orb_sso_state`, ten minutes) and finishes only a sign-in this browser started, so nobody can finish their own sign-in in someone else's browser.
 - **Suspensions:** a suspended membership or account cannot sign in.
 
 Every refusal is audited as `auth.sso_login` with its reason. Successful sign-ins are `auth.login`, as with passwords. Starting and finishing are rate-limited per address (`RATE_LIMIT_SSO`, 30 a minute).

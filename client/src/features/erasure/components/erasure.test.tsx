@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { renderWithProviders } from "@/test/render";
 import { API, server } from "@/test/server";
 import { ErasureScreen } from "./erasure-screen";
@@ -99,5 +99,109 @@ describe("ErasureScreen", () => {
     expect(await screen.findByText(/Version 1 is superseded by version 2/)).toBeInTheDocument();
     expect(screen.getByText(/legal hold h1/)).toBeInTheDocument();
     expect(screen.getByText(/Retrain or retire: risk-model 1/)).toBeInTheDocument();
+  });
+
+  it("records exactly what was searched, even if the boxes changed afterwards", async () => {
+    let created: Record<string, unknown> | undefined;
+    server.use(
+      http.get(`${API}/erasures`, () => HttpResponse.json({ erasures: [] })),
+      http.post(`${API}/erasures/search`, () => HttpResponse.json(plan)),
+      http.post(`${API}/erasures`, async ({ request }) => {
+        created = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json(erasure("PLANNED"), { status: 201 });
+      }),
+      http.get(`${API}/erasures/e1`, () => HttpResponse.json(erasure("PLANNED"))),
+    );
+    renderWithProviders(<ErasureScreen />, { permissions: ["retention.manage"] });
+    await userEvent.type(await screen.findByLabelText("Subjects"), "P-1");
+    await userEvent.click(screen.getByRole("button", { name: "Find" }));
+    expect(await screen.findByText("legal hold: case 7")).toBeInTheDocument();
+
+    await userEvent.clear(screen.getByLabelText("Subjects"));
+    await userEvent.type(screen.getByLabelText("Subjects"), "P-2");
+    await userEvent.type(screen.getByLabelText(/^Reason/), "participant withdrew");
+    await userEvent.click(screen.getByRole("button", { name: "Record erasure request" }));
+    await waitFor(() => expect(created).toMatchObject({ subject_ids: ["P-1"] }));
+  });
+
+  it("offers Erase on a planned request only when the organization needs no approval for deletions", async () => {
+    let approveDeletes = true;
+    server.use(
+      http.get(`${API}/erasures`, () => HttpResponse.json({ erasures: [erasure("PLANNED")] })),
+      http.get(`${API}/erasures/e1`, () => HttpResponse.json(erasure("PLANNED"))),
+      http.get(`${API}/governance`, () =>
+        HttpResponse.json({ profile: "STANDARD", two_person: false, approve_deletes: approveDeletes, retention_floor: "0s" }),
+      ),
+    );
+    const first = renderWithProviders(<ErasureScreen />, { permissions: ["retention.manage", "assets.delete"] });
+    await userEvent.click(await screen.findByRole("button", { name: /Subject withdrawal/ }));
+    expect(await screen.findByText(/another member approves this before it can be erased/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Erase" })).not.toBeInTheDocument();
+    first.unmount();
+
+    approveDeletes = false;
+    renderWithProviders(<ErasureScreen />, { permissions: ["retention.manage", "assets.delete"] });
+    await userEvent.click(await screen.findByRole("button", { name: /Subject withdrawal/ }));
+    expect(await screen.findByRole("button", { name: "Erase" })).toBeInTheDocument();
+  });
+
+  it("asks before cancelling a request", async () => {
+    let cancelled = false;
+    server.use(
+      http.get(`${API}/erasures`, () => HttpResponse.json({ erasures: [erasure("PLANNED")] })),
+      http.get(`${API}/erasures/e1`, () => HttpResponse.json(erasure(cancelled ? "CANCELLED" : "PLANNED"))),
+      http.post(`${API}/erasures/e1/cancel`, () => {
+        cancelled = true;
+        return HttpResponse.json(erasure("CANCELLED"));
+      }),
+    );
+    renderWithProviders(<ErasureScreen />, { permissions: ["retention.manage"] });
+    await userEvent.click(await screen.findByRole("button", { name: /Subject withdrawal/ }));
+    await userEvent.click(await screen.findByRole("button", { name: "Cancel request" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(cancelled).toBe(false);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel request" }));
+    await waitFor(() => expect(cancelled).toBe(true));
+  });
+
+  it("lets a failed request be cancelled, after asking", async () => {
+    let cancelled = false;
+    server.use(
+      http.get(`${API}/erasures`, () => HttpResponse.json({ erasures: [erasure("FAILED")] })),
+      http.get(`${API}/erasures/e1`, () => HttpResponse.json(erasure(cancelled ? "CANCELLED" : "FAILED"))),
+      http.post(`${API}/erasures/e1/cancel`, () => {
+        cancelled = true;
+        return HttpResponse.json(erasure("CANCELLED"));
+      }),
+    );
+    renderWithProviders(<ErasureScreen />, { permissions: ["retention.manage"] });
+    await userEvent.click(await screen.findByRole("button", { name: /Subject withdrawal/ }));
+    await userEvent.click(await screen.findByRole("button", { name: "Cancel request" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(cancelled).toBe(false);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel request" }));
+    await waitFor(() => expect(cancelled).toBe(true));
+  });
+
+  it("keeps checking a request that waits on a hold", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let reads = 0;
+      server.use(
+        http.get(`${API}/erasures`, () => HttpResponse.json({ erasures: [erasure("WAITING_ON_HOLD")] })),
+        http.get(`${API}/erasures/e1`, () => {
+          reads += 1;
+          return HttpResponse.json(erasure("WAITING_ON_HOLD"));
+        }),
+      );
+      renderWithProviders(<ErasureScreen />, { permissions: ["retention.manage"] });
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      await user.click(await screen.findByRole("button", { name: /Subject withdrawal/ }));
+      await waitFor(() => expect(reads).toBe(1));
+      await vi.advanceTimersByTimeAsync(61_000);
+      await waitFor(() => expect(reads).toBe(2));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -107,14 +107,15 @@ func (r *ChunkRepository) Extend(ctx context.Context, versionID, owner string, l
 	return err
 }
 
-// Finish records the outcome, if owner still holds the lease.
+// Finish records the outcome, if owner still holds the lease on a RUNNING
+// job.
 func (r *ChunkRepository) Finish(ctx context.Context, owner string, j model.ChunkJob) error {
 	skipped, err := json.Marshal(j.Skipped)
 	if err != nil {
 		return err
 	}
 	_, err = r.db.Pool.Exec(ctx, `UPDATE chunk_jobs SET state = 'DONE', files_indexed = $3, bytes_read = $4, skipped = $5, error = '', finished_at = now(), lease_owner = NULL
-		WHERE version_id = $1 AND lease_owner = $2`, j.VersionID, owner, j.FilesIndexed, j.BytesRead, skipped)
+		WHERE version_id = $1 AND lease_owner = $2 AND state = 'RUNNING'`, j.VersionID, owner, j.FilesIndexed, j.BytesRead, skipped)
 	return err
 }
 

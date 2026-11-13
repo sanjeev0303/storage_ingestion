@@ -43,6 +43,10 @@ func securityStatus(err error) (int, string, bool) {
 		return nethttp.StatusUnauthorized, "invalid_credentials", true
 	case errors.Is(err, processing.ErrInvalidContentPolicy):
 		return nethttp.StatusBadRequest, "invalid_content_policy", true
+	case errors.Is(err, processing.ErrUnblockReason):
+		return nethttp.StatusBadRequest, "invalid_request", true
+	case errors.Is(err, model.ErrAssetNotBlocked):
+		return nethttp.StatusConflict, "asset_not_blocked", true
 	case errors.Is(err, processing.ErrChecksNotConfigured):
 		return nethttp.StatusNotImplemented, "content_checks_not_configured", true
 	case errors.Is(err, model.ErrRefreshReplayed):
@@ -106,7 +110,8 @@ func securityStatus(err error) (int, string, bool) {
 	case errors.Is(err, model.ErrEmailTaken), errors.Is(err, model.ErrMembershipExists), errors.Is(err, model.ErrOrgExists),
 		errors.Is(err, model.ErrRoleExists), errors.Is(err, model.ErrRoleInUse), errors.Is(err, model.ErrOrgState),
 		errors.Is(err, model.ErrOrgNotEmpty), errors.Is(err, identity.ErrBootstrapDone), errors.Is(err, model.ErrNotReplayable),
-		errors.Is(err, model.ErrInvalidAssetState), errors.Is(err, model.ErrDeadLetterClosed):
+		errors.Is(err, model.ErrInvalidAssetState), errors.Is(err, model.ErrDeadLetterClosed), errors.Is(err, model.ErrEventInFlight),
+		errors.Is(err, model.ErrUserStatusChanged):
 		return nethttp.StatusConflict, "conflict", true
 	case errors.Is(err, model.ErrUserNotFound), errors.Is(err, model.ErrOrgNotFound), errors.Is(err, model.ErrMembershipNotFound),
 		errors.Is(err, model.ErrInvitationNotFound), errors.Is(err, model.ErrRoleNotFound), errors.Is(err, model.ErrDeadLetterNotFound),

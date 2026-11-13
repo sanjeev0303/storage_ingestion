@@ -239,7 +239,7 @@ func TestProtectedChangesCommitOrRollBackWithTheirAuditEvent(t *testing.T) {
 
 	platformEvent := unrecordable
 	platformEvent.TenantID = ""
-	if _, err := e.users.SetUserStatus(ctx, acme.devUser.ID, model.UserDeactivated, time.Now().UTC(), platformEvent); err == nil {
+	if _, err := e.users.SetUserStatus(ctx, acme.devUser.ID, model.UserActive, model.UserDeactivated, time.Now().UTC(), platformEvent); err == nil {
 		t.Fatal("a deactivation whose audit event cannot be written must fail")
 	}
 	if _, err := e.identity.Authenticate(ctx, tokens.AccessToken); err != nil {

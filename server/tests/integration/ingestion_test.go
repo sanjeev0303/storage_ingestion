@@ -371,7 +371,7 @@ func (g *generatedManifest) Read(p []byte) (int, error) {
 			return 0, io.EOF
 		}
 		g.i++
-		g.buf = []byte(textFile(fmt.Sprintf("gen/%03d/%07d.txt", g.i/1000, g.i), 64+g.i%512).line() + "\n")
+		g.buf = []byte(generatedFile(g.i).line() + "\n")
 	}
 	n := copy(p, g.buf)
 	g.buf = g.buf[n:]
@@ -1188,7 +1188,8 @@ func TestIngestionCancellationDuringActiveUploads(t *testing.T) {
 // behind that point is still found, the job ends CANCELLED with its
 // counters matching its entries, and another pass changes nothing.
 func TestIngestionCancellationResumesAndFindsStragglers(t *testing.T) {
-	e := openIngestEnv(t, func(c *config.Ingestion) { c.WorkerBatch = 2 }) // 40 entries a pass
+	// One batch of 10 a pass: the pass's time budget runs out at once.
+	e := openIngestEnv(t, func(c *config.Ingestion) { c.WorkerBatch, c.PollInterval = 10, time.Nanosecond })
 	ctx := context.Background()
 	d := e.dataset(t, "cancel-keyset", model.CompleteAll)
 	var files []file
@@ -1205,8 +1206,8 @@ func TestIngestionCancellationResumesAndFindsStragglers(t *testing.T) {
 	}
 
 	e.advanceCancellations(t)
-	if n := waiting(); n != 9 {
-		t.Fatalf("one pass cancels 40 waiting entries, %d left of 49", n)
+	if n := waiting(); n != 39 {
+		t.Fatalf("one pass cancels 10 waiting entries, %d left of 49", n)
 	}
 	// The stored upload fails retryably: waiting again, behind the cursor.
 	retryAt := time.Now().UTC()
@@ -1216,7 +1217,9 @@ func TestIngestionCancellationResumesAndFindsStragglers(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	e.advanceCancellations(t) // the rest after the cursor, then the end
+	for range 4 { // the rest after the cursor, then the end
+		e.advanceCancellations(t)
+	}
 	if n := waiting(); n != 1 {
 		t.Fatalf("only the straggler behind the cursor is left, got %d", n)
 	}

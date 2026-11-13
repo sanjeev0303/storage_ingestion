@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"runtime"
+	"time"
 
 	"github.com/sanjeev0303/object-storage-platform/internal/interfaces"
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
@@ -149,9 +150,6 @@ func (s *Service) SyncOutcomes(ctx context.Context) (int, error) {
 	return len(entries), nil
 }
 
-// maxCancelRounds bounds the waiting entries one pass cancels per job.
-const maxCancelRounds = 20
-
 // AdvanceCancellations works through cancelling jobs: waiting entries are
 // cancelled in batches, and uploads in progress are aborted and cancelled.
 // Stored uploads keep going; the job is CANCELLED once they finish.
@@ -161,11 +159,16 @@ const maxCancelRounds = 20
 // already cancelled. After a pass reaches the end, the next one starts
 // over, but only if the job's counters still show entries waiting: an
 // upload that failed meanwhile can be waiting again behind the cursor.
+//
+// A pass keeps cancelling for up to one poll interval, so the worker never
+// sits idle while a large job still has entries waiting. Every job gets at
+// least one batch per pass.
 func (s *Service) AdvanceCancellations(ctx context.Context) (int, error) {
 	jobs, err := s.deps.Repo.JobsInState(ctx, model.JobCancelling, s.cfg.WorkerBatch)
 	if err != nil {
 		return 0, err
 	}
+	deadline := time.Now().Add(s.cfg.PollInterval)
 	s.cancelMu.Lock()
 	reached := make(map[string]int64, len(jobs))
 	for _, job := range jobs {
@@ -178,7 +181,7 @@ func (s *Service) AdvanceCancellations(ctx context.Context) (int, error) {
 	for _, job := range jobs {
 		after := reached[job.ID]
 		waiting := job.Counters.Pending + job.Counters.Retryable
-		for round := 0; waiting > 0 && round < maxCancelRounds && ctx.Err() == nil; round++ {
+		for waiting > 0 && ctx.Err() == nil {
 			n, last, err := s.deps.Repo.CancelWaiting(ctx, job.ID, after, s.cfg.WorkerBatch, s.now())
 			if err != nil {
 				return total, err
@@ -187,6 +190,9 @@ func (s *Service) AdvanceCancellations(ctx context.Context) (int, error) {
 			after = last
 			if n < s.cfg.WorkerBatch {
 				after = 0
+				break
+			}
+			if time.Now().After(deadline) {
 				break
 			}
 		}

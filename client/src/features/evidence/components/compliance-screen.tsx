@@ -75,9 +75,11 @@ function ControlsPanel({ framework }: { framework: string }) {
     queryFn: ({ signal }) => getFramework(framework, signal),
     enabled: Boolean(organizationId),
   });
+  // The framework travels with the call, so the file is named after the one
+  // clicked even if the picker changes while it downloads.
   const download = useMutation({
-    mutationFn: () => fetchFile(`/compliance/${encodeURIComponent(framework)}/evidence`),
-    onSuccess: (blob) => saveBlob(blob, `${framework}-evidence.zip`),
+    mutationFn: (chosen: string) => fetchFile(`/compliance/${encodeURIComponent(chosen)}/evidence`),
+    onSuccess: (blob, chosen) => saveBlob(blob, `${chosen}-evidence.zip`),
     onError: notify.error,
   });
   return (
@@ -85,7 +87,7 @@ function ControlsPanel({ framework }: { framework: string }) {
       title={fw.data?.name ?? "Controls"}
       description={fw.data?.note}
       actions={
-        <Button onClick={() => download.mutate()} loading={download.isPending}>
+        <Button onClick={() => download.mutate(framework)} loading={download.isPending}>
           Download evidence
         </Button>
       }

@@ -35,6 +35,10 @@ DATABASE_URL=postgres://... migrate baseline 6    # mark 000001..000006 applied 
 2. Run `migrate down N` for this release's N migrations, if the old code cannot live with the new tables.
 3. If a migration without a rollback file is involved, restore the backup from step 1.
 
+## Packing (000017)
+
+`000017_packs.sql` predates the rollback files, so it is rolled back by hand (`docs/packing.md` §11). Once packed sources have been retired, some assets' bytes exist only in packs: drain packing first with `pack-worker unpack -tenant <org> -all` (try `-dry-run` first) for every tenant with packs, with the pack worker stopped, and roll back only when no pack entry is `PUBLISHED`. Dropping the tables before that loses those assets.
+
 ## Rehearsal
 
 `TestMigrationsFromScratchAndRollback` (integration) runs on every test run:

@@ -1,7 +1,10 @@
 """HTTP client for the platform API: sign-in, token refresh, retries."""
 
 import http.client
+import io
 import json
+import random
+import re
 import threading
 import time
 import urllib.error
@@ -32,6 +35,24 @@ class APIError(Exception):
 # Answers worth sending again: rate limited, or the server or a proxy
 # could not answer this time.
 RETRY_STATUSES = {429, 502, 503, 504}
+
+# Methods that do the same thing however often they are sent.
+SAFE_TO_REPEAT = {"GET", "HEAD", "PUT", "DELETE", "OPTIONS"}
+
+
+def session_gone(err):
+    """Whether the API said an upload session has ended or never existed:
+    404, or 409 "multipart upload is not active". Other 409s (a start still
+    pending, an idempotency conflict) are not this."""
+    if not isinstance(err, APIError):
+        return False
+    return err.status in (404, 410) or (err.status == 409 and "not active" in err.body)
+
+
+def backoff(attempt, rand=random.random):
+    """Seconds to wait before try attempt + 1: exponential with full jitter,
+    capped at 30, so clients that failed together do not return together."""
+    return rand() * min(30.0, 2.0 ** attempt)
 
 
 class Client:
@@ -84,7 +105,11 @@ class Client:
         with self._refresh_lock:
             if not self.refresh_token:
                 raise APIError(401, "POST", "/api/v1/auth/refresh", '{"error":"not signed in"}')
-            tokens = self._send("POST", "/api/v1/auth/refresh", {"refresh_token": self.refresh_token}, auth=False)
+            # Sent once only: the refresh token is single use, and presenting
+            # it again after a lost answer revokes the session. A network
+            # error is raised for the caller to sign in again.
+            tokens = self._send("POST", "/api/v1/auth/refresh", {"refresh_token": self.refresh_token}, auth=False,
+                                retry=False)
             self._take(tokens)
 
     def logout(self):
@@ -100,29 +125,32 @@ class Client:
 
     # ─── Requests ─────────────────────────────────────────────────────
 
-    def request(self, method, path, body=None, params=None, headers=None, raw=None, content_type=None):
+    def request(self, method, path, body=None, params=None, headers=None, raw=None, content_type=None, retry=None):
         """Sends one API request and returns the decoded JSON (None for 204).
 
-        A 401 refreshes the session once and sends again. 429 and 5xx
-        gateway answers are retried with backoff.
+        A 401 refreshes the session once and sends again. Network errors,
+        429 and 5xx gateway answers are retried with backoff, but only for a
+        request that cannot take effect twice: a GET, PUT or DELETE, one with
+        an Idempotency-Key header or an idempotency_key in its body, or one
+        the caller marks with retry=True.
         """
         if params:
             query = {k: v for k, v in params.items() if v not in (None, "")}
             if query:
                 path = path + "?" + urllib.parse.urlencode(query)
         try:
-            return self._send(method, path, body, headers=headers, raw=raw, content_type=content_type)
+            return self._send(method, path, body, headers=headers, raw=raw, content_type=content_type, retry=retry)
         except APIError as err:
             if err.status != 401 or not self.refresh_token:
                 raise
         self.refresh()
-        return self._send(method, path, body, headers=headers, raw=raw, content_type=content_type)
+        return self._send(method, path, body, headers=headers, raw=raw, content_type=content_type, retry=retry)
 
     def get_text(self, path, **params):
         """GETs a route that answers text (an export) and returns it."""
         return self.request("GET", path, params=params, headers={"Accept": "*/*"})
 
-    def _send(self, method, path, body=None, auth=True, headers=None, raw=None, content_type=None):
+    def _send(self, method, path, body=None, auth=True, headers=None, raw=None, content_type=None, retry=None):
         data = raw
         all_headers = {"Accept": "application/json"}
         if body is not None:
@@ -135,21 +163,22 @@ class Client:
         if self.organization_id:
             all_headers["X-Organization-ID"] = self.organization_id
         all_headers.update(headers or {})
+        if retry is None:
+            retry = (method in SAFE_TO_REPEAT or "Idempotency-Key" in all_headers
+                     or (isinstance(body, dict) and bool(body.get("idempotency_key"))))
+        attempts = self.max_attempts if retry else 1
 
-        delay = 1.0
-        for attempt in range(1, self.max_attempts + 1):
+        for attempt in range(1, attempts + 1):
             try:
                 resp = self._roundtrip(method, self.base_url + path, data, all_headers, self.timeout)
                 payload = resp.read()
             except (http.client.HTTPException, OSError):
-                if attempt == self.max_attempts:
+                if attempt == attempts:
                     raise
-                time.sleep(delay)
-                delay = min(delay * 2, 30)
+                time.sleep(backoff(attempt - 1))
                 continue
-            if resp.status in RETRY_STATUSES and attempt < self.max_attempts:
-                time.sleep(_retry_after(resp.headers) or delay)
-                delay = min(delay * 2, 30)
+            if resp.status in RETRY_STATUSES and attempt < attempts:
+                time.sleep(_retry_after(resp.headers) or backoff(attempt - 1))
                 continue
             if resp.status >= 300:
                 raise APIError(resp.status, method, path, payload.decode("utf-8", "replace"))
@@ -227,7 +256,7 @@ class Client:
         key = (parts.scheme, parts.netloc)
         data = json.dumps(body).encode() if body is not None else None
         extra = headers or {}
-        delay, refreshed = 1.0, False
+        refreshed = False
         for attempt in range(1, self.max_attempts + 1):
             headers = {"Accept": "*/*", "Content-Type": "application/json"}
             if self.access_token:
@@ -243,8 +272,7 @@ class Client:
                 continue
             if resp.status in RETRY_STATUSES and attempt < self.max_attempts:
                 resp.read()
-                time.sleep(_retry_after(resp.headers) or delay)
-                delay = min(delay * 2, 30)
+                time.sleep(_retry_after(resp.headers) or backoff(attempt - 1))
                 continue
             if resp.status >= 300:
                 raise APIError(resp.status, method, path, resp.read().decode("utf-8", "replace"))
@@ -261,8 +289,8 @@ class Client:
     def get(self, path, **params):
         return self.request("GET", path, params=params)
 
-    def post(self, path, body=None, headers=None):
-        return self.request("POST", path, body=body, headers=headers)
+    def post(self, path, body=None, headers=None, retry=None):
+        return self.request("POST", path, body=body, headers=headers, retry=retry)
 
     def pages(self, path, key, cursor_param="cursor", cursor_key="next_cursor", **params):
         """Yields every item of a paged list, following its cursor."""
@@ -284,28 +312,58 @@ def _retry_after(headers):
         return None
 
 
-def put_bytes(url, body, size, content_type=None, timeout=600, attempts=3, headers=None):
+# A PUT with no progress for this long is stalled: it is dropped and tried
+# again. The bytes go up 8 KiB at a time and the socket timeout applies to
+# each piece, so a slow link that keeps moving is never cut off.
+STALL_SECONDS = 30
+
+# What S3, GCS and Azure say when a presigned URL has expired (or the clock
+# is off). S3 sends an expired URL as AccessDenied, so the code alone means a
+# real refusal.
+_EXPIRED = re.compile(
+    r"Request has expired|ExpiredToken|token has expired|signature (has )?expired"
+    r"|not valid in the specified time frame|RequestTimeTooSkewed",
+    re.IGNORECASE,
+)
+
+
+def put_bytes(url, body, size, content_type=None, timeout=STALL_SECONDS, attempts=5, headers=None, refresh=None):
     """PUTs to a presigned storage URL and returns the ETag. body is bytes
     or a callable returning a fresh file-like object for each attempt.
     headers are the upload_headers the API asked for (Azure's blob type,
-    or a connection's customer-managed key)."""
+    or a connection's customer-managed key).
+
+    timeout is how long the PUT may go without progress. Network errors,
+    stalls, 408, 429 and 5xx are tried again with backoff (Retry-After
+    wins); refresh, when given, returns a new URL for one that expired. Any
+    other refusal would fail the same way again and is raised at once."""
     headers = {**(headers or {}), "Content-Length": str(size)}
     if content_type:
         headers["Content-Type"] = content_type
-    delay = 1.0
-    for attempt in range(1, attempts + 1):
-        data = body() if callable(body) else body
+    last = None
+    for attempt in range(attempts):
+        data = body() if callable(body) else io.BytesIO(body)
         req = urllib.request.Request(url, data=data, method="PUT", headers=headers)
+        wait = None
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 resp.read()
                 return resp.headers.get("ETag", "")
-        except (urllib.error.URLError, ConnectionError) as err:
-            if attempt == attempts:
-                raise RuntimeError(f"storage PUT failed: {err}") from None
-            time.sleep(delay)
-            delay *= 2
+        except urllib.error.HTTPError as err:
+            text = err.read().decode("utf-8", "replace")
+            if err.code == 403 and refresh and _EXPIRED.search(text):
+                url = refresh()
+                last = "the URL expired"
+                continue
+            if err.code not in (408, 429) and err.code < 500:
+                raise RuntimeError(f"storage refused the upload: HTTP {err.code}: {text[:200]}") from None
+            last = f"HTTP {err.code}"
+            wait = _retry_after(err.headers)
+        except (OSError, http.client.HTTPException) as err:
+            last = err  # a dropped connection or a stall
         finally:
-            if callable(body) and hasattr(data, "close"):
+            if hasattr(data, "close"):
                 data.close()
-    raise RuntimeError("unreachable")
+        if attempt < attempts - 1:
+            time.sleep(wait or backoff(attempt))
+    raise RuntimeError(f"storage PUT failed: {last}")

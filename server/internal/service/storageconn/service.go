@@ -24,6 +24,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/config"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/netguard"
+	"github.com/sanjeev0303/object-storage-platform/internal/platform/ratelimit"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/secretbox"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/audit"
 )
@@ -42,7 +43,9 @@ type Clients interface {
 
 type Dependencies struct {
 	Connections interfaces.StorageConnectionRepository
-	// Sealer is nil when BYOS is off: connections can then be listed but
+	// Sealer is the master key (the credential keyring). Each credential
+	// is sealed in an envelope under it: its own data key, wrapped by the
+	// master key. Nil when BYOS is off: connections can then be listed but
 	// not created, tested or rotated.
 	Sealer  secretbox.Sealer
 	Clients Clients
@@ -54,10 +57,17 @@ type Dependencies struct {
 	Alerts Alerter
 	// Drift keeps the out-of-band change scan; nil turns it off.
 	Drift DriftStore
+	// Limiter and ProbeRule bound how often one organization's connections
+	// may be tested, whichever route the test comes from (test, rotate,
+	// stage, promote, a tested edit, a posture check), so a test cannot be
+	// used to probe a network. A nil Limiter does not limit.
+	Limiter   *ratelimit.Limiter
+	ProbeRule ratelimit.Rule
 }
 
 type Service struct {
 	deps   Dependencies
+	sealer *secretbox.Envelope // nil while deps.Sealer is
 	cfg    config.Storage
 	policy netguard.Policy
 	now    func() time.Time
@@ -71,13 +81,31 @@ func NewService(deps Dependencies, cfg config.Storage, policy netguard.Policy) (
 	if deps.Connections == nil || deps.Clients == nil || deps.Log == nil {
 		return nil, errors.New("storage connection dependencies are required")
 	}
-	return &Service{deps: deps, cfg: cfg, policy: policy, now: func() time.Time { return time.Now().UTC() }, newID: randomID}, nil
+	s := &Service{deps: deps, cfg: cfg, policy: policy, now: func() time.Time { return time.Now().UTC() }, newID: randomID}
+	if deps.Sealer != nil {
+		s.sealer = secretbox.NewEnvelope(deps.Sealer)
+	}
+	return s, nil
 }
 
 func randomID() string {
 	var b [12]byte
 	_, _ = rand.Read(b[:])
 	return hex.EncodeToString(b[:])
+}
+
+// throttleProbe counts one test of a tenant's connection against the probe
+// rule. The routes for testing, rotating and enabling have their own limit
+// too; this one also covers staging, promoting, tested edits and posture
+// checks, which reach the customer's endpoint the same way.
+func (s *Service) throttleProbe(tenantID string) error {
+	if s.deps.Limiter == nil || s.deps.ProbeRule.Requests <= 0 {
+		return nil
+	}
+	if ok, wait := s.deps.Limiter.Allow("storage_probe:"+tenantID, s.deps.ProbeRule); !ok {
+		return &model.RateLimitError{RetryAfter: wait}
+	}
+	return nil
 }
 
 // Enabled tells whether organizations may connect their own storage.
@@ -211,12 +239,13 @@ func (s *Service) seal(c model.StorageConnection, version int, secrets model.Sto
 	if err != nil {
 		return interfaces.SealedCredential{}, errors.New("encode credentials")
 	}
-	sealed, err := s.deps.Sealer.Seal(plain, c.CredentialAAD(version))
+	sealed, err := s.sealer.Seal(plain, c.CredentialAAD(version))
 	clear(plain)
 	if err != nil {
 		return interfaces.SealedCredential{}, errors.New("seal credentials")
 	}
-	return interfaces.SealedCredential{Version: version, KeyVersion: sealed.KeyVersion, Nonce: sealed.Nonce, Ciphertext: sealed.Ciphertext}, nil
+	return interfaces.SealedCredential{Version: version, KeyVersion: sealed.KeyVersion, Nonce: sealed.Nonce, Ciphertext: sealed.Ciphertext,
+		WrappedKey: sealed.WrappedKey}, nil
 }
 
 // secretFields is the sealed form. model.StorageSecrets refuses to
@@ -388,7 +417,9 @@ func (s *Service) RotateCredentials(ctx context.Context, p model.Principal, conn
 		s.record(ctx, p, "storage_connection.rotate", c, map[string]any{"outcome": "refused", "category": result.Category})
 		return c, result, ErrTestFailed
 	}
-	sealed, err := s.seal(c, c.CredentialVersion+1, secrets)
+	// Past a staged version too: rotation discards it, and a version number
+	// is never given to a second secret.
+	sealed, err := s.seal(c, max(c.CredentialVersion, c.StagedCredentialVersion)+1, secrets)
 	if err != nil {
 		return model.StorageConnection{}, TestResult{}, err
 	}

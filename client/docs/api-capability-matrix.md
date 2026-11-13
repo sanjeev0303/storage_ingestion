@@ -98,10 +98,10 @@ Permissions are the backend's strings. The console hides actions the user's role
 | Asset state and lifecycle | `/assets/{id}`, `/assets/{id}/lifecycle` | GET | `assets.read` | n/a | Verified. `locked_until` (S3 Object Lock date) is shown when the platform set one; whether a legal hold is also set is never sent to owners. On AWS S3 (2026-10-29): a retention policy and a legal hold set in the console were applied to the stored version (GOVERNANCE until upload + 24 h, legal hold ON), and S3 refused an administrator's early delete of that version |
 | Soft delete, restore | `/assets/{id}`, `/assets/{id}/restore` | DELETE, POST | `assets.delete` | n/a | Verified |
 | Quarantine record, release | `/assets/{id}/quarantine` (with `scan`: verdict, engine version, `reused_from`; and `events`: the stage history), `/quarantine/release` | GET, POST | `quarantine.read`, `quarantine.release` | n/a | Verified (empty record), release on a real QUARANTINED asset: not run |
-| Retention policy, legal holds | `/retention/policies` (and `?scope=&scope_key=` for a scope's earlier versions), `/legal-holds`, `/legal-holds/{id}` | GET, PUT, POST, DELETE | `retention.manage` | none | Verified |
-| Background work counts | `/operations/status` | GET | `ingestion.read` | none | Verified |
-| Recent uploads | `/uploads?status=` | GET | `uploads.write` | `next_cursor` | Verified (uploads end as VERIFIED once processed) |
-| Object used by | `/catalog/objects/{id}/datasets` | GET | `datasets.read` | none | Verified |
+| Retention policy, legal holds | `/retention/policies` (and `?scope=&scope_key=` for a scope's earlier versions), `/legal-holds` (`?include_released=true` for released ones), `/legal-holds/{id}` | GET, PUT, POST, DELETE | `retention.manage` | policies: none; holds: `cursor` / `next_cursor`, newest placed first, 50 a page | Verified; hold paging covered by the Go integration test and vitest |
+| Background work counts, worker heartbeats | `/operations/status` (`workers`: per kind `RUNNING`, `STALE` or `NOT_SEEN` and the last heartbeat; each process's name only for platform administrators) | GET | `ingestion.read` | none | Mocked only (heartbeats covered by the Go handler and integration tests; the running local API predates them, so the panel says it reports none) |
+| Recent uploads | `/uploads?status=` (with `updated_at`, and `asset_id` once processing made the asset) | GET | `uploads.write` | `next_cursor` | Verified (uploads end as VERIFIED once processed); `updated_at` and `asset_id` covered by the Go integration test |
+| Object used by | `/catalog/objects/{id}/datasets` (`?part=datasets` or `?part=snapshots` pages one list) | GET | `datasets.read` | `cursor` / `next_datasets_cursor`, `next_snapshots_cursor` | Verified (both lists); paging covered by the Go integration test |
 | Dead letters | `/admin/dead-letters*` | GET, POST | platform ADMIN | none (limit 100) | Verified (list, inspect, 400 and 404 paths), actions on a real entry: not run |
 | Quota reconcile | `/admin/organizations/{id}/quota/reconcile` | POST | platform ADMIN | n/a | Verified |
 | Audit log | `/organization/audit`, `/admin/audit` | GET | `audit.read`, platform ADMIN or AUDITOR | `before` / `next_before` | Verified |
@@ -121,12 +121,13 @@ The console shows these as "not available" rather than inventing them.
 | Object to datasets reverse lookup | Closed: `GET /api/v1/catalog/objects/{id}/datasets` | Shown as "Used by" on the object page |
 | Read retention policies and legal holds | Closed: `GET /api/v1/retention/policies` and `GET /api/v1/legal-holds` | Shown on Retention and holds; holds are released from the list |
 | Error report download for bulk ingestion | No endpoint | Pages `/failures` and builds a CSV in the browser |
-| Worker, queue, reconciliation, compaction and cleanup status | Partly closed: `GET /api/v1/operations/status` counts the organization's processing (waiting, held, oldest wait), ingestion entries, imports, validations and pending deletions; reconciliation, compaction and cleanup are still logs and metrics only | The counts are shown on Status; the rest stays listed as not exposed |
+| Worker, queue, reconciliation, compaction and cleanup status | Partly closed: `GET /api/v1/operations/status` counts the organization's processing (waiting, held, oldest wait), ingestion entries, imports, validations and pending deletions, and says whether each kind of worker (reconciliation, compaction and cleanup included) wrote a heartbeat in the last 2 minutes. Queue depth, throughput and the results of each run are still logs and metrics only | The counts and Workers are shown on Status; the rest stays listed as not exposed |
 | Cross-dataset validation report list | No endpoint | Reports are reached from each dataset |
 | Names for lineage nodes | Nodes are only a kind and an id | Dataset names and version numbers are looked up lazily (up to 24); other nodes show kind and short id |
 | Per-dimension readiness remediation or an overall score | Not in the report (only per-finding remediation) | No score is shown |
 | Filter findings by object or code, free-text catalog search, date-range audit filters | Not supported by the API | Not offered |
 | Browser access to the API | No CORS | Same-origin proxy (see [security.md](security.md)) |
+| A revision check on promoting, rolling back or discarding a second credential | `POST /storage-connections/{id}/credentials/promote`, `/rollback` and `DELETE /credentials/staged` read no body and take no revision, so a change made elsewhere meanwhile is not detected | Sends none; refreshes the connection after each, offers no Roll back while something is staged, and shows a 409 from promote (staged credentials not newer) in words |
 
 ## Backend behaviour the console works around
 

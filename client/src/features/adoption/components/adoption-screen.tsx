@@ -217,7 +217,9 @@ function NewAdoption() {
   const info = SOURCES[source];
   const own = connections.data?.connections.filter((c) => c.provider !== "PLATFORM_MANAGED" && c.status === "ACTIVE") ?? [];
 
-  const problem = !info.imports && !connection ? "Choose the storage connection that holds the objects." : !ref.trim() && !inline.trim() ? "Give the source." : null;
+  // Text pasted for another source stays in state while hidden; only a source that takes it inline sends it.
+  const inlineText = info.inline ? inline.trim() : "";
+  const problem = !info.imports && !connection ? "Choose the storage connection that holds the objects." : !ref.trim() && !inlineText ? "Give the source." : null;
 
   function submit(e: FormEvent) {
     e.preventDefault();
@@ -227,9 +229,10 @@ function NewAdoption() {
         source,
         ...(connection && { connection_id: connection }),
         ...(ref.trim() && { source_ref: ref.trim() }),
-        ...(inline.trim() && { inline }),
+        ...(inlineText && { inline }),
         ...(dataset.trim() && { dataset: dataset.trim().toLowerCase() }),
-        mode: manage ? "MANAGE" : "DETACH",
+        // Imports are always the platform's own copies; the mode applies to adopting in place.
+        ...(!info.imports && { mode: manage ? "MANAGE" : "DETACH" }),
         require_digest: requireDigest,
       },
       {

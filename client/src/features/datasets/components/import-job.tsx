@@ -13,7 +13,7 @@ import { Time } from "@/components/ui/time";
 import { useSession } from "@/lib/auth/session";
 import { formatBytes, formatNumber } from "@/lib/utils/format";
 import { ApiError } from "@/lib/api/errors";
-import { isCode } from "../helpers";
+import { isCode, uploadWaitOver } from "../helpers";
 import { useCancelImport, useImport, useImportErrors } from "../hooks";
 import { TERMINAL_IMPORT_STATES, type ImportState } from "../types";
 
@@ -45,6 +45,8 @@ export function ImportJob({ id, jobId }: { id: string; jobId: string }) {
 
   const data = job.data;
   const terminal = TERMINAL_IMPORT_STATES.includes(data.state);
+  // Measured against the last fetch, the same clock that stops the polling.
+  const waitOver = uploadWaitOver(data, job.dataUpdatedAt);
   const p = data.progress;
 
   return (
@@ -54,7 +56,9 @@ export function ImportJob({ id, jobId }: { id: string; jobId: string }) {
         description={
           terminal
             ? "This import has finished."
-            : "Checking again every 3 seconds. You can leave this page; the import keeps running."
+            : waitOver
+              ? "No manifest arrived before the upload link expired, so this import will not start. Cancel it and start a new import."
+              : "Checking again every 3 seconds. You can leave this page; the import keeps running."
         }
         actions={
           <>

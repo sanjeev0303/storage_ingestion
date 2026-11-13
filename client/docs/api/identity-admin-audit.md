@@ -311,7 +311,7 @@ Each duration: >=0 and <=100 years (876000h); `min_retention` >= platform floor 
 ### 8.4 Legal holds
 - `POST /legal-holds` - `retention.manage`. Body `{ scope: "TENANT"|"DATASET"|"ASSET"; scope_key?: string; reason: string }` (rules as above; reason required). 201 `{ id: string, scope: string, scope_key: string, placed_at: string }`. Errors 400 `invalid_request` / 404 `not_found`.
 - `DELETE /legal-holds/{id}` - `retention.manage`. 204; unknown id 404 `{"error":"not found","code":"not_found"}`.
-- **No list/get endpoint for holds.** The frontend has to remember hold ids it created (or cannot show them).
+- `GET /legal-holds?include_released=&cursor=&limit=` - `retention.manage`. Newest placed first; active holds only unless `include_released=true`; `limit` default 50, max 200. 200 `{ holds: HeldHold[]; next_cursor?: string }` (no `next_cursor` on the last page). Malformed cursor or bad `limit` -> 400 `invalid_request`.
 
 ## 9. Gaps / surprises
 1. No CORS anywhere; browser app needs same-origin proxy or server change.

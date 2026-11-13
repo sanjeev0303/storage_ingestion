@@ -112,6 +112,9 @@ type SealedCredential struct {
 	KeyVersion int
 	Nonce      []byte
 	Ciphertext []byte
+	// WrappedKey is the credential's own data key, sealed by the master
+	// key KeyVersion; empty for a credential sealed before envelopes.
+	WrappedKey []byte
 }
 
 // ConnectionChange changes a connection's non-secret settings; nil leaves
@@ -157,6 +160,9 @@ type ConnectionTestRecord struct {
 	ErrorCategory string
 	Capabilities  *model.ProviderCapabilities
 	At            time.Time
+	// CredentialVersion is the credential tested. The result is not
+	// recorded once another is current.
+	CredentialVersion int
 }
 
 // ConnectionDependents is what blocks deleting a connection.

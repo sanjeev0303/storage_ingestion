@@ -56,6 +56,9 @@ export function FigureOne() {
     () => {
       const mm = gsap.matchMedia();
       mm.add("(prefers-reduced-motion: no-preference)", () => {
+        // Coming from reduced motion the figure shows as finished; it plays from the start again.
+        setSealed(false);
+        setStage(-1);
         gsap.set(orb.current, { x: POINTS[0][0], y: POINTS[0][1], opacity: 0 });
         gsap.set(drawn.current, { strokeDashoffset: 1 });
         const tl = gsap.timeline({ delay: 0.3 });
@@ -74,6 +77,10 @@ export function FigureOne() {
         tl.call(() => setSealed(true), [], ">0.2");
         tl.to(orb.current, { opacity: 0, scale: 0.6, transformOrigin: "50% 50%", duration: 0.3 }, "<");
         timeline.current = tl;
+        // The media context kills the timeline when it reverts; drop the reference too.
+        return () => {
+          timeline.current = null;
+        };
       });
       // Reduced motion: the finished figure, nothing moving.
       mm.add("(prefers-reduced-motion: reduce)", () => {

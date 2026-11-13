@@ -208,6 +208,32 @@ func (r *LegalHoldRepository) List(ctx context.Context, tenantID string, include
 	return out, nil
 }
 
+func (r *LegalHoldRepository) Page(ctx context.Context, tenantID string, includeReleased bool, beforeAt time.Time, beforeID string, limit int) ([]model.LegalHold, error) {
+	all, err := r.List(ctx, tenantID, includeReleased)
+	if err != nil {
+		return nil, err
+	}
+	newestFirst := func(a, b model.LegalHold) bool {
+		if !a.PlacedAt.Equal(b.PlacedAt) {
+			return a.PlacedAt.After(b.PlacedAt)
+		}
+		return a.ID > b.ID
+	}
+	sort.Slice(all, func(i, j int) bool { return newestFirst(all[i], all[j]) })
+	cursor := model.LegalHold{ID: beforeID, PlacedAt: beforeAt}
+	var out []model.LegalHold
+	for _, h := range all {
+		if beforeID != "" && !newestFirst(cursor, h) {
+			continue
+		}
+		if len(out) == limit {
+			break
+		}
+		out = append(out, h)
+	}
+	return out, nil
+}
+
 // LifecycleEventRepository keeps lifecycle events in memory. For tests.
 type LifecycleEventRepository struct {
 	mu     sync.Mutex
@@ -557,7 +583,11 @@ func release(op *model.DeletionOperation) {
 
 func (r *DeletionRepository) Protect(ctx context.Context, id, owner string, now, next time.Time, reason string) error {
 	return r.leased(ctx, id, owner, now, startableStates, func(op *model.DeletionOperation) {
-		op.State, op.ProtectedReason, op.NextAttemptAt = model.DeletionProtected, reason, next
+		// A started deletion is never made PROTECTED, so never restorable.
+		if op.State != model.DeletionRetryWait {
+			op.State = model.DeletionProtected
+		}
+		op.ProtectedReason, op.NextAttemptAt = reason, next
 		release(op)
 	})
 }

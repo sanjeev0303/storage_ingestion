@@ -25,12 +25,12 @@ Signing in (`POST /api/v1/auth/login`) checks an Argon2id hash and starts a **se
 | Activation / reset | `sct_` | `AUTH_ACTIVATION_TTL` (72h) / `AUTH_RESET_TTL` (1h) | sets a password, once |
 | Invitation | `sit_` | `AUTH_INVITATION_TTL` (7 days) or the organization's own | joins an organization, once |
 
-Only SHA-256 hashes of tokens are stored. A database copy holds no usable token, and the tokens have 256 bits of entropy, so no salt or slow hash is needed.
+Only SHA-256 hashes of tokens are stored. A database copy holds no usable token, and the tokens have 256 bits of entropy, so no salt or slow hash is needed. API tokens (`orb_pat_`, `docs/access.md`) are stored as an HMAC-SHA-256 under `API_TOKEN_PEPPER` when it is set.
 
 **Token lifecycle:**
 - **Validation.** The access token must be the session's *current* one, before its expiry, in a session neither expired nor revoked, of an `ACTIVE` account. This is checked on every request.
 - **Refresh rotation.** Refreshing spends the refresh token and issues a new pair. The previous access token stops working immediately. The session's own expiry never moves.
-- **Replay.** A spent refresh token presented again means two parties hold it. The whole session is revoked, including the legitimate new tokens, the revocation commits, and the refusal is audited (`refresh_reused`).
+- **Replay.** A spent refresh token presented again means two parties hold it. The whole session is revoked, including the legitimate new tokens, the revocation commits, and the refusal is audited (`refresh_reused`). The API itself has no grace period. The console shares one refresh between the concurrent requests that carry the same cookie, and keeps handing out its result for a short while afterwards to requests that were already in flight with the old cookie (`client/src/server/auth.ts`, `RECENT_MS`, 5 s). Only requests already in flight when the new cookie was set need it, and they land within a round trip. The console refreshes before reading a request body and never presents a refresh token more than that window after the request carrying it arrived; a refresh that got no answer is not retried with the same token within the window either (it may have been rotated), and the console answers 503 instead. The de-duplication is per console process, so several console instances need sticky sessions.
 - **Ending a session.** Logout ends the current session; `DELETE /api/v1/auth/sessions/{id}` ends one of your others.
   - A password change ends every other session.
   - A reset or a deactivation ends all of them.
@@ -49,10 +49,12 @@ Only SHA-256 hashes of tokens are stored. A database copy holds no usable token,
 - **Self-provisioning.** Someone invited without an account creates one by accepting the invitation.
 - **Self-registration** (`POST /api/v1/auth/register`, off unless `AUTH_SELF_REGISTRATION=true`). Anyone can create an `ACTIVE` account and an organization they own, and are signed in at once. There is no email delivery, so the address is **not verified**: whoever registers an address owns that account. Turn it on only where that is acceptable. It answers 403 `registration_closed` when off, 409 `conflict` for an address already registered, and is limited per source address by `RATE_LIMIT_REGISTER` (default 5/1h). If the organization cannot be created after the account was, the failure is logged and the account is left for an administrator to finish.
 - **Recovery.** There is no email delivery. An administrator issues a reset token (`POST /api/v1/admin/users/{id}/password-reset`, or `identity-admin reset-password`) and passes it on; the owner redeems it at `POST /api/v1/auth/password/reset`.
-- **Deactivation** (admin API or `identity-admin deactivate`) revokes every session in the same transaction, and stops download links the account issued.
+- **Deactivation** (admin API or `identity-admin deactivate`) revokes every session in the same transaction, and stops download links the account issued. It is refused for the last active platform administrator (403) and for the last active owner of an active organization (409 `last_owner`): suspend the organization first, or give it another owner. Both checks run under locks in the transaction that changes the status, so concurrent changes cannot get around them. A status that changed since it was read answers 409 `conflict`.
 - **Bootstrap.** `identity-admin bootstrap` creates the first platform administrator and works only while none exists. Without `-password-file` it generates a 24-character password, prints it once and stores only its hash. No default credential exists anywhere.
 
 Nothing logs a password, a token, an `Authorization` header or a signed URL. Audit details whose keys look like credentials are dropped (`audit.Scrub`) as a last line of defence.
+
+**Slow request bodies.** The API reads headers within 5 s (`ReadHeaderTimeout`). A request body then gets 30 s to start arriving, and more time only while it keeps up 16 KiB/s (`middleware.BodyDeadline`, set in `cmd/api`). A client trickling a body to hold connections open is cut off; a large inline manifest that keeps moving takes as long as it needs. There is no `ReadTimeout`: it would cap every body, however healthy. Object bytes never pass through the API (they go to presigned URLs), so uploads are not affected. When the body has been read the deadline ends with it, so a handler that works for long afterwards is not cut off.
 
 ## Organizations and memberships
 
@@ -109,14 +111,14 @@ Checks ask for **permissions**, never role names; a role is a set of permissions
 
 Assets belong to the organization, not to the member who uploaded them. Upload sessions are the exception: only their creator continues or completes them.
 
-**Custom roles** (`POST /api/v1/organization/roles`) take any permissions but `org.ownership`; unknown names are refused. A role in use by a member or a pending invitation cannot be deleted, and built-in roles cannot be changed.
+**Custom roles** (`POST /api/v1/organization/roles`) take any permissions but `org.ownership`; unknown names are refused. A role in use by a member or a pending invitation cannot be deleted, and built-in roles cannot be changed. Deleting a role, inviting someone to one and giving one to a member all take the organization's lock, and the last two check the role again under it, so a role deleted meanwhile is not given out (404).
 
 **Escalation rules,** applied in the service layer to every grant and member change:
 1. You grant only a role whose permissions you hold.
 2. You change, suspend or remove only a member whose current role's permissions you hold, so an administrator cannot demote an owner.
 3. The owner role is granted or taken only by an owner.
 4. The **last active owner** cannot be demoted, suspended or removed. Only owners whose accounts are active count.
-   - The check runs under the organization's row lock, so two owners demoting each other at once leave exactly one.
+   - The check runs under the organization's row lock, so two owners demoting each other at once leave exactly one. The other owners' accounts are share-locked while they are counted, so a deactivation in flight is waited for and not counted. Both take the organization's lock before any account's.
 5. Anyone may leave, except the last owner.
 
 **Platform roles** are separate from organization roles. `ADMIN` manages accounts, organizations, quotas and dead letters. `AUDITOR` reads every audit chain. A platform role grants no access to tenant data: platform administrators who need data join the organization like anyone else. The last active platform administrator cannot be demoted or deactivated.
@@ -193,6 +195,7 @@ Each repair is audited as `quota.reconcile`.
 | `listing` | organization | reads and listings |
 | `membership` | organization | organization, member, invitation and role routes |
 | `admin` | user / organization | `/api/v1/admin/...`; quarantine, retention and legal-hold routes |
+| `storage_test` | organization | connection tests, credential rotation and enabling (10/min). The connection service counts the same budget again for every test whatever route it comes from, including staging and promoting credentials, tested edits and posture checks (`docs/storage-connections.md`) |
 | `max_requests_per_minute` | organization | every tenant route, from its quota |
 
 Over a limit: 429 `rate_limited` with `Retry-After`. If the quota cannot be read, a tenant request is refused with 503 rather than let through unmetered.
@@ -263,7 +266,8 @@ All settings are in `.env.example`. The API, the workers and `identity-admin` lo
 - Argon2id below the minimum;
 - a malformed or missing rate rule;
 - negative quotas;
-- the Phase 7 names `INGESTION_TENANT_STORAGE_QUOTA`, `INGESTION_MAX_ACTIVE_JOBS` and `INGESTION_MAX_PENDING_ENTRIES`, now `QUOTA_*`.
+- the Phase 7 names `INGESTION_TENANT_STORAGE_QUOTA`, `INGESTION_MAX_ACTIVE_JOBS` and `INGESTION_MAX_PENDING_ENTRIES`, now `QUOTA_*`;
+- an `API_TOKEN_PEPPER` that is not the base64 of at least 32 bytes.
 
 There is no fallback to a weaker value.
 
