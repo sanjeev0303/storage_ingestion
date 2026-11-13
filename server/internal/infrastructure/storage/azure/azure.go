@@ -517,7 +517,9 @@ func partOf(uploadID, id string) (int32, bool) {
 	if !ok {
 		return 0, false
 	}
-	n, err := strconv.Atoi(number)
+	// Bounded to int32: a number past it is not one of ours, and must not
+	// wrap round to a part number that is.
+	n, err := strconv.ParseInt(number, 10, 32)
 	if err != nil {
 		return 0, false
 	}

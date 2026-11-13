@@ -461,11 +461,11 @@ func (s *Storage) ListParts(ctx context.Context, bucket, key, uploadID string) (
 		if err != nil {
 			return nil, classify("list parts", err)
 		}
-		n, err := strconv.Atoi(strings.TrimPrefix(a.Name, partsPrefix(key, uploadID)+"part-"))
-		if err != nil {
+		n, ok := partNumber(strings.TrimPrefix(a.Name, partsPrefix(key, uploadID)+"part-"))
+		if !ok {
 			continue
 		}
-		parts = append(parts, interfaces.StoredPart{PartNumber: int32(n), ETag: `"` + hex.EncodeToString(a.MD5) + `"`, SizeBytes: a.Size})
+		parts = append(parts, interfaces.StoredPart{PartNumber: n, ETag: `"` + hex.EncodeToString(a.MD5) + `"`, SizeBytes: a.Size})
 	}
 	sort.Slice(parts, func(i, j int) bool { return parts[i].PartNumber < parts[j].PartNumber })
 	return parts, nil
@@ -638,4 +638,15 @@ func classify(operation string, err error) error {
 		return fmt.Errorf("%s: provider error %d", operation, apiErr.Code)
 	}
 	return fmt.Errorf("%s: %w", operation, err)
+}
+
+// partNumber reads the number at the end of a part object's name. Bounded to
+// int32: a number past it is not one of ours, and must not wrap round to a
+// part number that is.
+func partNumber(s string) (int32, bool) {
+	n, err := strconv.ParseInt(s, 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	return int32(n), true
 }
