@@ -422,8 +422,3 @@ func (r *Reconciler) unreferenced(ctx context.Context, tenant string, opts Recon
 	}
 	return nil
 }
-
-// Stats sizes the catalog.
-func (r *Reconciler) Stats(ctx context.Context) (model.CatalogStats, error) {
-	return r.repo.Stats(ctx)
-}

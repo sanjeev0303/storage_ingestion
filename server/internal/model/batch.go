@@ -345,16 +345,6 @@ var RetryableEntryErrors = []string{
 	EntryErrStorage, EntryErrProcessingHeld, EntryErrAttemptsExhausted, EntryErrQuotaExceeded,
 }
 
-// RetryableEntryError reports whether code is one of RetryableEntryErrors.
-func RetryableEntryError(code string) bool {
-	for _, c := range RetryableEntryErrors {
-		if c == code {
-			return true
-		}
-	}
-	return false
-}
-
 // IngestionEntry is one manifest line. Its identity is (JobID, Position):
 // the line's 1-based position in the manifest.
 type IngestionEntry struct {
