@@ -354,6 +354,11 @@ func (s *Service) advance(ctx context.Context, op model.DeletionOperation) (stri
 
 	if op.State != model.DeletionInProgress {
 		if asset.Status != model.AssetStatusSoftDeleted {
+			if op.State == model.DeletionRetryWait {
+				// Storage deletion began: cancelling cannot bring the
+				// objects back, so an operator decides.
+				return "", attempts, retry.Permanent(fmt.Errorf("asset is %s after its storage deletion began", asset.Status))
+			}
 			return s.cancel(ctx, op, "asset is "+string(asset.Status))
 		}
 
@@ -424,9 +429,14 @@ func (s *Service) protect(ctx context.Context, op model.DeletionOperation, reaso
 	if err := s.deps.Deletions.Protect(ctx, op.ID, s.cfg.Owner, s.now(), next, reason); err != nil {
 		return "", op.AttemptCount, err
 	}
+	// A started deletion waits in RETRY_WAIT rather than PROTECTED.
+	state := model.DeletionProtected
+	if op.State == model.DeletionRetryWait {
+		state = model.DeletionRetryWait
+	}
 	// Recorded when the protection starts or changes, not on every check.
-	if op.State != model.DeletionProtected || op.ProtectedReason != reason {
-		s.record(ctx, s.newEvent(op.TenantID, op.AssetID, op.ID, "deletion_protected", "PROTECTED", reason, s.actor()))
+	if op.State != state || op.ProtectedReason != reason {
+		s.record(ctx, s.newEvent(op.TenantID, op.AssetID, op.ID, "deletion_protected", string(state), reason, s.actor()))
 		s.log.Info("deletion protected", "operation_id", op.ID, "asset_id", op.AssetID, "reason", reason, "next_check", next)
 	}
 	return outcomeProtected, op.AttemptCount, nil

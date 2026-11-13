@@ -300,16 +300,38 @@ func (s *Service) Imports(ctx context.Context, p model.Principal, datasetID, cur
 	return Page[model.ManifestImport]{Items: imports, NextCursor: next}, err
 }
 
-// objectDatasetsLimit bounds each list of ObjectDatasets.
-const objectDatasetsLimit = 200
-
 // ObjectDatasets says which datasets hold a catalog object and which
-// snapshots pinned one of its versions.
-func (s *Service) ObjectDatasets(ctx context.Context, p model.Principal, objectID string) (model.ObjectDatasets, error) {
+// snapshots pinned one of its versions. part is "datasets" or "snapshots"
+// to page one list with cursor, or "" for the first page of both.
+func (s *Service) ObjectDatasets(ctx context.Context, p model.Principal, objectID, part, cursor string, limit int) (model.ObjectDatasets, error) {
+	var out model.ObjectDatasets
 	if err := s.authorize(ctx, p, model.PermDatasetsRead, "dataset.read", "catalog_object", objectID); err != nil {
-		return model.ObjectDatasets{}, err
+		return out, err
 	}
-	return s.deps.Repo.ObjectDatasets(ctx, p.TenantID, objectID, objectDatasetsLimit)
+	size, err := s.pageSize(limit)
+	if err != nil {
+		return out, err
+	}
+	switch part {
+	case "":
+		if cursor != "" {
+			return out, fmt.Errorf("%w: a cursor needs part=datasets or part=snapshots", ErrInvalidRequest)
+		}
+	case "datasets", "snapshots":
+	default:
+		return out, fmt.Errorf("%w: part must be datasets or snapshots", ErrInvalidRequest)
+	}
+
+	if part != "snapshots" {
+		out.Members, out.NextMembers, err = s.deps.Repo.ObjectMemberships(ctx, p.TenantID, objectID, cursor, size)
+		if err != nil {
+			return out, err
+		}
+	}
+	if part != "datasets" {
+		out.Snapshots, out.NextSnapshots, err = s.deps.Repo.ObjectSnapshots(ctx, p.TenantID, objectID, cursor, size)
+	}
+	return out, err
 }
 
 // ImportErrors pages an import's rejected lines; after is a line number.
@@ -344,7 +366,8 @@ func (s *Service) CancelImport(ctx context.Context, p model.Principal, datasetID
 
 // RunImport reads an import named by its event. The event's tenant must
 // be the import's.
-func (s *Service) RunImport(ctx context.Context, owner, tenantID, importID string) (string, error) {
+func (s *Service) RunImport(ctx context.Context, worker, tenantID, importID string) (string, error) {
+	owner := claimOwner(worker)
 	imports, err := s.deps.Repo.ClaimImports(ctx, owner, importID, s.now(), s.cfg.Lease, 1)
 	if err != nil {
 		return "", err
@@ -361,9 +384,18 @@ func (s *Service) RunImport(ctx context.Context, owner, tenantID, importID strin
 	return s.runImport(ctx, owner, imp), nil
 }
 
+// claimOwner is the lease owner of one claim by worker. Each claim has its
+// own, so two claims of one worker process (its poll and its event
+// consumer, or a job it claims again after losing the lease) are fenced
+// from each other as two workers are.
+func claimOwner(worker string) string {
+	return worker + "#" + event.NewID()
+}
+
 // RunDueImports claims due imports, up to slots, and reads them side by
 // side.
-func (s *Service) RunDueImports(ctx context.Context, owner string, slots int) (int, error) {
+func (s *Service) RunDueImports(ctx context.Context, worker string, slots int) (int, error) {
+	owner := claimOwner(worker)
 	imports, err := s.deps.Repo.ClaimImports(ctx, owner, "", s.now(), s.cfg.Lease, slots)
 	if err != nil {
 		return 0, err
@@ -409,6 +441,14 @@ func (s *Service) runImport(ctx context.Context, owner string, imp model.Manifes
 		return note
 	case errors.Is(err, model.ErrImportState):
 		return "lost the import's lease"
+	case errors.Is(ctx.Err(), context.Canceled):
+		// Shutting down: the next worker carries on from the checkpoint,
+		// and this attempt is not counted against the import. (A handler that
+		// ran out of time is a failed attempt, and is retried as one.)
+		if rerr := s.deps.Repo.ReleaseImport(context.WithoutCancel(ctx), imp.ID, owner, s.now()); rerr != nil {
+			log.Warn("releasing an interrupted manifest import failed", "error", retry.Sanitize(rerr))
+		}
+		return "interrupted by shutdown"
 	case errors.Is(err, model.ErrDatasetArchived), errors.Is(err, model.ErrDatasetNotFound):
 		return finish(model.ImportCancelled, "the dataset is archived")
 	case retry.IsPermanent(err):

@@ -6,13 +6,16 @@ uploaded bytes itself and found the same value.
 """
 
 import concurrent.futures
+import contextlib
 import hashlib
 import json
 import mimetypes
 import os
+import threading
 import time
+import uuid
 
-from .client import put_bytes
+from .client import APIError, put_bytes, session_gone
 
 PART_SIZE = 8 * 1024 * 1024
 # Parts of one file sent at once: one connection to a far bucket is slow.
@@ -20,6 +23,13 @@ PARTS_AT_ONCE = 4
 # Manifests up to this size go in the request body; larger ones are staged.
 INLINE_MANIFEST_LIMIT = 16 * 1024 * 1024
 FINISHED_STATES = {"COMPLETED", "PARTIALLY_COMPLETED", "FAILED", "CANCELLED"}
+# How long each wait for the platform's checks goes on before it gives up,
+# in seconds. Pass timeout=None to wait for ever; a run again picks up where
+# a run that gave up stopped.
+WAIT_TIMEOUT = 2 * 60 * 60
+# Times a wait claims entries again that went back to PENDING after a
+# failed upload: only a client's claim sends them.
+CLAIM_ROUNDS = 10
 
 
 # Dataset file types, fixed here: mimetypes reads the Windows registry,
@@ -100,7 +110,8 @@ def remote_versions(client, dataset):
     return current
 
 
-def ingest_folder(client, folder, dataset, concurrency=8, wait=True, progress=None, branch=None, into=None):
+def ingest_folder(client, folder, dataset, concurrency=8, wait=True, progress=None, branch=None, into=None,
+                  resume_file=None, timeout=WAIT_TIMEOUT):
     """Brings the dataset up to date with a local folder, uploading only
     what changed.
 
@@ -126,6 +137,15 @@ def ingest_folder(client, folder, dataset, concurrency=8, wait=True, progress=No
     into is the dataset (as the API answers it) when it already exists and
     was made with options a plain create would not match, such as a
     derived one.
+
+    resume_file is a JSON file that remembers the parts each large file
+    has confirmed, so a run cut short (a lost connection, a crash) sends
+    only the rest the next time.
+
+    With wait, each wait for the platform's checks gives up after timeout
+    seconds (WAIT_TIMEOUT, two hours, by default; None waits for ever).
+    While it waits it claims and sends again any file whose upload failed
+    and went back to PENDING.
     Returns a summary dict (new, changed, unchanged, members, failed, job).
     """
     say = progress or (lambda message: None)
@@ -143,20 +163,21 @@ def ingest_folder(client, folder, dataset, concurrency=8, wait=True, progress=No
     say(f"{len(new)} new, {len(changed)} changed, {unchanged} unchanged")
     summary = {"new": len(new), "changed": len(changed), "unchanged": unchanged, "members": 0, "failed": [], "job": None}
 
+    resume = ResumeFile(resume_file) if resume_file else None
     if new:
-        summary["job"] = _ingest_new(client, ds, new, concurrency, wait, say)
+        summary["job"] = _ingest_new(client, ds, new, concurrency, wait, say, resume, timeout)
     if changed:
-        summary["failed"] = _upload_new_versions(client, dataset, changed, concurrency, wait, say)
+        summary["failed"] = _upload_new_versions(client, dataset, changed, concurrency, wait, say, resume, timeout)
     if wait:
         target = ds
         if branch:
             from .branches import branch_of
             target = branch_of(client, ds, branch)
-        summary["members"] = pin_members(client, target, files, progress=say, namespace=dataset)
+        summary["members"] = pin_members(client, target, files, progress=say, namespace=dataset, timeout=timeout)
     return summary
 
 
-def _ingest_new(client, ds, files, concurrency, wait, say):
+def _ingest_new(client, ds, files, concurrency, wait, say, resume=None, timeout=WAIT_TIMEOUT):
     manifest = build_manifest(files)
     manifest_sha = hashlib.sha256(manifest).hexdigest()
     # Keyed by dataset and manifest: a rerun resumes the same job, and the
@@ -174,39 +195,64 @@ def _ingest_new(client, ds, files, concurrency, wait, say):
         job = client.get(job_path)
     if job["state"] in ("PENDING_VALIDATION", "VALIDATING", "READY"):
         job = client.post(job_path + "/finalize")
-    errors = _upload_claimed(client, job_path, {f.path: f for f in files}, concurrency, say)
-    if errors:
-        say(f"{len(errors)} files failed to upload; run again to retry them")
+    by_path = {f.path: f for f in files}
+
+    def upload_claimed():
+        errors = _upload_claimed(client, job_path, by_path, concurrency, say, resume)
+        if errors:
+            say(f"{len(errors)} files failed to upload; they are tried again once the platform hands them back")
+
+    upload_claimed()
     if not wait:
         return client.get(job_path)
-    return wait_for_job(client, job["id"], progress=say)
+    return wait_for_job(client, job["id"], timeout=timeout, progress=say, claim=upload_claimed)
 
 
 # A single PUT carries at most this much; larger changed files use parts.
 SINGLE_UPLOAD_LIMIT = 64 * 1024 * 1024
-UPLOAD_DONE = {"AVAILABLE", "REJECTED", "DELETED", "SOFT_DELETED"}
+# Asset states that do not change by waiting. BLOCKED is an AVAILABLE asset
+# whose reads a later check stopped.
+UPLOAD_DONE = {"AVAILABLE", "REJECTED", "BLOCKED", "DELETED", "SOFT_DELETED"}
 
 
-def _upload_new_versions(client, dataset, files, concurrency, wait, say):
+def _upload_new_versions(client, dataset, files, concurrency, wait, say, resume=None, timeout=WAIT_TIMEOUT):
     """Uploads changed files to their paths: each becomes the object's next
     version once processing has verified and scanned it. Returns the paths
     that failed, with why."""
+
+    def single(f, body):
+        created = client.post("/api/v1/uploads", body)
+        upload_id = created["upload_id"]
+        if not created.get("upload_url") and created.get("status") in ("COMPLETED", "VERIFIED"):
+            return upload_id  # a start sent again after its upload completed: nothing is left to send
+        # The same key hands back the same upload with a new URL.
+        put_bytes(created["upload_url"], lambda: open(f.disk_path, "rb"), f.size, f.content_type,
+                  headers=created.get("upload_headers"),
+                  refresh=lambda: client.post("/api/v1/uploads", body)["upload_url"])
+        client.post(f"/api/v1/uploads/{upload_id}/complete", retry=True)
+        return upload_id
+
+    def multipart(f, body):
+        upload_id = client.post("/api/v1/uploads/multipart", body)["upload_id"]
+        _send_parts(client, f"/api/v1/uploads/{upload_id}", f, {"checksum_sha256": f.sha256}, resume)
+        return upload_id
 
     def one(f):
         key = "sdk-version-" + hashlib.sha256(f"{dataset}/{f.path}/{f.sha256}".encode()).hexdigest()[:40]
         body = {"file_name": os.path.basename(f.path), "content_type": f.content_type, "size_bytes": f.size,
                 "checksum_sha256": f.sha256, "idempotency_key": key, "dataset": dataset, "path": f.path}
-        if f.size <= SINGLE_UPLOAD_LIMIT:
-            created = client.post("/api/v1/uploads", body)
-            upload_id = created["upload_id"]
-            put_bytes(created["upload_url"], lambda: open(f.disk_path, "rb"), f.size, f.content_type,
-                      headers=created.get("upload_headers"))
-            client.post(f"/api/v1/uploads/{upload_id}/complete")
-        else:
-            upload_id = client.post("/api/v1/uploads/multipart", body)["upload_id"]
-            _send_parts(client, f"/api/v1/uploads/{upload_id}", f, {"checksum_sha256": f.sha256})
+        send = single if f.size <= SINGLE_UPLOAD_LIMIT else multipart
+        try:
+            upload_id = send(f, body)
+        except APIError as err:
+            if not session_gone(err):
+                raise
+            # The session for this key ended, and the same key would hand
+            # it back: once more from the start, under a new key.
+            upload_id = send(f, {**body, "idempotency_key": key + "-" + uuid.uuid4().hex[:8]})
         if not wait:
             return None
+        give_up = None if timeout is None else time.monotonic() + timeout
         while True:
             status = client.get(f"/api/v1/uploads/{upload_id}")
             asset = status.get("asset") or {}
@@ -216,6 +262,9 @@ def _upload_new_versions(client, dataset, files, concurrency, wait, say):
                 return f"{f.path}: {asset['status']} {asset.get('rejection_reason', '')}".strip()
             if status.get("status") in ("FAILED", "ABORTED", "EXPIRED"):
                 return f"{f.path}: upload {status['status']}"
+            if give_up is not None and time.monotonic() >= give_up:
+                state = asset.get("status") or status.get("status")
+                return f"{f.path}: still {state} after {timeout}s; run again to check on it"
             time.sleep(1)
 
     failed = []
@@ -233,11 +282,12 @@ MEMBER_LINES_PER_IMPORT = 20000
 IMPORT_DONE = {"COMPLETED", "FAILED", "CANCELLED"}
 
 
-def pin_members(client, ds, files, progress=None, namespace=None):
+def pin_members(client, ds, files, progress=None, namespace=None, timeout=WAIT_TIMEOUT):
     """Makes each local file a member of the dataset, pinned to the catalog
     version whose SHA-256 equals the local file, so the next snapshot holds
     exactly this folder. Files with no published version of their bytes yet
-    (still processing, or rejected) are left out and reported.
+    (still processing, or rejected) are left out and reported. Raises
+    TimeoutError when an import is still running after timeout seconds.
     """
     say = progress or (lambda message: None)
     namespace = namespace or ds["name"]
@@ -259,7 +309,10 @@ def pin_members(client, ds, files, progress=None, namespace=None):
         imp = client.request("POST", f"/api/v1/datasets/{ds['id']}/manifests", raw=chunk,
                              content_type="application/x-ndjson", params={"duplicate_policy": "REPLACE"},
                              headers={"Idempotency-Key": key})
+        give_up = None if timeout is None else time.monotonic() + timeout
         while imp["state"] not in IMPORT_DONE:
+            if give_up is not None and time.monotonic() >= give_up:
+                raise TimeoutError(f"pinning members: import {imp['id']} is still {imp['state']}")
             time.sleep(1)
             imp = client.get(f"/api/v1/datasets/{ds['id']}/manifests/{imp['id']}")
         if imp["state"] != "COMPLETED":
@@ -282,7 +335,7 @@ def _submit_manifest(client, job_path, manifest, manifest_sha):
     client.post(job_path + "/manifest/staged", {"sha256": manifest_sha})
 
 
-def _upload_claimed(client, job_path, by_path, concurrency, say):
+def _upload_claimed(client, job_path, by_path, concurrency, say, resume=None):
     """Claims entries while there is room and uploads each from disk."""
     errors = []
     done = 0
@@ -294,7 +347,7 @@ def _upload_claimed(client, job_path, by_path, concurrency, say):
             if free > 0:
                 claim = client.post(job_path + "/claims", {"max": min(free, 32)})
                 for grant in claim.get("grants") or []:
-                    running.add(pool.submit(_upload_one, client, job_path, by_path, grant))
+                    running.add(pool.submit(_upload_one, client, job_path, by_path, grant, resume))
             limited = claim.get("limited_by", "")
             if limited == "job_not_running":
                 break
@@ -317,7 +370,7 @@ def _upload_claimed(client, job_path, by_path, concurrency, say):
     return errors
 
 
-def _upload_one(client, job_path, by_path, grant):
+def _upload_one(client, job_path, by_path, grant, resume=None):
     entry = grant["entry"]
     local = by_path.get(entry.get("path", ""))
     if local is None:
@@ -327,46 +380,155 @@ def _upload_one(client, job_path, by_path, grant):
     if entry.get("strategy") == "SINGLE":
         put_bytes(grant["upload_url"], lambda: open(local.disk_path, "rb"), local.size, entry.get("content_type"),
                   headers=grant.get("upload_headers"))
-        client.post(entry_path + "/complete")
+        client.post(entry_path + "/complete", retry=True)
         return
 
-    _send_parts(client, entry_path, local, {})
+    # An entry claimed again after a failure has a new upload session, which
+    # the saved parts of the old one must not complete.
+    _send_parts(client, entry_path, local, {}, resume, upload_id=entry.get("upload_id", ""))
 
 
-def _send_parts(client, base, local, complete_body):
+class ResumeFile:
+    """Remembers, in a JSON file, the parts each unfinished upload has had
+    confirmed, so running the same upload again sends only the rest. The
+    file is written whole through a temporary copy, so a crash mid-write
+    leaves the previous one, and a lock file beside it keeps processes
+    sharing it (two `osp ingest` runs) from dropping each other's parts."""
+
+    def __init__(self, path):
+        self.path = path
+        self._lock = threading.Lock()
+
+    @contextlib.contextmanager
+    def _locked(self):
+        lock = self.path + ".lock"
+        os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+        with self._lock:
+            while True:
+                try:
+                    fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                    break
+                except (FileExistsError, PermissionError):
+                    # A lock left by a process that died holding it is stale
+                    # long before this: a write takes milliseconds.
+                    try:
+                        if time.time() - os.path.getmtime(lock) > 30:
+                            os.remove(lock)
+                    except OSError:
+                        pass
+                    time.sleep(0.01)
+            try:
+                yield
+            finally:
+                os.close(fd)
+                os.remove(lock)
+
+    def _load(self):
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+
+    def _write(self, entries):
+        with open(self.path + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(entries, f)
+        os.replace(self.path + ".tmp", self.path)
+
+    def parts(self, key):
+        """Part number (as text) to {"etag", "size"} for one upload."""
+        with self._locked():
+            return dict(self._load().get(key, {}))
+
+    def save_part(self, key, number, etag, size):
+        with self._locked():
+            entries = self._load()
+            entries.setdefault(key, {})[str(number)] = {"etag": etag, "size": size}
+            self._write(entries)
+
+    def forget(self, key):
+        with self._locked():
+            entries = self._load()
+            if entries.pop(key, None) is not None:
+                self._write(entries)
+
+
+def _send_parts(client, base, local, complete_body, resume=None, upload_id=""):
     """Uploads a file in PART_SIZE parts under an upload at base (an
-    ingestion entry or a multipart upload), confirms them and completes."""
-    count = (local.size + PART_SIZE - 1) // PART_SIZE
-    numbers = list(range(1, count + 1))
-    urls = []
-    for start in range(0, count, 100):
-        answer = client.post(base + "/parts/urls", {"part_numbers": numbers[start:start + 100]})
-        urls.extend(answer["parts"])
+    ingestion entry or a multipart upload), confirms them and completes.
+    With resume, parts confirmed by an earlier run are not sent again.
+    upload_id names the session when base does not."""
+    key = f"{base}:{local.sha256}:{PART_SIZE}"
+    if upload_id:
+        key = f"{base}:{upload_id}:{local.sha256}:{PART_SIZE}"
+    try:
+        _send_saved_parts(client, base, local, complete_body, resume, key)
+    except APIError as err:
+        # The session ended, or the server no longer knows the saved parts:
+        # start clean next time instead of failing the same way again.
+        if resume and (session_gone(err) or (err.status == 400 and err.path == base + "/complete")):
+            resume.forget(key)
+        raise
+    if resume:
+        resume.forget(key)
 
-    def send(i):
-        offset = i * PART_SIZE
+
+def _send_saved_parts(client, base, local, complete_body, resume, key):
+    done = resume.parts(key) if resume else {}
+    count = (local.size + PART_SIZE - 1) // PART_SIZE
+    numbers = [n for n in range(1, count + 1) if str(n) not in done]
+    urls = {}
+    # Part links, confirmations and the completion can be sent again safely.
+    for start in range(0, len(numbers), 100):
+        answer = client.post(base + "/parts/urls", {"part_numbers": numbers[start:start + 100]}, retry=True)
+        for part in answer["parts"]:
+            urls[part["part_number"]] = part["url"]
+
+    def send(n):
+        offset = (n - 1) * PART_SIZE
         length = min(PART_SIZE, local.size - offset)
         with open(local.disk_path, "rb") as f:
             f.seek(offset)
             data = f.read(length)
-        return put_bytes(urls[i]["url"], data, length), length
+
+        # Links last about 15 minutes; one that expired before its turn is replaced.
+        def refresh():
+            return client.post(base + "/parts/urls", {"part_numbers": [n]}, retry=True)["parts"][0]["url"]
+
+        etag = put_bytes(urls[n], data, length, refresh=refresh)
+        # Confirmed one at a time, so a run cut short keeps every part it sent.
+        client.post(base + "/parts/confirm", {"parts": [{"part_number": n, "etag": etag, "size_bytes": length}]},
+                    retry=True)
+        if resume:
+            resume.save_part(key, n, etag, length)
+        return n, etag, length
 
     with concurrent.futures.ThreadPoolExecutor(PARTS_AT_ONCE) as pool:
-        sent = list(pool.map(send, range(len(urls))))
-    recorded, completed = [], []
-    for part, (etag, length) in zip(urls, sent):
-        recorded.append({"part_number": part["part_number"], "etag": etag, "size_bytes": length})
-        completed.append({"part_number": part["part_number"], "etag": etag})
-    for start in range(0, len(recorded), 100):
-        client.post(base + "/parts/confirm", {"parts": recorded[start:start + 100]})
-    client.post(base + "/complete", {"parts": completed, **complete_body})
+        futures = [pool.submit(send, n) for n in numbers]
+        try:
+            for future in concurrent.futures.as_completed(futures):
+                n, etag, length = future.result()
+                done[str(n)] = {"etag": etag, "size": length}
+        except BaseException:
+            # The first failure stops the parts not yet started; the ones
+            # under way finish before this raises.
+            pool.shutdown(cancel_futures=True)
+            raise
+    completed = [{"part_number": int(n), "etag": done[n]["etag"]} for n in sorted(done, key=int)]
+    client.post(base + "/complete", {"parts": completed, **complete_body}, retry=True)
 
 
-def wait_for_job(client, job_id, poll=2.0, timeout=None, progress=None):
-    """Polls the job until it finishes, and returns it."""
+def wait_for_job(client, job_id, poll=2.0, timeout=WAIT_TIMEOUT, progress=None, claim=None):
+    """Polls the job until it finishes, and returns it. Raises TimeoutError
+    after timeout seconds (WAIT_TIMEOUT by default; None waits for ever).
+
+    claim, when given, is called while the job has PENDING entries, at most
+    CLAIM_ROUNDS times: an upload that failed goes back to PENDING once its
+    lease or retry delay has passed, and only a client's claim sends it."""
     say = progress or (lambda message: None)
     started = time.monotonic()
     last = None
+    rounds = 0
     while True:
         job = client.get("/api/v1/ingestion/jobs/" + job_id)
         p = job.get("progress", {})
@@ -376,6 +538,10 @@ def wait_for_job(client, job_id, poll=2.0, timeout=None, progress=None):
             last = line
         if job["state"] in FINISHED_STATES:
             return job
-        if timeout and time.monotonic() - started > timeout:
+        if claim and p.get("pending") and rounds < CLAIM_ROUNDS:
+            rounds += 1
+            claim()
+            continue
+        if timeout is not None and time.monotonic() - started > timeout:
             raise TimeoutError(f"job {job_id} is still {job['state']}")
         time.sleep(poll)

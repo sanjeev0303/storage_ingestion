@@ -474,6 +474,12 @@ func (h *StorageConnectionHandler) fail(w nethttp.ResponseWriter, err error) {
 	case errors.Is(err, model.ErrNoStagedCredential):
 		writeJSON(w, nethttp.StatusConflict, problem{Error: err.Error(), Code: "no_staged_credential"})
 		return
+	case errors.Is(err, model.ErrStaleStagedCredential):
+		writeJSON(w, nethttp.StatusConflict, problem{Error: err.Error(), Code: "stale_staged_credential"})
+		return
+	case errors.Is(err, model.ErrCredentialChanged):
+		writeJSON(w, nethttp.StatusConflict, problem{Error: err.Error(), Code: "credential_changed"})
+		return
 	case errors.Is(err, model.ErrNoPreviousCredential):
 		writeJSON(w, nethttp.StatusConflict, problem{Error: "no credential to roll back to, or the rollback window has passed", Code: "no_previous_credential"})
 		return

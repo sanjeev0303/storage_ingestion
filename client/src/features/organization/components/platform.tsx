@@ -181,7 +181,9 @@ function CreateOrganization({ onClose }: { onClose: () => void }) {
 const STATUSES = ["ACTIVE", "SUSPENDED", "DEACTIVATED"];
 
 function SetStatus({ org, onClose }: { org: Organization; onClose: () => void }) {
-  const [status, setStatus] = useState<string>(STATUSES.includes(org.status) ? org.status : "ACTIVE");
+  // Starts at the real status, whatever it is, so nothing changes until a
+  // different one is picked.
+  const [status, setStatus] = useState<string>(org.status);
   const set = useAdminMutation(() => setAdminOrganizationStatus(org.id, status), "organizations");
   return (
     <ConfirmDialog
@@ -191,7 +193,15 @@ function SetStatus({ org, onClose }: { org: Organization; onClose: () => void })
       description={
         <div className="flex flex-col gap-3">
           <p>Suspended and deactivated organizations refuse every member request until set back to active.</p>
+          <p>
+            Now <span className="mono-data">{org.status}</span>. Choose the new status.
+          </p>
           <Select aria-label="New status" value={status} onChange={(e) => setStatus(e.target.value)}>
+            {!STATUSES.includes(org.status) && (
+              <option value={org.status} disabled>
+                {org.status}
+              </option>
+            )}
             {STATUSES.map((s) => (
               <option key={s}>{s}</option>
             ))}
@@ -199,6 +209,7 @@ function SetStatus({ org, onClose }: { org: Organization; onClose: () => void })
         </div>
       }
       confirmLabel="Set status"
+      confirmDisabled={status === org.status}
       onConfirm={async () => {
         try {
           await set.mutateAsync(undefined);

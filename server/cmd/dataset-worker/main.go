@@ -35,6 +35,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/service/events"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/quota"
 	datasetworker "github.com/sanjeev0303/object-storage-platform/internal/worker/dataset"
+	"github.com/sanjeev0303/object-storage-platform/internal/worker/heartbeat"
 )
 
 func main() {
@@ -181,6 +182,7 @@ func run() error {
 	}()
 
 	log.Info("dataset worker started", "owner", owner, "poll_interval", dc.PollInterval, "slots", dc.WorkerSlots)
+	go heartbeat.Run(ctx, db, "dataset", owner, log)
 	datasetworker.Run(ctx, svc, owner, dc.WorkerSlots, dc.PollInterval, log)
 	wg.Wait()
 	log.Info("dataset worker stopped")

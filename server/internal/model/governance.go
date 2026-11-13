@@ -138,11 +138,14 @@ const (
 	ApprovalAssetDelete      = "ASSET_DELETE"
 	ApprovalGovernanceChange = "GOVERNANCE_CHANGE"
 
-	ApprovalPending  = "PENDING"
-	ApprovalExecuted = "EXECUTED"
-	ApprovalRejected = "REJECTED"
-	ApprovalExpired  = "EXPIRED"
-	ApprovalFailed   = "FAILED"
+	ApprovalPending = "PENDING"
+	// ApprovalExecuting: approved, and the change is being made. It ends
+	// EXECUTED or FAILED; one left here was interrupted mid-change.
+	ApprovalExecuting = "EXECUTING"
+	ApprovalExecuted  = "EXECUTED"
+	ApprovalRejected  = "REJECTED"
+	ApprovalExpired   = "EXPIRED"
+	ApprovalFailed    = "FAILED"
 )
 
 // Approval is a change waiting for a second member.

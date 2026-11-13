@@ -43,6 +43,35 @@ func (q *Quarantine) BlastRadiusFor(ctx context.Context, p model.Principal, asse
 	return out, err
 }
 
+// ErrUnblockReason: clearing a block needs a reason for the audit trail.
+var ErrUnblockReason = errors.New("a reason of 1 to 500 characters is required")
+
+// UnblockFor lets an asset a re-scan blocked be read again, for reason (a
+// false positive, say). It takes the same permission as releasing a file
+// from quarantine, and the clearing is audited with the block it lifted.
+func (q *Quarantine) UnblockFor(ctx context.Context, p model.Principal, assetID, reason string) error {
+	if q.checks == nil {
+		return ErrChecksNotConfigured
+	}
+	if err := audit.Require(ctx, q.audit, p, model.PermQuarantineRelease, "asset.unblock", "asset", assetID); err != nil {
+		return err
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" || len(reason) > 500 {
+		return ErrUnblockReason
+	}
+	previous, err := q.checks.UnblockAsset(ctx, p.TenantID, assetID, q.now())
+	if err != nil {
+		return err
+	}
+	if q.audit != nil {
+		e := audit.From(ctx, p, "asset.unblock", "asset", assetID)
+		e.Details = map[string]any{"blocked_reason": previous, "reason": reason}
+		q.audit.Record(ctx, e)
+	}
+	return nil
+}
+
 // ContentPolicyFor returns the organization's own content policy (empty
 // when it has none: the platform's applies).
 func (q *Quarantine) ContentPolicyFor(ctx context.Context, p model.Principal) (model.ContentPolicy, error) {

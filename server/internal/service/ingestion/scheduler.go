@@ -64,6 +64,9 @@ func (s *Service) Claim(ctx context.Context, p model.Principal, jobID string, ma
 	if err != nil {
 		return ClaimResult{}, err
 	}
+	if err := inScope(p, dataset); err != nil {
+		return ClaimResult{}, err
+	}
 	q, err := s.quota(ctx, p.TenantID)
 	if err != nil {
 		return ClaimResult{}, err
@@ -86,6 +89,8 @@ func (s *Service) Claim(ctx context.Context, p model.Principal, jobID string, ma
 			result.RetryAfter = 5 * time.Second
 		}
 	}
+
+	s.reserveSingles(ctx, job, dataset, granted.Entries)
 
 	// Each session is a database write and a presign: prepare a few at a
 	// time rather than one after another, since a claim may grant up to
@@ -124,6 +129,16 @@ func (s *Service) Claim(ctx context.Context, p model.Principal, jobID string, ma
 	return result, nil
 }
 
+// inScope refuses a token confined to other datasets, as direct uploads do
+// (upload.CreateFor). Ingestion has no per-path check, so a token confined
+// to a path prefix uploads directly instead.
+func inScope(p model.Principal, ds model.Dataset) error {
+	if !p.Scope.Allows(ds.Name) || p.Scope.PathPrefix != "" {
+		return model.ErrForbidden
+	}
+	return nil
+}
+
 // prepareWorkers is how many upload sessions one claim prepares at once.
 const prepareWorkers = 8
 
@@ -134,6 +149,55 @@ func uploadKey(e model.IngestionEntry) string {
 	return fmt.Sprintf("ingestion:%s:%d:%d", e.JobID, e.Position, e.UploadGeneration)
 }
 
+// singleInput is the upload request of a SINGLE entry. prepare and
+// reserveSingles both build it here: the session reserveSingles stores is
+// found again by prepare only when the two requests are the same.
+func singleInput(job model.IngestionJob, dataset model.Dataset, e model.IngestionEntry) upload.CreateInput {
+	return upload.CreateInput{
+		TenantID: e.TenantID, OwnerID: job.CreatedBy, Dataset: dataset.Name,
+		Request: request.CreateUploadRequest{
+			FileName: model.BaseName(e.Path), ContentType: e.ContentType, SizeBytes: e.SizeBytes,
+			ChecksumSHA256: e.ChecksumSHA256, IdempotencyKey: uploadKey(e),
+			Path: e.Path, Metadata: entryMetadata(e),
+		},
+	}
+}
+
+// batchReserver is the optional batch reservation of the upload service.
+type batchReserver interface {
+	Reserve(ctx context.Context, inputs []upload.CreateInput) error
+}
+
+// reserveSingles stores the sessions of a claim's new SINGLE entries with
+// their quota reservations in one transaction, before prepare presigns them
+// one by one. That takes the tenant's quota lock once per claim instead of
+// once per file, which was the per-tenant ingestion ceiling (docs/ingestion.md).
+// It is best effort: when the batch is not made, prepare creates each session
+// itself exactly as before, so nothing here can fail a grant.
+func (s *Service) reserveSingles(ctx context.Context, job model.IngestionJob, dataset model.Dataset, entries []model.IngestionEntry) {
+	reserver, ok := s.deps.Uploads.(batchReserver)
+	if !ok || s.cfg.NoBatchReservation {
+		return
+	}
+	var inputs []upload.CreateInput
+	for _, e := range entries {
+		// An entry with a session already has its reservation.
+		if e.Strategy == model.StrategySingle && e.UploadID == "" {
+			inputs = append(inputs, singleInput(job, dataset, e))
+		}
+	}
+	if len(inputs) < 2 {
+		return
+	}
+	err := s.onStorage(ctx, func(ctx context.Context) error { return reserver.Reserve(ctx, inputs) })
+	if err != nil {
+		s.count("ingestion_batch_reservations_skipped", 1)
+		return
+	}
+	s.count("ingestion_batch_reservations", 1)
+	s.count("ingestion_batch_reserved_sessions", int64(len(inputs)))
+}
+
 // prepare creates (or finds again) the upload session of a granted entry
 // and attaches it. Calling it again for the same attempt returns the same
 // session: its idempotency key does not change.
@@ -142,14 +206,7 @@ func (s *Service) prepare(ctx context.Context, job model.IngestionJob, dataset m
 	err := s.onStorage(ctx, func(ctx context.Context) error {
 		switch e.Strategy {
 		case model.StrategySingle:
-			res, err := s.deps.Uploads.Create(ctx, upload.CreateInput{
-				TenantID: e.TenantID, OwnerID: job.CreatedBy, Dataset: dataset.Name,
-				Request: request.CreateUploadRequest{
-					FileName: model.BaseName(e.Path), ContentType: e.ContentType, SizeBytes: e.SizeBytes,
-					ChecksumSHA256: e.ChecksumSHA256, IdempotencyKey: uploadKey(e),
-					Path: e.Path, Metadata: entryMetadata(e),
-				},
-			})
+			res, err := s.deps.Uploads.Create(ctx, singleInput(job, dataset, e))
 			if err != nil {
 				return err
 			}
@@ -449,7 +506,7 @@ func (s *Service) CompleteEntry(ctx context.Context, p model.Principal, jobID st
 
 // uploaded records that an entry's object is stored and confirmed.
 func (s *Service) uploaded(ctx context.Context, e model.IngestionEntry) (model.IngestionEntry, error) {
-	moved, err := s.deps.Repo.Transition(ctx, interfaces.EntryChange{
+	moved, err := s.transition(ctx, interfaces.EntryChange{
 		JobID: e.JobID, Position: e.Position, From: []model.EntryState{model.EntryScheduled, model.EntryUploading},
 		To: model.EntryUploaded, Now: s.now(), UploadID: e.UploadID,
 	})

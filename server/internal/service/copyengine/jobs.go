@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"sort"
 	"strings"
 	"time"
@@ -476,16 +477,18 @@ func (s *Service) finish(ctx context.Context, job model.CopyJob) error {
 			moved = append(moved, postgres.SwitchedAsset{SourceConnectionID: a.ConnectionID, SourceKey: a.ObjectKey,
 				TargetKey: it.TargetKey, VersionID: it.TargetVersionID, ETag: it.TargetETag})
 		}
-		switched, err := s.deps.Store.SwitchConnection(ctx, job.TenantID, job.DatasetID, job.TargetConnectionID, moved, s.now())
-		if err != nil {
-			state, message = model.CopyFailed, "the copies are verified but the switch failed: "+truncate(err.Error(), 300)
-			break
-		}
-		report["switched"] = switched
-		report["source_objects"] = "left in place; delete them at the source once the target is trusted"
 		var plan MigrationPlan
 		_ = json.Unmarshal(job.Options, &plan)
-		report["egress_estimate_usd"] = plan.EgressUSD
+		migrated := maps.Clone(report)
+		migrated["source_objects"] = "left in place; delete them at the source once the target is trusted"
+		migrated["egress_estimate_usd"] = plan.EgressUSD
+		// The switch completes the job itself, and only while it still runs
+		// under this lease: a job cancelled during this pass switches nothing.
+		err = s.deps.Store.FinishMigration(ctx, job, s.cfg.Owner, moved, migrated, s.now())
+		if err == nil || errors.Is(err, model.ErrCopyJobEnded) {
+			return nil
+		}
+		state, message = model.CopyFailed, "the copies are verified but the switch failed: "+truncate(err.Error(), 300)
 	case model.CopyRestore:
 		if err := s.writeRestoreManifest(ctx, job); err != nil {
 			state, message = model.CopyFailed, "the restore manifest could not be written: "+truncate(err.Error(), 300)

@@ -1,0 +1,1052 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Storage on AWS, failure drills</title>
+<meta name="description" content="How the object storage platform (API, nine workers, Postgres outbox, Kafka, ClamAV, S3 and tenant clouds) deploys on AWS at the lowest monthly cost, and how it fails and recovers, animated. 30 Oct 2026.">
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lenis@1.3.26/dist/lenis.css">
+<style>
+:root {
+  --bg: #DDE3E8;
+  --surface: #F3F5F7;
+  --surface-2: #E8ECEF;
+  --ink: #3A0F34;
+  --text: #2a1027;
+  --muted: #5b4a58;
+  --border: #b8c2ca;
+  --accent: #EAAA00;
+  --accent-ink: #3A0F34;
+  --down: #B3261E;  --down-bg: #f6dcd9;
+  --ok: #2E7D4F;    --ok-bg: #d8efe1;
+  --hold-bg: #fbecc2;
+  --link: #3A0F34;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #170b15;
+    --surface: #221120;
+    --surface-2: #2c1729;
+    --ink: #f0e6ee;
+    --text: #ebe4ea;
+    --muted: #b7a9b4;
+    --border: #4a3346;
+    --accent: #EAAA00;
+    --accent-ink: #1a0b18;
+    --down: #ff8f86;  --down-bg: #4a1d1a;
+    --ok: #86d6a6;    --ok-bg: #173b27;
+    --hold-bg: #4a3a0c;
+    --link: #f3c94d;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 17px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+::selection { background: var(--accent); color: var(--accent-ink); }
+a { color: var(--link); text-underline-offset: 2px; overflow-wrap: anywhere; }
+a:focus-visible, button:focus-visible, .table-wrap:focus-visible, .diagram-wrap:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+code { font: 0.86em/1.4 ui-monospace, "Cascadia Mono", Consolas, monospace; background: var(--surface-2); padding: 0.05em 0.3em; border-radius: 2px; overflow-wrap: anywhere; }
+.skip { position: absolute; left: -9999px; }
+.skip:focus { left: 16px; top: 16px; background: var(--surface); padding: 8px 12px; z-index: 10; }
+
+.page { max-width: 1200px; margin: 0 auto; padding: 32px 16px 96px; }
+h1 { font-size: clamp(1.8rem, 1.2rem + 2.4vw, 2.6rem); line-height: 1.12; letter-spacing: -0.02em; margin: 0 0 12px; color: var(--ink); text-wrap: balance; }
+.lede { font-size: 1.12rem; color: var(--muted); max-width: 72ch; margin: 0 0 8px; }
+.meta { font-size: 0.92rem; color: var(--muted); margin: 0; }
+h2 { font-size: 1.55rem; line-height: 1.2; letter-spacing: -0.01em; margin: 64px 0 12px; color: var(--ink); text-wrap: balance; scroll-margin-top: 16px; }
+h3 { font-size: 1.15rem; line-height: 1.3; margin: 28px 0 8px; color: var(--ink); }
+p, li { max-width: 76ch; }
+
+nav.toc { margin: 24px 0 0; padding: 14px 18px; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; }
+nav.toc ol { margin: 0; padding-left: 1.2em; columns: 2 16rem; column-gap: 32px; }
+nav.toc li { margin: 2px 0; break-inside: avoid; }
+
+.keys { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); margin-top: 16px; }
+.key { background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 14px 16px; }
+.key h3 { margin: 0 0 4px; font-size: 1rem; }
+.key p { margin: 0; font-size: 0.96rem; }
+.key .big { font-size: 1.6rem; font-weight: 700; color: var(--ink); line-height: 1.1; margin-bottom: 4px; }
+
+.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); margin: 16px 0; }
+table { border-collapse: collapse; width: 100%; font-size: 0.94rem; }
+th, td { text-align: left; vertical-align: top; padding: 9px 12px; border-bottom: 1px solid var(--border); }
+th { background: var(--surface-2); font-weight: 600; white-space: nowrap; color: var(--ink); }
+tr:last-child td { border-bottom: 0; }
+td.num, th.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+tr.total td { font-weight: 700; background: var(--surface-2); }
+.pill { display: inline-block; font-size: 0.78rem; font-weight: 700; padding: 1px 7px; border-radius: 2px; white-space: nowrap; }
+.p-auto { background: var(--ok-bg); color: var(--ok); }
+.p-op { background: var(--hold-bg); color: var(--text); }
+.p-gap { background: var(--down-bg); color: var(--down); }
+
+/* Diagram */
+.lab { background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 16px; margin-top: 16px; }
+.picker { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; padding: 0; list-style: none; }
+.picker button, .controls button {
+  font: inherit; font-size: 0.88rem; font-weight: 600; min-height: 38px; padding: 0 12px; border-radius: 2px;
+  border: 1px solid var(--border); background: var(--surface-2); color: var(--text); cursor: pointer;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+.picker button:hover, .controls button:hover { border-color: var(--ink); }
+.picker button:active, .controls button:active { transform: scale(0.97); }
+.picker button[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--bg); }
+.lab-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.lab-head h3 { margin: 0; }
+.controls { display: flex; flex-wrap: wrap; gap: 6px; }
+.caption { min-height: 3.1em; margin: 0 0 12px; padding: 10px 14px; border-radius: 2px; background: var(--surface-2); border-left: 4px solid var(--accent); font-size: 0.98rem; max-width: none; }
+/* The diagram takes the full width so its labels stay readable; the steps sit under it. */
+.lab-body { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr); align-items: start; }
+.diagram-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 2px; background: var(--bg); }
+.diagram-wrap svg { display: block; width: 100%; min-width: 760px; height: auto; }
+.steps { margin: 0; padding-left: 1.3em; font-size: 0.92rem; color: var(--muted); columns: 2 24rem; column-gap: 32px; }
+.steps li { margin: 0 0 6px; padding: 4px 6px; border-radius: 2px; max-width: none; break-inside: avoid; }
+.steps li.on { background: var(--hold-bg); color: var(--text); }
+.steps li.done { color: var(--text); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 0.85rem; color: var(--muted); margin: 10px 0 0; padding: 0; list-style: none; }
+.legend li { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 14px; height: 10px; border-radius: 2px; display: inline-block; border: 2px solid var(--ink); }
+
+svg .zone { fill: none; stroke: var(--border); stroke-width: 1.5; stroke-dasharray: 6 5; }
+svg .zone-label { fill: var(--muted); font: 600 12px system-ui, sans-serif; }
+svg .edge { fill: none; stroke: var(--border); stroke-width: 2; }
+svg .edge.dash { stroke-dasharray: 5 5; }
+svg .edge.live { stroke: var(--ink); stroke-width: 3; }
+svg .edge.bad { stroke: var(--down); stroke-width: 3; stroke-dasharray: 6 4; }
+svg .node rect { fill: var(--surface); stroke: var(--ink); stroke-width: 1.5; transition: fill 200ms ease, stroke 200ms ease; }
+svg .node .t { fill: var(--ink); font: 700 13px system-ui, sans-serif; }
+svg .node .s { fill: var(--muted); font: 11px system-ui, sans-serif; }
+svg .node .badge { font: 700 10px system-ui, sans-serif; letter-spacing: 0.04em; }
+svg .node.external rect { stroke-dasharray: 4 3; }
+svg .node.down rect { fill: var(--down-bg); stroke: var(--down); stroke-width: 3; }
+svg .node.down .badge { fill: var(--down); }
+svg .node.hold rect { fill: var(--hold-bg); stroke: var(--accent); stroke-width: 3; }
+svg .node.hold .badge { fill: var(--text); }
+svg .node.ok rect { fill: var(--ok-bg); stroke: var(--ok); stroke-width: 3; }
+svg .node.ok .badge { fill: var(--ok); }
+svg .node.pulse rect { stroke: var(--accent); stroke-width: 4; }
+svg #packet { fill: var(--accent); stroke: var(--ink); stroke-width: 2; }
+svg #packet.bad { fill: var(--down); }
+
+/* Crash simulator */
+.sim { background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 16px; margin-top: 16px; }
+.sim-controls { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); align-items: start; }
+.sim fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+.sim legend { font-size: 0.85rem; font-weight: 700; color: var(--ink); margin-bottom: 6px; padding: 0; }
+.seg { display: flex; flex-wrap: wrap; gap: 6px; }
+.seg button, .sim-actions button {
+  font: inherit; font-size: 0.88rem; font-weight: 600; min-height: 38px; padding: 0 12px; border-radius: 2px;
+  border: 1px solid var(--border); background: var(--surface-2); color: var(--text); cursor: pointer; text-align: left;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+.seg button:hover, .sim-actions button:hover { border-color: var(--ink); }
+.seg button:active, .sim-actions button:active { transform: scale(0.97); }
+.seg button[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--bg); }
+.sim-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.sim-actions .primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.board { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr)); margin: 16px 0; padding: 0; list-style: none; }
+.tile { border: 1px solid var(--border); border-left: 5px solid var(--ok); border-radius: 2px; padding: 8px 10px; background: var(--surface); transition: background-color 200ms ease, border-color 200ms ease; max-width: none; }
+.tile b { display: block; font-size: 0.82rem; color: var(--ink); }
+.tile span { display: block; font-size: 0.88rem; }
+.tile[data-state="down"] { border-left-color: var(--down); background: var(--down-bg); }
+.tile[data-state="degraded"] { border-left-color: var(--accent); background: var(--hold-bg); }
+.tile[data-state="recovering"] { border-left-color: var(--ok); background: var(--ok-bg); }
+.sim-out { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); }
+.sim-out h4 { margin: 0 0 8px; color: var(--ink); font-size: 1rem; }
+.log { list-style: none; margin: 0; padding: 0; font-size: 0.92rem; }
+.log li { padding: 6px 8px; border-bottom: 1px solid var(--border); max-width: none; }
+.log li b { font-variant-numeric: tabular-nums; color: var(--ink); margin-right: 6px; }
+.log li.new { background: var(--hold-bg); }
+.runbook { margin: 0; padding-left: 1.2em; font-size: 0.92rem; }
+.runbook li { margin: 0 0 8px; max-width: none; }
+.sim-note { margin: 14px 0 0; font-size: 0.92rem; color: var(--muted); max-width: none; }
+
+.split { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); }
+.box { background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 14px 18px; }
+.box h3 { margin-top: 0; }
+.box ul, .box ol { margin: 0; padding-left: 1.1em; }
+.box li { margin: 4px 0; }
+.note { border-left: 4px solid var(--accent); background: var(--surface); padding: 10px 14px; border-radius: 0 4px 4px 0; margin: 16px 0; }
+.note p { margin: 0; }
+footer { margin-top: 64px; font-size: 0.9rem; color: var(--muted); }
+
+@media (prefers-reduced-motion: reduce) {
+  .picker button, .controls button, svg .node rect { transition: none; }
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to the report</a>
+<div class="page">
+<header>
+  <h1>Storage platform on AWS: lowest cost, Kafka, and every failure drilled</h1>
+  <p class="lede">The object storage platform (Go API, nine workers, a Postgres outbox, ClamAV, S3 and tenants' own clouds) deployed on AWS for about $90 a month, with Kafka as the event backbone. The diagram plays the normal upload path and ten failures, and shows how each one recovers; a crash simulator lets you pick a database, Redis or Kafka failure, the moment it strikes and how bad it is, and plays the incident and its recovery.</p>
+  <p class="meta">30 Oct 2026 · Region: ap-south-1 (Mumbai) · Built from a read-only review of <code>server/</code> on 30 Oct 2026 (notes in <code>research_notes/architecture_failure_recovery.md</code>) and public price listings.</p>
+  <nav class="toc" aria-label="Contents">
+    <ol>
+      <li><a href="#summary">The short version</a></li>
+      <li><a href="#drills">Failure drills (animated)</a></li>
+      <li><a href="#simulator">Crash simulator: database, Redis, Kafka</a></li>
+      <li><a href="#failures">Failure catalogue</a></li>
+      <li><a href="#kafka">Kafka in place of the queue</a></li>
+      <li><a href="#cost">Monthly cost</a></li>
+      <li><a href="#deploy">Deployment layout</a></li>
+      <li><a href="#changes">Before go-live</a></li>
+      <li><a href="#sources">Sources and assumptions</a></li>
+    </ol>
+  </nav>
+</header>
+
+<main id="main">
+<h2 id="summary">The short version</h2>
+<div class="keys">
+  <div class="key"><div class="big">~$90 / month</div><p>On demand, Mumbai, at launch scale: two Graviton instances, a small RDS Postgres, S3 and CloudFront, no NAT gateway. About $70 with a 1-year Savings Plan and RDS reservation.</p></div>
+  <div class="key"><h3>Postgres is the record, Kafka is the road</h3><p>Every event is committed to the outbox in the same transaction as the change. If Kafka disappears the workers' database polls keep the work moving and the reconciler republishes what was never consumed. That is why one cheap broker is safe at launch.</p></div>
+  <div class="key"><h3>Kafka replaces SQS, not NATS</h3><p>There is no NATS in the code. The queue is SQS (ElasticMQ locally) behind one <code>MessageQueue</code> interface; a Kafka adapter plugs in there: 5 topics, keyed by aggregate, one consumer group each.</p></div>
+  <div class="key"><h3>Postgres is the one thing to protect</h3><p>Leases, outbox, inbox, webhooks and dead letters all live there. Start Single-AZ with point-in-time recovery; Multi-AZ is the first upgrade. Make the pool size configurable: 11 processes × 21 connections overruns a small RDS.</p></div>
+  <div class="key"><h3>Hybrid by design</h3><p>Tenants bring their own S3, R2, GCS or Azure. A tenant's cloud going down only stalls that tenant; records never fall back to another bucket. Workers need internet egress, so public subnets beat a $40 NAT gateway.</p></div>
+  <div class="key"><h3>Fail closed on malware</h3><p>If ClamAV is down, uploads are held in quarantine, never promoted. A restart and a requeue release them.</p></div>
+</div>
+
+<h2 id="drills">Failure drills</h2>
+<p>Pick a drill. The gold packet is a message or request; red means it failed; nodes turn red when down, amber when holding work safely, green when recovered. Drills play one after another while the diagram is on screen; Pause, Back and Next let you read at your own pace.</p>
+
+<section class="lab" aria-labelledby="lab-title">
+  <ul class="picker" id="picker" aria-label="Drills"></ul>
+  <div class="lab-head">
+    <h3 id="lab-title">Normal upload</h3>
+    <div class="controls">
+      <button type="button" data-act="prev">Back</button>
+      <button type="button" data-act="toggle" aria-pressed="false">Pause</button>
+      <button type="button" data-act="next">Next</button>
+      <button type="button" data-act="restart">Replay</button>
+    </div>
+  </div>
+  <p class="caption" id="caption" aria-live="polite">Pick a drill, or let them play.</p>
+  <div class="lab-body">
+    <div class="diagram-wrap" tabindex="0" role="region" aria-label="Architecture diagram; scrolls sideways on small screens">
+      <svg viewBox="0 0 1200 680" role="img" aria-labelledby="svg-title svg-desc">
+        <title id="svg-title">Storage platform on AWS</title>
+        <desc id="svg-desc">Clients reach the API through CloudFront and upload bytes straight to S3. In the VPC, an EC2 app node runs the API and nine workers; an EC2 data node runs Kafka and ClamAV; RDS PostgreSQL holds the outbox and leases. Workers also reach tenants' own clouds and webhook receivers on the internet.</desc>
+        <rect class="zone" x="205" y="40" width="795" height="620" rx="4"/>
+        <text class="zone-label" x="218" y="650">AWS · CloudFront edge and ap-south-1 VPC · public subnets, no NAT gateway</text>
+        <rect class="zone" x="382" y="108" width="176" height="525" rx="4"/>
+        <text class="zone-label" x="385" y="100">EC2 app node · ECS</text>
+        <rect class="zone" x="602" y="220" width="176" height="290" rx="4"/>
+        <text class="zone-label" x="605" y="212">EC2 data node</text>
+
+        <path class="edge" id="e-clients-cdn" d="M180 330 L210 330"/>
+        <path class="edge" id="e-api-redis" d="M390 158 L370 158"/>
+        <path class="edge" id="e-cdn-api" d="M370 330 C 385 250 380 150 390 150"/>
+        <path class="edge dash" id="e-clients-s3" d="M100 303 C 120 -60 880 -60 900 303"/>
+        <path class="edge" id="e-api-pg" d="M550 150 L610 145"/>
+        <path class="edge" id="e-outbox-pg" d="M550 255 C 580 255 585 160 610 160"/>
+        <path class="edge" id="e-outbox-kafka" d="M550 265 L610 265"/>
+        <path class="edge" id="e-kafka-proc" d="M610 275 C 580 275 580 360 550 360"/>
+        <path class="edge" id="e-kafka-workers" d="M610 282 C 590 295 575 470 550 470"/>
+        <path class="edge" id="e-proc-pg" d="M550 378 C 596 378 600 175 615 167"/>
+        <path class="edge" id="e-proc-clam" d="M550 386 C 580 386 590 470 610 470"/>
+        <path class="edge" id="e-proc-s3" d="M550 370 L820 330"/>
+        <path class="edge" id="e-proc-byos" d="M550 392 L1020 410"/>
+        <path class="edge" id="e-workers-s3" d="M550 472 C 580 420 640 400 820 350"/>
+        <path class="edge" id="e-workers-pg" d="M470 453 C 470 420 590 420 600 240 C 604 200 606 175 625 167"/>
+        <path class="edge" id="e-pg-hooks" d="M770 140 L795 140 L795 528 L470 528 L470 563"/>
+        <path class="edge" id="e-hooks-recv" d="M550 596 L1020 596"/>
+
+        <g class="node external" id="n-clients" transform="translate(100 330)"><rect x="-80" y="-27" width="160" height="54" rx="3"/><text class="t" x="-68" y="-4">Clients</text><text class="s" x="-68" y="13">Console, SDK, apps</text><text class="badge" x="68" y="-12" text-anchor="end"></text></g>
+        <g class="node" id="n-cdn" transform="translate(290 330)"><rect x="-80" y="-27" width="160" height="54" rx="3"/><text class="t" x="-68" y="-4">CloudFront</text><text class="s" x="-68" y="13">TLS, API, downloads</text><text class="badge" x="68" y="-12" text-anchor="end"></text></g>
+        <g class="node" id="n-redis" transform="translate(290 150)"><rect x="-80" y="-27" width="160" height="54" rx="3"/><text class="t" x="-68" y="-4">Valkey (Redis)</text><text class="s" x="-68" y="13">shared rate limits, new</text><text class="badge" x="68" y="-12" text-anchor="end"></text></g>
+        <g class="node" id="n-api" transform="translate(470 150)"><rect x="-80" y="-27" width="160" height="54" rx="3"/><text class="t" x="-68" y="-4">api</text><text class="s" x="-68" y="13">HTTP :8080, presign</text><text class="badge" x="68" y="-12" text-anchor="end"></text></g>
+        <g class="node" id="n-outbox" transform="translate(470 260)"><rect x="-80" y="-27" width="160" height="54" rx="3"/><text class="t" x="-68" y="-4">outbox-worker</text><text class="s" x="-68" y="13">publish, reconcile</text><text class="badge" x="68" y="-12" text-anchor="end"></text></g>
+        <g class="node" id="n-proc" transform="translate(470 370)"><rect x="-80" y="-27" width="160" height="54" rx="3"/><text class="t" x="-68" y="-4">processing-worker</text><text class="s" x="-68" y="13">verify, scan, promote</text><text class="badge" x="68" y="-12" text-anchor="end"></text></g>
+        <g class="node" id="n-workers" transform="translate(470 480)"><rect x="-80" y="-27" width="160" height="54" rx="3"/><text class="t" x="-68" y="-4">6 more workers</text><text class="s" x="-68" y="13">ingest, packs, recon…</text><text class="badge" x="68" y="-12" text-anchor="end"></text></g>
+        <g class="node" id="n-hooks" transform="translate(470 590)"><rect x="-80" y="-27" width="160" height="54" rx="3"/><text class="t" x="-68" y="-4">webhook-worker</text><text class="s" x="-68" y="13">signed delivery</text><text class="badge" x="68" y="-12" text-anchor="end"></text></g>
+        <g class="node" id="n-pg" transform="translate(690 140)"><rect x="-80" y="-27" width="160" height="54" rx="3"/><text class="t" x="-68" y="-4">RDS PostgreSQL</text><text class="s" x="-68" y="13">outbox, inbox, leases</text><text class="badge" x="68" y="-12" text-anchor="end"></text></g>
+        <g class="node" id="n-kafka" transform="translate(690 265)"><rect x="-80" y="-27" width="160" height="54" rx="3"/><text class="t" x="-68" y="-4">Kafka (KRaft)</text><text class="s" x="-68" y="13">5 topics, retry, DLQ</text><text class="badge" x="68" y="-12" text-anchor="end"></text></g>
+        <g class="node" id="n-clam" transform="translate(690 470)"><rect x="-80" y="-27" width="160" height="54" rx="3"/><text class="t" x="-68" y="-4">ClamAV clamd</text><text class="s" x="-68" y="13">:3310, fail closed</text><text class="badge" x="68" y="-12" text-anchor="end"></text></g>
+        <g class="node" id="n-s3" transform="translate(900 330)"><rect x="-80" y="-27" width="160" height="54" rx="3"/><text class="t" x="-68" y="-4">Amazon S3</text><text class="s" x="-68" y="13">quarantine, assets, packs</text><text class="badge" x="68" y="-12" text-anchor="end"></text></g>
+        <g class="node" id="n-cw" transform="translate(900 470)"><rect x="-80" y="-27" width="160" height="54" rx="3"/><text class="t" x="-68" y="-4">CloudWatch + ASG</text><text class="s" x="-68" y="13">alarms, replace</text><text class="badge" x="68" y="-12" text-anchor="end"></text></g>
+        <g class="node external" id="n-byos" transform="translate(1100 410)"><rect x="-80" y="-27" width="160" height="54" rx="3"/><text class="t" x="-68" y="-4">Tenant clouds</text><text class="s" x="-68" y="13">S3, R2, GCS, Azure</text><text class="badge" x="68" y="-12" text-anchor="end"></text></g>
+        <g class="node external" id="n-recv" transform="translate(1100 596)"><rect x="-80" y="-27" width="160" height="54" rx="3"/><text class="t" x="-68" y="-4">Webhook receivers</text><text class="s" x="-68" y="13">tenant endpoints</text><text class="badge" x="68" y="-12" text-anchor="end"></text></g>
+        <circle id="packet" r="7" cx="100" cy="330" opacity="0"/>
+      </svg>
+    </div>
+    <ol class="steps" id="steps"></ol>
+  </div>
+  <ul class="legend" aria-label="Legend">
+    <li><span class="sw" style="background:var(--surface)"></span>Running</li>
+    <li><span class="sw" style="background:var(--down-bg);border-color:var(--down)"></span>Down</li>
+    <li><span class="sw" style="background:var(--hold-bg);border-color:var(--accent)"></span>Holding work safely</li>
+    <li><span class="sw" style="background:var(--ok-bg);border-color:var(--ok)"></span>Recovered</li>
+    <li><span class="sw" style="border-style:dashed"></span>Outside AWS</li>
+  </ul>
+</section>
+
+<h2 id="simulator">Crash simulator: database, Redis, Kafka</h2>
+<p>Choose what fails, what the system was doing at that moment, and how bad it is. The simulator plays the incident on a status board and a timestamped log, writes the recovery runbook, and can replay the same incident on the diagram above.</p>
+
+<section class="sim" aria-labelledby="sim-title">
+  <h3 id="sim-title" class="sr-only" hidden>Crash simulator</h3>
+  <div class="sim-controls">
+    <fieldset><legend>What fails</legend><div class="seg" id="sim-fail"></div></fieldset>
+    <fieldset><legend>While the system is</legend><div class="seg" id="sim-moment"></div></fieldset>
+    <fieldset><legend>How bad</legend><div class="seg" id="sim-sev"></div></fieldset>
+  </div>
+  <div class="sim-actions">
+    <button type="button" class="primary" id="sim-run">Run simulation</button>
+    <button type="button" id="sim-diagram">Play it on the diagram</button>
+  </div>
+  <ul class="board" id="board" aria-label="System status"></ul>
+  <div class="sim-out">
+    <div><h4>Incident log</h4><ol class="log" id="log" aria-live="polite"></ol></div>
+    <div><h4>Recovery runbook</h4><ol class="runbook" id="runbook"></ol></div>
+  </div>
+  <p class="sim-note" id="sim-note"></p>
+</section>
+
+<h2 id="failures">Failure catalogue</h2>
+<p><span class="pill p-auto">Automatic</span> recovers without a person · <span class="pill p-op">Operator</span> needs a command · <span class="pill p-gap">Gap</span> needs a change first.</p>
+<div class="table-wrap" tabindex="0" role="region" aria-label="Failure catalogue">
+<table>
+  <thead><tr><th>Failure</th><th>Detected by</th><th>What the system does</th><th>Recovery</th><th>Data loss</th></tr></thead>
+  <tbody>
+    <tr><td>Kafka broker down or disk lost</td><td>Publish errors; consumer lag alarm</td><td>Events stay PENDING in the outbox; publisher backs off (2 s to 5 min); worker polls keep processing</td><td><span class="pill p-auto">Automatic</span> broker restarts on its EBS volume; outbox drains; reconciler republishes unconsumed events (3 generations, 72 h window)</td><td>None: Postgres holds every event</td></tr>
+    <tr><td>Worker crash or Spot reclaim mid-job</td><td>Lease not renewed; ECS task health</td><td>1-minute processing lease lapses; Kafka rebalances the group</td><td><span class="pill p-auto">Automatic</span> another task reclaims with a new fencing token; inbox drops duplicates</td><td>None</td></tr>
+    <tr><td>ClamAV down or slow</td><td><code>scanner_up</code> = 0; scan timeouts</td><td>Retries with backoff, then SCAN_INCOMPLETE: file HELD in quarantine, never promoted</td><td><span class="pill p-auto">Automatic</span> container restart · <span class="pill p-op">Operator</span> <code>processing-worker -requeue</code> for exhausted jobs · <span class="pill p-gap">Gap</span> one clamd address, no failover</td><td>None (delay only)</td></tr>
+    <tr><td>Postgres restart or failover</td><td>API <code>/ready</code> fails; RDS events</td><td>API returns errors; worker loops retry each tick; LISTEN reconnects 1 s to 30 s; processes started during the outage exit</td><td><span class="pill p-auto">Automatic</span> ECS restarts exited tasks; leases resume · <span class="pill p-op">Operator</span> point-in-time restore if the volume is lost</td><td>Single-AZ: up to the last 5 min of WAL on a full loss; Multi-AZ: none</td></tr>
+    <tr><td>Duplicate or late delivery</td><td>Inbox claim result</td><td>Inbox says DONE: committed past, no second effect</td><td><span class="pill p-auto">Automatic</span></td><td>None</td></tr>
+    <tr><td>Poison message</td><td>Decode or version failure; attempts exhausted</td><td>Written to <code>dead_letters</code> (digest only if unreadable) and committed past; partition keeps flowing</td><td><span class="pill p-op">Operator</span> <code>event-admin retry / replay / resolve / discard</code>; stale replays refused</td><td>None</td></tr>
+    <tr><td>Tenant cloud down (BYOS)</td><td>Provider errors per connection</td><td>That tenant's records fail and retry; never written to another bucket; other tenants unaffected</td><td><span class="pill p-auto">Automatic</span> retries; reconciliation-worker scans orphans after</td><td>None</td></tr>
+    <tr><td>Webhook receiver down</td><td>Delivery HTTP errors</td><td>Retries at 10 s, 1 m, 5 m, 30 m, 2 h, 6 h, 12 h, 24 h, then FAILED</td><td><span class="pill p-op">Operator</span> or tenant retries via API · <span class="pill p-gap">Gap</span> no auto-disable; webhook-worker has no health endpoint</td><td>None (delivery late)</td></tr>
+    <tr><td>App instance lost</td><td>EC2 status check; ALB or CloudFront 5xx</td><td>Bytes already in S3 and events in Postgres are safe; in-flight HTTP calls fail and the SDK retries</td><td><span class="pill p-auto">Automatic</span> Auto Scaling group (min 1) replaces it in about 3-5 minutes; ECS re-places tasks</td><td>None</td></tr>
+    <tr><td>Multipart upload interrupted</td><td>Session past its deadline</td><td>Compare-and-set states</td><td><span class="pill p-auto">Automatic</span> reconciliation-worker completes or aborts every 15 s; S3 rule aborts leftovers after 7 days</td><td>None</td></tr>
+    <tr><td>Clock skew on a node</td><td>Leases expiring early or late</td><td>Leases use worker time</td><td><span class="pill p-auto">Automatic</span> with Amazon Time Sync (chrony) on every instance</td><td>None if synced</td></tr>
+    <tr><td>Redis (shared rate limits) down or emptied</td><td>Limiter timeouts; circuit open alarm</td><td>Falls back to the in-process limiter: uploads continue, sign-in limit divided by the replica count; nothing else uses Redis</td><td><span class="pill p-auto">Automatic</span> ECS restart or ElastiCache replica; circuit closes on the next good ping · <span class="pill p-gap">Gap</span> Redis is not in the code yet</td><td>None: counters are disposable</td></tr>
+    <tr><td>Rate limits with 2+ API replicas</td><td>Limits higher than set</td><td>Limits are per process</td><td><span class="pill p-gap">Gap</span> move to a shared store before scaling the API out</td><td>None</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="kafka">Kafka in place of the queue</h2>
+<div class="note"><p><b>About NATS.</b> The code has no NATS: the workers use SQS FIFO queues (ElasticMQ locally) behind <code>interfaces.MessageQueue</code> (<code>internal/interfaces/job_queue.go:65-85</code>). Kafka goes behind that same interface, so the outbox, inbox, reconciler and dead-letter tools stay as they are.</p></div>
+<div class="table-wrap" tabindex="0" role="region" aria-label="Topics">
+<table>
+  <thead><tr><th>Topic</th><th>Event types</th><th>Consumer group</th><th class="num">Partitions</th><th>Retry style</th></tr></thead>
+  <tbody>
+    <tr><td><code>storage.processing</code></td><td><code>upload.completed</code></td><td>processing-worker</td><td class="num">6</td><td>Pause the partition, retry in process (keeps order)</td></tr>
+    <tr><td><code>storage.lifecycle</code></td><td><code>asset.deletion_scheduled</code>, <code>legal_hold.released</code>, <code>catalog.version_replaced</code></td><td>cleanup-worker</td><td class="num">3</td><td>Pause the partition (deletions must not reorder)</td></tr>
+    <tr><td><code>storage.ingestion</code></td><td><code>ingestion.manifest_staged</code>, <code>upload.processed</code></td><td>upload-worker</td><td class="num">6</td><td><code>.retry</code> topic with a not-before header (skip-safe)</td></tr>
+    <tr><td><code>storage.datasets</code></td><td><code>dataset.import_queued</code>, <code>dataset.validation_queued</code></td><td>dataset-worker</td><td class="num">3</td><td><code>.retry</code> topic</td></tr>
+    <tr><td><code>storage.packing</code></td><td><code>pack.planned</code></td><td>pack-worker</td><td class="num">3</td><td><code>.retry</code> topic</td></tr>
+  </tbody>
+</table>
+</div>
+<div class="split">
+  <div class="box">
+    <h3>Producer and consumer settings</h3>
+    <ul>
+      <li>Key = <code>GroupKey</code> (<code>aggregate_type:aggregate_id</code>), so one aggregate stays on one partition in order.</li>
+      <li>Producer: idempotent, <code>acks=all</code>, wait for the ack; <code>event_id</code> and <code>DedupKey</code> in headers.</li>
+      <li>Consumer: auto-commit off; commit a partition's offset only when every earlier offset is settled (groups run concurrently).</li>
+      <li><code>Extend</code> becomes a no-op: the inbox lease already fences. Poll on its own goroutine so long jobs (up to 30 min) never exceed <code>max.poll.interval.ms</code>.</li>
+      <li>Attempt count from the inbox (<code>rec.Attempts</code>); a <code>&lt;topic&gt;.dlq</code> read by the reconciler mirrors the SQS DLQ drain.</li>
+      <li><code>Stats</code> from consumer-group lag.</li>
+    </ul>
+  </div>
+  <div class="box">
+    <h3>Broker settings for the lowest-cost start</h3>
+    <ul>
+      <li>Apache Kafka 4.x in KRaft mode, one combined broker and controller, heap 768 MB, on the data node's own 30 GB gp3 volume.</li>
+      <li>Replication factor 1 at launch, safe only because the outbox is the record; move to 3 brokers, RF 3, <code>min.insync.replicas=2</code> at the next stage.</li>
+      <li><code>auto.create.topics.enable=false</code>; topics created by a migration step.</li>
+      <li>Retention 7 days, below the inbox retention (keep 14 days) so a replay is always recognised.</li>
+      <li>lz4 compression; messages carry IDs only (outbox payload is capped at 64 KiB).</li>
+      <li>Go client: a pure-Go library such as franz-go keeps the static distroless build.</li>
+    </ul>
+  </div>
+</div>
+
+<h2 id="cost">Monthly cost</h2>
+<p>Approximate on-demand prices for ap-south-1, 730 hours a month, from public listings in October 2026. Check every line in the AWS Pricing Calculator before committing.</p>
+
+<h3>Stage 0: lowest cost that still recovers (recommended start)</h3>
+<div class="table-wrap" tabindex="0" role="region" aria-label="Stage 0 cost">
+<table>
+  <thead><tr><th>Item</th><th>Choice</th><th class="num">USD / month</th></tr></thead>
+  <tbody>
+    <tr><td>App node</td><td>EC2 t4g.medium (2 vCPU, 4 GB, Graviton), ECS on EC2: api, 9 workers, console</td><td class="num">16.40</td></tr>
+    <tr><td>Data node</td><td>EC2 t4g.medium: Kafka (KRaft, 1 broker), ClamAV, and a Valkey (Redis) container for rate limits, no persistence</td><td class="num">16.40</td></tr>
+    <tr><td>Block storage</td><td>gp3, about 80 GB in total (roots, Docker, Kafka log)</td><td class="num">7.30</td></tr>
+    <tr><td>Database</td><td>RDS PostgreSQL db.t4g.small, Single-AZ, 20 GB gp3, 7-day PITR (backup up to DB size is free)</td><td class="num">33.30</td></tr>
+    <tr><td>Public IPv4</td><td>2 addresses at $0.005/h (instead of a NAT gateway at about $0.056/h plus per-GB)</td><td class="num">7.30</td></tr>
+    <tr><td>S3</td><td>100 GB Standard plus requests; gateway endpoint (free) keeps S3 traffic off the internet</td><td class="num">3.50</td></tr>
+    <tr><td>CloudFront</td><td>Always-free tier: 1 TB out and 10 M requests a month</td><td class="num">0.00</td></tr>
+    <tr><td>KMS, Route 53, SSM Parameter Store</td><td>1 key, 1 hosted zone, standard parameters (free)</td><td class="num">1.50</td></tr>
+    <tr><td>CloudWatch</td><td>About 5 GB of logs, a handful of alarms</td><td class="num">4.00</td></tr>
+    <tr><td>Backups</td><td>EBS snapshots of the data node (AWS Backup, 7 daily)</td><td class="num">2.00</td></tr>
+    <tr class="total"><td colspan="2">Total on demand</td><td class="num">≈ 92</td></tr>
+    <tr><td colspan="2">With a 1-year Compute Savings Plan and an RDS reservation</td><td class="num">≈ 70</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="split">
+  <div class="box">
+    <h3>The absolute floor, and why not</h3>
+    <p>One t4g.large running everything, Postgres in Docker with WAL archiving to S3: about $52 a month. It saves $40 but puts Postgres, the platform's only coordinator, on a disk you must back up and restore yourself. Use it for staging, not for tenants' data.</p>
+  </div>
+  <div class="box">
+    <h3>Why not managed Kafka at this stage</h3>
+    <p>MSK with two kafka.t3.small brokers is about $67 a month before storage, and MSK Serverless bills a cluster-hour on top. With the outbox carrying correctness, a single self-run broker gives the same safety for about $8 of a shared instance. Move to MSK when the team would rather pay than patch.</p>
+  </div>
+</div>
+
+<h3>Stage 1: survives a zone loss</h3>
+<div class="table-wrap" tabindex="0" role="region" aria-label="Stage 1 cost">
+<table>
+  <thead><tr><th>Item</th><th>Choice</th><th class="num">USD / month</th></tr></thead>
+  <tbody>
+    <tr><td>App nodes</td><td>2 × t4g.large across 2 AZs (each runs clamd too), Auto Scaling group</td><td class="num">65.40</td></tr>
+    <tr><td>Load balancer</td><td>ALB plus a few LCUs (CloudFront origin)</td><td class="num">23.00</td></tr>
+    <tr><td>Kafka</td><td>3 × t4g.small, KRaft, RF 3, 30 GB gp3 each</td><td class="num">32.70</td></tr>
+    <tr><td>Database</td><td>RDS PostgreSQL db.t4g.small Multi-AZ, 40 GB</td><td class="num">66.50</td></tr>
+    <tr><td>Public IPv4, EBS for app nodes</td><td>5 addresses, 2 × 30 GB</td><td class="num">23.80</td></tr>
+    <tr><td>Redis</td><td>ElastiCache for Valkey, cache.t4g.micro with a replica (estimate)</td><td class="num">24.00</td></tr>
+    <tr><td>S3, CloudFront, KMS, DNS, logs, backups</td><td>as stage 0</td><td class="num">13.00</td></tr>
+    <tr class="total"><td colspan="2">Total on demand</td><td class="num">≈ 250</td></tr>
+  </tbody>
+</table>
+</div>
+<div class="note"><p><b>Cost levers in order:</b> Graviton (t4g) over x86 (about 20% less); public subnets plus security groups instead of a NAT gateway; S3 gateway endpoint; CloudFront free tier for downloads; presigned uploads so bytes never pass through EC2; Spot for a second worker node (workers are stateless and leased); SSM Parameter Store over Secrets Manager; S3 lifecycle to Infrequent Access for old packs.</p></div>
+
+<h2 id="deploy">Deployment layout</h2>
+<div class="split">
+  <div class="box">
+    <h3>Network</h3>
+    <ul>
+      <li>One VPC, two public subnets (two AZs, ready for stage 1), no NAT gateway. Workers reach tenant clouds and webhook receivers over their public IPs, through the code's own network guard.</li>
+      <li>Security groups: app node 443 from the CloudFront managed prefix list only; Kafka 9092 and clamd 3310 from the app node only; RDS 5432 from both nodes only; no SSH (SSM Session Manager).</li>
+      <li>S3 gateway endpoint; IMDSv2 required.</li>
+    </ul>
+  </div>
+  <div class="box">
+    <h3>Compute</h3>
+    <ul>
+      <li>ECS on EC2 (the control plane is free): one service per binary, restart on exit, rolling deploys, task IAM roles (S3 uses the default chain, no keys).</li>
+      <li>Kafka as a systemd service on the data node with its data on a separate EBS volume; clamd as an ECS service with a TCP health check and freshclam.</li>
+      <li>Auto Scaling groups of min 1, max 1 per node: a failed instance is replaced from the launch template.</li>
+      <li>One-off ECS tasks for <code>migrate</code>, <code>event-admin</code>, <code>identity-admin</code>.</li>
+    </ul>
+  </div>
+  <div class="box">
+    <h3>Data</h3>
+    <ul>
+      <li>RDS PostgreSQL 17, PITR 7 days, Performance Insights free tier, <code>max_connections</code> sized to the pools.</li>
+      <li>S3: one platform bucket (<code>quarantine/</code>, <code>manifests/</code>, <code>packs/</code>) and a serving bucket for <code>assets/</code>, default SSE-KMS, versioning, AbortIncompleteMultipartUpload after 7 days, Block Public Access.</li>
+      <li>CloudFront: API origin (with an origin secret header) and the serving bucket through Origin Access Control; signed URLs via the existing signer.</li>
+    </ul>
+  </div>
+  <div class="box">
+    <h3>Secrets, deploys, watching</h3>
+    <ul>
+      <li>SSM Parameter Store SecureString (KMS) for <code>DATABASE_URL</code>, <code>STORAGE_CREDENTIAL_KEYS</code>, the CloudFront key and signing keys.</li>
+      <li>CI builds one distroless arm64 image per binary to ECR, then updates the ECS services.</li>
+      <li>Alarms: RDS CPU and connections, Kafka consumer lag, outbox PENDING age, <code>scanner_up</code>, dead letters count, 5xx at CloudFront, instance status checks.</li>
+    </ul>
+  </div>
+</div>
+
+<h2 id="changes">Before go-live</h2>
+<div class="table-wrap" tabindex="0" role="region" aria-label="Changes before go-live">
+<table>
+  <thead><tr><th>Change</th><th>Where</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td><b>Kafka adapter</b> behind <code>MessageQueue</code>, plus a small factory for <code>EVENT_QUEUE=kafka</code></td><td>new <code>internal/infrastructure/queue/kafka</code>; six <code>main.go</code> files that call <code>sqsqueue.New</code></td><td>Kafka replaces SQS without touching the outbox, inbox or reconciler.</td></tr>
+    <tr><td><b>Configurable pool size</b> (for example <code>DB_MAX_CONNS</code>)</td><td><code>internal/infrastructure/database/postgres/db.go:29</code></td><td>Hard-coded 20 per process plus 1 LISTEN: 11 processes need about 231 connections; db.t4g.small allows roughly 190.</td></tr>
+    <tr><td><b>Poll fallback for <code>catalog.version_replaced</code></b></td><td>cleanup-worker</td><td>The only event that needs the queue; with a poll, a Kafka outage stalls nothing.</td></tr>
+    <tr><td><b>Retry on startup</b> instead of exiting when the database is unreachable</td><td><code>db.go:40-43</code></td><td>Stops every service crash-looping together after a database blip.</td></tr>
+    <tr><td><b>Health endpoint for webhook-worker</b>; auto-disable endpoints that keep failing</td><td><code>cmd/webhook-worker/main.go</code></td><td>The only process ECS cannot health-check today.</td></tr>
+    <tr><td><b>Second clamd address</b> (or a list)</td><td>scanner config</td><td>One address is a single point of failure for every upload.</td></tr>
+    <tr><td><b>Redis-backed rate limiter</b> before a second API replica: 50 ms timeout, circuit breaker, fallback to today's in-process limiter (sign-in limit divided by the replica count)</td><td><code>internal/platform/ratelimit</code> (its own comment and <code>docs/security.md</code> call for a shared store)</td><td>Per-process limits multiply with replicas; the fallback keeps a Redis outage from ever blocking uploads.</td></tr>
+    <tr><td><b><code>COMPACTION_ENABLED=true</code></b>, inbox retention above Kafka retention</td><td>compaction-worker env</td><td>Otherwise outbox and inbox tables grow without end.</td></tr>
+    <tr><td><b>Terraform</b> for VPC, ECS, RDS, S3, KMS, CloudFront, alarms</td><td><code>server/infrastructure/terraform</code> (folders exist, all empty)</td><td>Repeatable environments and a fast rebuild.</td></tr>
+    <tr><td><b>A real-cloud test</b>: two replicas per role, one hour, live S3 and one BYOS provider</td><td>staging</td><td>Every load run so far was one laptop, one replica, emulators.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="sources">Sources and assumptions</h2>
+<ul>
+  <li>Platform behaviour: read-only review of <code>server/</code> on 30 Oct 2026, written up in <code>research_notes/architecture_failure_recovery.md</code> with file and line references.</li>
+  <li>EC2 t4g in Mumbai (about $0.0112/h small, $0.0224/h medium): <a href="https://cloudprice.net/aws/ec2/instances/t4g.medium">cloudprice.net</a>, <a href="https://instances.cloudchipr.com/aws/ec2/t4g.small">cloudchipr</a>.</li>
+  <li>RDS PostgreSQL db.t4g.small Single-AZ in Mumbai (about $0.042/h): <a href="https://sparecores.com/database/aws/db.t4g.small">sparecores</a>; storage around $0.115/GB-month (US figure): <a href="https://infratally.com/articles/aws-rds-pricing-explained-2026/">infratally</a>.</li>
+  <li>MSK kafka.t3.small (about $0.0456/h, US) and storage ($0.10/GB-month): <a href="https://airbyte.com/data-engineering-resources/apache-kafka-pricing">Airbyte</a>, <a href="https://aws.amazon.com/msk/pricing/">AWS MSK pricing</a>.</li>
+  <li>NAT gateway charges per hour and per GB: <a href="https://docs.aws.amazon.com/vpc/latest/userguide/nat-gateway-pricing.html">AWS docs</a>; Mumbai about $0.056/h: <a href="https://cloudburn.io/blog/aws-nat-gateway-pricing">cloudburn</a>.</li>
+  <li>S3 Standard in Mumbai (about ₹2.10, roughly $0.025, per GB-month): <a href="https://precisiontech.in/cloud/amazon-aws-cloud/aws-pricing/">PrecisionTech</a>.</li>
+  <li>Assumed scale for the totals: up to about 100 GB stored and under 1 TB a month downloaded. The ALB and EBS rates in Mumbai were not confirmed and are estimates.</li>
+</ul>
+</main>
+
+<footer>
+  <p>Prepared 30 Oct 2026. Prices change; confirm them in the AWS Pricing Calculator for ap-south-1 before you commit.</p>
+</footer>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/lenis@1.3.26/dist/lenis.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+<script>
+(function () {
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
+  if (!reduce.matches && window.Lenis) new Lenis({ autoRaf: true, anchors: true });
+
+  // Each step: what to say, then ops. "a>b" moves a packet, "x:a>b" is a move that fails,
+  // "down:", "hold:" and "up:" change node states, "pulse:" flashes a node.
+  const DRILLS = [
+    { title: 'Normal upload', steps: [
+      { say: 'The console or SDK asks the API, through CloudFront, to start an upload.', ops: ['clients>cdn', 'cdn>api'] },
+      { say: 'The bytes go straight to S3 with a presigned URL; the app node never carries the file.', ops: ['clients>s3'] },
+      { say: 'Finish: the API commits the upload and the upload.completed event to the outbox in one transaction.', ops: ['clients>cdn', 'cdn>api', 'api>pg'] },
+      { say: 'outbox-worker claims the row (lease, SKIP LOCKED) and publishes it to storage.processing, keyed by the upload.', ops: ['pg>outbox', 'outbox>kafka'] },
+      { say: 'processing-worker in its consumer group receives it and records the claim in the inbox.', ops: ['kafka>proc', 'proc>pg'] },
+      { say: 'VERIFY the SHA-256, then SCAN the stream with clamd.', ops: ['proc>clam'] },
+      { say: 'PROMOTE to assets/ with an if-match ETag copy, re-verified, then write upload.processed to the outbox.', ops: ['proc>s3', 'proc>pg'] },
+      { say: 'A database trigger queues the webhook; webhook-worker signs and delivers it.', ops: ['pg>hooks', 'hooks>recv'] },
+    ] },
+    { title: 'Kafka down', steps: [
+      { say: 'The single Kafka broker stops: instance failure or a full disk.', ops: ['down:kafka'] },
+      { say: 'Uploads still finish: the event is committed to the outbox in Postgres, the record of truth.', ops: ['cdn>api', 'api>pg'] },
+      { say: 'outbox-worker cannot publish. It backs off from 2 s to 5 min; rows stay PENDING.', ops: ['pg>outbox', 'x:outbox>kafka', 'hold:outbox'] },
+      { say: 'The workers\' database polls keep going: processing picks up the upload from its table every 10 s and publishes it.', ops: ['pg>proc', 'proc>clam', 'proc>s3'] },
+      { say: 'The broker comes back on its own EBS volume (instance auto-recovery or the ASG).', ops: ['up:kafka'] },
+      { say: 'PENDING rows publish; the inbox drops what the polls already handled.', ops: ['up:outbox', 'outbox>kafka', 'kafka>proc', 'proc>pg'] },
+      { say: 'The reconciler republishes any event never consumed (3 generations within 72 h), so even a lost disk loses nothing.', ops: ['pg>outbox', 'outbox>kafka'] },
+    ] },
+    { title: 'Worker crash', steps: [
+      { say: 'processing-worker takes an upload from storage.processing.', ops: ['kafka>proc'] },
+      { say: 'The task dies mid-scan: a crash, an OOM, or a Spot reclaim.', ops: ['x:proc>clam', 'down:proc'] },
+      { say: 'Nothing was written. The 1-minute job lease is no longer renewed.', ops: ['hold:pg'] },
+      { say: 'ECS starts a new task; Kafka rebalances the consumer group.', ops: ['pulse:cw', 'up:proc'] },
+      { say: 'The message is redelivered. The inbox says BUSY until the old lease lapses, then the job is reclaimed with a new fencing token.', ops: ['up:pg', 'kafka>proc', 'proc>pg'] },
+      { say: 'Scan and promote complete. A stale worker can never overwrite: promotion re-checks the lease and the ETag.', ops: ['proc>clam', 'proc>s3'] },
+    ] },
+    { title: 'ClamAV down', steps: [
+      { say: 'clamd stops answering on :3310.', ops: ['down:clam'] },
+      { say: 'Scans time out and are retried with backoff.', ops: ['kafka>proc', 'x:proc>clam', 'x:proc>clam'] },
+      { say: 'After the budget the job is SCAN_INCOMPLETE: the file stays in quarantine/ and is never promoted. Fail closed.', ops: ['hold:s3', 'proc>pg'] },
+      { say: 'ECS restarts clamd after its health check fails; freshclam reloads the signatures.', ops: ['pulse:cw', 'up:clam'] },
+      { say: 'An operator runs processing-worker -requeue; held files are scanned and promoted.', ops: ['pg>proc', 'proc>clam', 'up:s3', 'proc>s3'] },
+    ] },
+    { title: 'Postgres down', steps: [
+      { say: 'RDS restarts for maintenance or after a crash; Single-AZ takes minutes.', ops: ['down:pg'] },
+      { say: 'API /ready fails; calls return errors and the SDK retries with Retry-After.', ops: ['clients>cdn', 'x:cdn>api', 'hold:api'] },
+      { say: 'Workers log and retry every tick; LISTEN reconnects with backoff from 1 s to 30 s. A process started now exits and ECS restarts it.', ops: ['x:outbox>pg', 'x:proc>pg', 'hold:outbox', 'hold:proc'] },
+      { say: 'RDS is back, or restored to a point in time if the volume was lost.', ops: ['up:pg'] },
+      { say: 'Expired leases are reclaimed and work resumes from the tables. Nothing to replay by hand.', ops: ['up:api', 'up:outbox', 'up:proc', 'pg>outbox', 'outbox>kafka', 'kafka>proc'] },
+    ] },
+    { title: 'Duplicate and poison', steps: [
+      { say: 'After a rebalance the same message arrives twice.', ops: ['kafka>proc', 'kafka>proc'] },
+      { say: 'The inbox says DONE for the second copy: committed past, no second effect.', ops: ['proc>pg'] },
+      { say: 'A malformed message arrives: unknown type or version.', ops: ['x:kafka>proc'] },
+      { say: 'It is written to dead_letters and committed past; the partition keeps flowing.', ops: ['proc>pg', 'hold:pg'] },
+      { say: 'An operator inspects it and runs event-admin replay or resolve; stale replays are refused.', ops: ['up:pg', 'pg>outbox', 'outbox>kafka'] },
+    ] },
+    { title: 'Tenant cloud down', steps: [
+      { say: 'A tenant brought their own storage (GCS, Azure, R2 or S3). Their endpoint stops answering.', ops: ['down:byos'] },
+      { say: 'That tenant\'s records fail and retry with backoff. They are never written to another bucket.', ops: ['kafka>proc', 'x:proc>byos', 'hold:proc'] },
+      { say: 'Other tenants on the platform bucket keep flowing.', ops: ['kafka>proc', 'proc>s3'] },
+      { say: 'The provider recovers; retries succeed.', ops: ['up:byos', 'up:proc', 'proc>byos'] },
+      { say: 'reconciliation-worker scans the connection for orphan sessions and records findings.', ops: ['workers>pg', 'pulse:workers'] },
+    ] },
+    { title: 'Webhook receiver down', steps: [
+      { say: 'A tenant\'s webhook endpoint starts failing.', ops: ['down:recv'] },
+      { say: 'Retries at 10 s, 1 min, 5 min, 30 min, 2 h, 6 h, 12 h and 24 h.', ops: ['pg>hooks', 'x:hooks>recv', 'x:hooks>recv'] },
+      { say: 'Still failing: the delivery is FAILED, kept for a manual retry through the API.', ops: ['hold:hooks'] },
+      { say: 'The endpoint is fixed and the tenant retries.', ops: ['up:recv', 'up:hooks', 'hooks>recv'] },
+    ] },
+    { title: 'App instance lost', steps: [
+      { say: 'The app EC2 instance fails its status check.', ops: ['down:api,outbox,proc,workers,hooks'] },
+      { say: 'Calls fail at CloudFront; bytes already in S3 and events in Postgres are safe.', ops: ['clients>cdn', 'x:cdn>api'] },
+      { say: 'A CloudWatch alarm fires; the Auto Scaling group launches a replacement from the launch template (about 3 to 5 min).', ops: ['pulse:cw'] },
+      { say: 'ECS places every task again; all processes are stateless.', ops: ['up:api,outbox,proc,workers,hooks'] },
+      { say: 'Expired leases are reclaimed and in-flight multipart sessions are repaired by reconciliation-worker.', ops: ['pg>outbox', 'outbox>kafka', 'kafka>proc', 'workers>s3'] },
+    ] },
+    { title: 'Upload interrupted', steps: [
+      { say: 'A client uploads parts straight to S3, then loses its network before completing.', ops: ['clients>s3', 'x:clients>cdn'] },
+      { say: 'The session passes its deadline in Postgres.', ops: ['hold:pg'] },
+      { say: 'reconciliation-worker (every 15 s) checks the parts in S3 and completes or aborts with compare-and-set.', ops: ['pg>workers', 'workers>s3', 'up:pg'] },
+      { say: 'Completed sessions emit upload.completed and flow on; an S3 lifecycle rule aborts anything left after 7 days.', ops: ['workers>pg', 'pg>outbox', 'outbox>kafka'] },
+    ] },
+  ];
+
+  const svg = document.querySelector('.diagram-wrap svg');
+  const packet = document.getElementById('packet');
+  const caption = document.getElementById('caption');
+  const stepsEl = document.getElementById('steps');
+  const picker = document.getElementById('picker');
+  const title = document.getElementById('lab-title');
+  const toggle = document.querySelector('[data-act="toggle"]');
+  const nodes = Array.from(svg.querySelectorAll('.node'));
+  const BADGE = { down: 'DOWN', hold: 'HOLD', ok: 'OK' };
+
+  let drill = 0;
+  let current = -1;
+  let tl = null;
+  let userPaused = false;
+  let visible = false;
+  const animate = !reduce.matches && Boolean(window.gsap);
+
+  function node(id) { return document.getElementById('n-' + id); }
+
+  function setState(id, state) {
+    const g = node(id);
+    g.classList.remove('down', 'hold', 'ok', 'pulse');
+    if (state) g.classList.add(state);
+    g.querySelector('.badge').textContent = BADGE[state] || '';
+  }
+
+  function parse(op) {
+    if (op.includes('>')) {
+      const fail = op.startsWith('x:');
+      const [from, to] = op.replace('x:', '').split('>');
+      return { kind: fail ? 'fail' : 'move', from, to };
+    }
+    const [kind, ids] = op.split(':');
+    return { kind, ids: ids.split(',') };
+  }
+
+  // States after every state op of steps before `upto`.
+  function renderStates(upto) {
+    nodes.forEach((g) => setState(g.id.slice(2), null));
+    DRILLS[drill].steps.slice(0, upto).forEach((st) => st.ops.map(parse).forEach((op) => {
+      if (op.kind === 'down') op.ids.forEach((id) => setState(id, 'down'));
+      if (op.kind === 'hold') op.ids.forEach((id) => setState(id, 'hold'));
+      if (op.kind === 'up') op.ids.forEach((id) => setState(id, null));
+    }));
+  }
+
+  function applyLive(op) {
+    if (op.kind === 'down') op.ids.forEach((id) => setState(id, 'down'));
+    if (op.kind === 'hold') op.ids.forEach((id) => setState(id, 'hold'));
+    if (op.kind === 'up') op.ids.forEach((id) => setState(id, 'ok'));
+    if (op.kind === 'pulse') op.ids.forEach((id) => node(id).classList.add('pulse'));
+  }
+
+  function clearEdges() {
+    svg.querySelectorAll('.edge').forEach((e) => e.classList.remove('live', 'bad'));
+    nodes.forEach((g) => g.classList.remove('pulse'));
+  }
+
+  function edgeFor(a, b) {
+    const forward = document.getElementById('e-' + a + '-' + b);
+    if (forward) return { path: forward, reverse: false };
+    return { path: document.getElementById('e-' + b + '-' + a), reverse: true };
+  }
+
+  function showSteps() {
+    const d = DRILLS[drill];
+    title.textContent = d.title;
+    stepsEl.innerHTML = '';
+    d.steps.forEach((st) => {
+      const li = document.createElement('li');
+      li.textContent = st.say;
+      stepsEl.appendChild(li);
+    });
+    picker.querySelectorAll('button').forEach((b, i) => b.setAttribute('aria-pressed', String(i === drill)));
+  }
+
+  function enterStep(i) {
+    current = i;
+    clearEdges();
+    // "Recovered" lasts one step, then the node reads as running again.
+    nodes.forEach((g) => { if (g.classList.contains('ok')) setState(g.id.slice(2), null); });
+    caption.textContent = DRILLS[drill].steps[i].say;
+    Array.from(stepsEl.children).forEach((li, n) => {
+      li.classList.toggle('on', n === i);
+      li.classList.toggle('done', n < i);
+    });
+  }
+
+  function addMove(t, op) {
+    const { path, reverse } = edgeFor(op.from, op.to);
+    const len = path.getTotalLength();
+    const fail = op.kind === 'fail';
+    const proxy = { p: 0 };
+    t.call(() => {
+      path.classList.add(fail ? 'bad' : 'live');
+      packet.classList.toggle('bad', fail);
+    });
+    t.set(packet, { autoAlpha: 1 });
+    t.to(proxy, {
+      p: fail ? 0.55 : 1,
+      duration: fail ? 0.6 : 0.9,
+      ease: 'power1.inOut',
+      onUpdate: () => {
+        const at = path.getPointAtLength(reverse ? len * (1 - proxy.p) : len * proxy.p);
+        packet.setAttribute('cx', at.x);
+        packet.setAttribute('cy', at.y);
+      },
+    });
+    if (fail) t.to(packet, { autoAlpha: 0, duration: 0.3 });
+    t.call(() => path.classList.remove('live'));
+  }
+
+  function build() {
+    if (tl) tl.kill();
+    const d = DRILLS[drill];
+    tl = gsap.timeline({ paused: true, onComplete: next });
+    d.steps.forEach((st, i) => {
+      tl.addLabel('st' + i);
+      tl.call(enterStep, [i]);
+      st.ops.map(parse).forEach((op) => {
+        if (op.kind === 'move' || op.kind === 'fail') addMove(tl, op);
+        else { tl.call(applyLive, [op]); tl.to({}, { duration: 0.6 }); }
+      });
+      tl.to({}, { duration: 1.8 });
+      tl.set(packet, { autoAlpha: 0 });
+      tl.addLabel('en' + i);
+    });
+    tl.to({}, { duration: 1 });
+  }
+
+  // At the end of a drill, move on to the next one unless the viewer took control.
+  function next() {
+    if (userPaused) return;
+    select((drill + 1) % DRILLS.length);
+  }
+
+  function select(i) {
+    drill = i;
+    current = -1;
+    showSteps();
+    renderStates(0);
+    clearEdges();
+    caption.textContent = 'Press Play, or Next to step through.';
+    if (!animate) return;
+    gsap.set(packet, { autoAlpha: 0 });
+    build();
+    if (visible && !userPaused) play();
+  }
+
+  function play() { userPaused = false; tl.play(); toggle.textContent = 'Pause'; toggle.setAttribute('aria-pressed', 'false'); }
+  function pause() { userPaused = true; tl.pause(); toggle.textContent = 'Play'; toggle.setAttribute('aria-pressed', 'true'); }
+
+  function go(i) {
+    const steps = DRILLS[drill].steps;
+    const n = Math.max(0, Math.min(steps.length - 1, i));
+    pause();
+    // Just before the step's end, so playing on passes the next step's start and fires it.
+    tl.seek(tl.labels['en' + n] - 0.01);
+    gsap.set(packet, { autoAlpha: 0 });
+    renderStates(n + 1);
+    enterStep(n);
+  }
+
+  function addPickerButton(d, i) {
+    const li = document.createElement('li');
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = d.title;
+    b.addEventListener('click', () => { userPaused = false; select(i); if (animate) play(); });
+    li.appendChild(b);
+    picker.appendChild(li);
+    return b;
+  }
+  DRILLS.forEach(addPickerButton);
+
+  // ─── Crash simulator ───
+  // Each incident is a list of events: a time, what happened, how the status board changes
+  // ("tile": "state:text") and the diagram ops that replay it.
+
+  const TILES = [
+    ['api', 'Uploads (API)'], ['work', 'Scan and publish'], ['hooks', 'Webhooks'],
+    ['pg', 'PostgreSQL'], ['kafka', 'Kafka'], ['redis', 'Rate limits (Redis)'], ['data', 'Data'],
+  ];
+  const SEVERITIES = [['blip', 'Blip (under a minute)'], ['outage', 'Long outage (about 20 min)'], ['lost', 'Lost and rebuilt']];
+
+  function secs(t) { const [m, s] = t.split(':').map(Number); return m * 60 + s; }
+  function clock(n) { return String(Math.floor(n / 60)).padStart(2, '0') + ':' + String(n % 60).padStart(2, '0'); }
+  function after(t, minutes) { return clock(secs(t) + minutes * 60); }
+  function ev(t, say, board, ops) { return { t, say, board: board || {}, ops: ops || [] }; }
+
+  function databaseIncident(moment, sev) {
+    const list = [];
+    list.push(ev('00:00', sev === 'lost'
+      ? 'RDS PostgreSQL goes down and its storage is lost with it.'
+      : 'RDS PostgreSQL stops accepting connections.', { pg: 'down:Unreachable' }, ['down:pg']));
+    if (moment === 'finish') list.push(ev('00:00', 'A client was finishing an upload. Its bytes are already in S3 quarantine/; the finish transaction never commits, so the client gets an error and no half-written rows exist.', { api: 'down:Finish fails' }, ['clients>cdn', 'cdn>api', 'x:api>pg']));
+    if (moment === 'scan') list.push(ev('00:00', 'processing-worker is mid-scan holding a 1-minute lease. Renewing the lease fails, so it cannot record the result.', { work: 'degraded:Cannot record results' }, ['kafka>proc', 'x:proc>pg', 'hold:proc']));
+    if (moment === 'publish') list.push(ev('00:00', 'outbox-worker has just sent a batch to Kafka but cannot mark it published.', { work: 'degraded:Publishing paused' }, ['outbox>kafka', 'x:outbox>pg', 'hold:outbox']));
+    list.push(ev('00:05', 'API /ready fails. Calls return errors; the SDK retries 5xx and 429 with Retry-After.', { api: 'down:Errors, SDK retrying' }, ['clients>cdn', 'x:cdn>api', 'hold:api']));
+    list.push(ev('00:10', 'Workers log and retry every tick; LISTEN reconnects with backoff from 1 s to 30 s. Kafka messages wait: a consumer whose database claim fails retries with a growing delay.', { work: 'down:Waiting for the database', hooks: 'down:Paused', kafka: 'degraded:Lag growing' }, ['x:proc>pg', 'x:outbox>pg', 'hold:outbox,proc,hooks']));
+
+    let back = '00:40';
+    if (sev === 'blip') {
+      list.push(ev(back, 'RDS is back after a restart (a Multi-AZ failover takes about the same). Connection pools reconnect on the next query.', { pg: 'recovering:Back' }, ['up:pg']));
+    }
+    if (sev === 'outage') {
+      list.push(ev('01:00', 'Alarms fire: RDS status, CloudFront 5xx, oldest PENDING outbox event, consumer lag.', {}, ['pulse:cw']));
+      list.push(ev('03:00', 'A task restarted during the outage exits at startup because the database ping fails; ECS keeps restarting it with backoff. Retrying on startup instead removes this churn.', {}, ['pulse:workers']));
+      back = '20:00';
+      list.push(ev(back, 'RDS finishes crash recovery (WAL replay) and accepts connections again.', { pg: 'recovering:Back after 20 min' }, ['up:pg']));
+    }
+    if (sev === 'lost') {
+      list.push(ev('01:00', 'Alarms fire. The instance cannot be recovered in place.', {}, ['pulse:cw']));
+      list.push(ev('05:00', 'The operator restores to the latest restorable time, usually within the last 5 minutes, as a new instance.', { pg: 'recovering:Restoring' }, []));
+      back = '35:00';
+      list.push(ev(back, 'The new instance is up. The DATABASE_URL parameter in SSM is updated and every ECS service is restarted.', { pg: 'recovering:Restored' }, ['up:pg']));
+      list.push(ev(after(back, 1), 'Whatever committed in the last few minutes before the crash is gone. Those upload sessions no longer exist, so clients finish or upload again; their leftover staging bytes are found by the orphan scan.', { data: 'degraded:Last few minutes of metadata lost' }, ['pg>workers', 'workers>s3']));
+      list.push(ev(after(back, 2), 'Kafka still holds events for rows that no longer exist. Handlers give up on them and write dead letters for an operator to resolve or discard.', { kafka: 'degraded:Some dead letters' }, ['kafka>proc', 'proc>pg']));
+    }
+
+    const next = sev === 'lost' ? after(back, 3) : after(back, 1);
+    if (moment === 'finish') list.push(ev(next, sev === 'lost'
+      ? 'The client retries the finish. Its session predates the restore point, so it commits once; sessions newer than the restore point start again.'
+      : 'The SDK retries the finish with the same idempotency key. It commits once; a retry after a lost response returns the same upload, never a duplicate.', { api: 'ok:Normal' }, ['up:api', 'clients>cdn', 'cdn>api', 'api>pg']));
+    if (moment === 'scan') list.push(ev(next, 'The old lease has expired, so the job is reclaimed with a new fencing token and scanned again. The stale worker cannot promote: it can no longer renew its lease.', { work: 'ok:Rescanned and promoted' }, ['up:proc', 'kafka>proc', 'proc>clam', 'proc>s3']));
+    if (moment === 'publish') list.push(ev(next, 'The batch lease expired, so it is published again. Kafka now holds two copies; the inbox says DONE for the second and the consumer commits past it.', { work: 'ok:Publishing' }, ['up:outbox', 'outbox>kafka', 'kafka>proc', 'proc>pg']));
+    list.push(ev(after(next, 1), 'Expired leases are reclaimed and every worker picks up from its tables; the backlog drains and webhooks resume.',
+      { api: 'ok:Normal', work: 'ok:Draining backlog', hooks: 'ok:Delivering', kafka: 'ok:Lag falling', pg: 'ok:Healthy', data: sev === 'lost' ? 'degraded:Last few minutes of metadata lost' : 'ok:Nothing lost' },
+      ['up:api,outbox,proc,hooks', 'pg>outbox', 'outbox>kafka', 'pg>hooks', 'hooks>recv']));
+
+    const book = [
+      ['Automatic', 'Pools and LISTEN reconnect; the SDK retries; ECS restarts tasks that exited; leases expire and work resumes from the tables.'],
+      ['Operator', 'Watch RDS events and <code>/ready</code>; after recovery check that the oldest PENDING outbox age and consumer lag fall.'],
+    ];
+    if (sev === 'lost') {
+      book.push(['Operator', 'Restore: <code>aws rds restore-db-instance-to-point-in-time --source-db-instance-identifier storage-db --target-db-instance-identifier storage-db-restored --use-latest-restorable-time</code>']);
+      book.push(['Operator', 'Point the services at it: update the <code>DATABASE_URL</code> SecureString in SSM, then <code>aws ecs update-service --force-new-deployment</code> for each service. Run <code>migrate</code> once to confirm the schema.']);
+      book.push(['Operator', 'Clean up: <code>event-admin</code> to resolve or discard dead letters for missing rows; review <code>reconciliation_findings</code>; tell affected tenants which uploads to redo.']);
+    }
+    book.push(['Prevent', 'Multi-AZ RDS (failover in about a minute, no data loss); retry on startup instead of exiting; a configurable pool size so restarts never exhaust connections.']);
+    return { events: list, book };
+  }
+
+  function redisIncident(moment, sev) {
+    const list = [];
+    list.push(ev('00:00', sev === 'lost'
+      ? 'The Redis (Valkey) node is replaced and comes back empty.'
+      : 'Redis (Valkey) stops answering: the container died or its node is being replaced.', { redis: 'down:Unreachable' }, ['down:redis']));
+    if (moment === 'burst') list.push(ev('00:00', 'A burst of uploads is arriving; every finish call checks the shared upload_finish limit (600 a minute per org).', {}, ['clients>cdn', 'cdn>api', 'x:api>redis']));
+    if (moment === 'login') list.push(ev('00:00', 'Someone is trying passwords against one account; every sign-in checks the shared login limit.', {}, ['clients>cdn', 'cdn>api', 'x:api>redis']));
+    if (moment === 'deploy') list.push(ev('00:00', 'A deploy restarts Redis; every counter it held is gone.', {}, ['x:api>redis']));
+    list.push(ev('00:01', 'Each check times out after 50 ms. The limiter opens its circuit and falls back to the in-process limiter the API has today.', { redis: 'down:Circuit open', api: 'degraded:Local limits' }, ['hold:api']));
+    if (moment === 'burst') list.push(ev('00:02', 'Uploads keep flowing. Each API replica now counts on its own, so with two replicas an org can briefly get up to twice its limit. Postgres, Kafka and the workers never notice.', { api: 'degraded:Up to 2× the limit' }, ['cdn>api', 'api>pg', 'pg>outbox', 'outbox>kafka']));
+    if (moment === 'login') list.push(ev('00:02', 'Sign-in falls back to a stricter local limit, the shared limit divided by the replica count, so guessing gets no extra tries. Argon2 still makes every try slow.', { api: 'degraded:Strict local sign-in limit' }, ['clients>cdn', 'cdn>api']));
+    if (moment === 'deploy') list.push(ev('00:02', 'Fresh counters mean each client gets at most one extra window of requests. Nothing needs restoring: the counts are disposable.', {}, ['clients>cdn', 'cdn>api']));
+
+    let back = '00:20';
+    if (sev === 'blip') list.push(ev(back, 'Redis is back. The circuit half-opens, a ping succeeds and shared counting resumes.', { redis: 'recovering:Back' }, ['up:redis', 'api>redis']));
+    if (sev === 'outage') {
+      list.push(ev('01:00', 'An alarm fires on limiter fallback; the team checks the Redis task or node.', {}, ['pulse:cw']));
+      back = '10:00';
+      list.push(ev(back, 'ECS restarts the container (stage 0) or ElastiCache promotes its replica (stage 1).', { redis: 'recovering:Restarted' }, ['up:redis', 'api>redis']));
+    }
+    if (sev === 'lost') {
+      back = '00:30';
+      list.push(ev(back, 'The node comes back empty, by design: no persistence is configured, which keeps it cheap and fast. Nothing is restored.', { redis: 'recovering:Back, empty' }, ['up:redis', 'api>redis']));
+    }
+    list.push(ev(after(back, 1), 'The circuit closes; shared limits apply again and the local fallback switches off.', { api: 'ok:Normal', redis: 'ok:Healthy', data: 'ok:Nothing lost' }, ['cdn>api', 'api>redis']));
+
+    const book = [
+      ['Automatic', 'Circuit breaker with a 50 ms timeout; fallback to in-process limits; ECS restart or ElastiCache failover; the circuit closes on the next good ping.'],
+      ['Operator', 'Check the alarm and the node: <code>redis-cli -h &lt;host&gt; ping</code>; confirm the limiter metrics show shared mode again.'],
+      ['Prevent', 'Build first: Redis is not in the code today. Add a Redis-backed limiter behind the existing limiter, keep the in-process one as the fallback, and never let a cache outage block uploads.'],
+    ];
+    return { events: list, book };
+  }
+
+  function kafkaIncident(moment, sev) {
+    const list = [];
+    list.push(ev('00:00', sev === 'lost'
+      ? 'The Kafka broker goes down and its EBS volume is lost with it.'
+      : 'The Kafka broker stops.', { kafka: 'down:Unreachable' }, ['down:kafka']));
+    if (moment === 'publish') list.push(ev('00:00', 'outbox-worker was publishing a batch of 50. The sends fail; the rows stay PENDING and their lease is released.', { work: 'degraded:Publishing paused' }, ['pg>outbox', 'x:outbox>kafka', 'hold:outbox']));
+    if (moment === 'consume') list.push(ev('00:00', 'processing-worker was mid-job on a message. The job carries on: its lease and its result live in Postgres, not in Kafka.', {}, ['proc>clam', 'proc>s3']));
+    if (moment === 'ingest') list.push(ev('00:00', 'upload-worker is fanning out a large ingestion manifest. Its upload.processed events can no longer reach it through Kafka.', { work: 'degraded:Ingestion events waiting' }, ['x:kafka>workers', 'hold:workers']));
+    list.push(ev('00:05', 'The idempotent producer retries, then the publisher backs off from 2 s to 5 min. Uploads keep committing: every event lands in the outbox first.', { api: 'ok:Uploads commit', pg: 'degraded:Outbox growing' }, ['cdn>api', 'api>pg']));
+    list.push(ev('00:10', 'The workers\' database polls carry the work: processing every 10 s, ingestion and datasets every 5 s, packing every 30 s, lifecycle every minute. Slower, but nothing stops.', { work: 'degraded:Running on polls' }, ['pg>proc', 'proc>clam', 'proc>s3']));
+    if (moment === 'consume') list.push(ev('00:20', 'The finished job cannot commit its Kafka offset. That is fine: the outcome is already in the inbox.', {}, []));
+
+    let back = '00:30';
+    if (sev === 'blip') list.push(ev(back, 'The broker is back; producers and consumers reconnect on their own.', { kafka: 'recovering:Back' }, ['up:kafka']));
+    if (sev === 'outage') {
+      list.push(ev('01:00', 'Alarms fire: oldest PENDING outbox event, consumer lag, broker down.', {}, ['pulse:cw']));
+      back = '15:00';
+      list.push(ev(back, 'EC2 auto-recovery restarts the data node on the same EBS volume; Kafka (KRaft) replays its log and rejoins.', { kafka: 'recovering:Restarted' }, ['up:kafka']));
+    }
+    if (sev === 'lost') {
+      list.push(ev('01:00', 'Alarms fire. The broker\'s data cannot be recovered.', {}, ['pulse:cw']));
+      back = '10:00';
+      list.push(ev(back, 'The Auto Scaling group launches a new data node with a fresh volume. The operator formats the storage, starts Kafka and recreates the five topics with their retry and DLQ topics.', { kafka: 'recovering:Rebuilt empty' }, ['up:kafka']));
+      list.push(ev(after(back, 2), 'Consumer groups start at the beginning of the empty topics. The reconciler republishes every event not yet consumed within its 72-hour window, with a new generation, so nothing is lost.', {}, ['pg>outbox', 'outbox>kafka']));
+    }
+    const next = sev === 'lost' ? after(back, 3) : after(back, 1);
+    if (moment === 'publish') list.push(ev(next, 'The PENDING batch publishes, in order per aggregate.', { work: 'ok:Publishing' }, ['up:outbox', 'outbox>kafka', 'kafka>proc']));
+    if (moment === 'consume') list.push(ev(next, 'The message is delivered again. The inbox says DONE, so it is committed past with no second effect.', {}, ['kafka>proc', 'proc>pg']));
+    if (moment === 'ingest') list.push(ev(next, 'The waiting upload.processed events drain to upload-worker; its 10-minute sweep reconciles the counters.', { work: 'ok:Ingestion catching up' }, ['up:workers', 'kafka>workers', 'workers>pg']));
+    list.push(ev(after(next, 1), 'Lag falls to zero. Anything that ran out of attempts is in dead_letters for event-admin.', { kafka: 'ok:Lag zero', work: 'ok:Normal', pg: 'ok:Healthy', data: 'ok:Nothing lost' }, ['up:outbox,proc,workers', 'outbox>kafka', 'kafka>proc']));
+
+    const book = [
+      ['Automatic', 'Producer retries and publisher backoff; database polls keep every worker moving; the reconciler republishes unconsumed events; the inbox drops duplicates.'],
+      ['Operator', 'Check the broker: disk usage, logs, <code>kafka-consumer-groups.sh --bootstrap-server &lt;host&gt;:9092 --describe --all-groups</code>.'],
+    ];
+    if (sev === 'lost') {
+      book.push(['Operator', 'Rebuild: <code>kafka-storage.sh format -t &lt;cluster-id&gt; -c server.properties</code>, start Kafka, run the topic migration, then watch lag drain.']);
+      book.push(['Operator', 'Afterwards: <code>event-admin</code> lists dead letters; replay or resolve them.']);
+    }
+    book.push(['Prevent', 'Three brokers with replication factor 3 at stage 1; a disk alarm at 70%; 7-day retention; a poll fallback for catalog.version_replaced, the one event that still needs Kafka.']);
+    return { events: list, book };
+  }
+
+  const SIM = {
+    db: { label: 'Database crash', build: databaseIncident, moments: [['finish', 'finishing an upload'], ['scan', 'scanning a file (lease held)'], ['publish', 'publishing events to Kafka']] },
+    redis: { label: 'Redis fails', build: redisIncident, moments: [['burst', 'taking a burst of uploads'], ['login', 'under a password-guessing attack'], ['deploy', 'restarting Redis in a deploy']] },
+    kafka: { label: 'Kafka fails', build: kafkaIncident, moments: [['publish', 'publishing a batch'], ['consume', 'consuming mid-job'], ['ingest', 'fanning out an ingestion manifest']] },
+  };
+
+  const sim = { fail: 'db', moment: 'finish', sev: 'outage' };
+  const board = document.getElementById('board');
+  const log = document.getElementById('log');
+  const runbook = document.getElementById('runbook');
+  const simNote = document.getElementById('sim-note');
+  let simTl = null;
+  let customIndex = -1;
+  let customButton = null;
+
+  function segment(el, options, value, onPick) {
+    el.innerHTML = '';
+    options.forEach(([key, label]) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = label;
+      b.setAttribute('aria-pressed', String(key === value));
+      b.addEventListener('click', () => onPick(key));
+      el.appendChild(b);
+    });
+  }
+
+  function drawControls() {
+    segment(document.getElementById('sim-fail'), Object.entries(SIM).map(([k, v]) => [k, v.label]), sim.fail, (k) => {
+      sim.fail = k;
+      sim.moment = SIM[k].moments[0][0];
+      drawControls();
+      resetBoard();
+    });
+    segment(document.getElementById('sim-moment'), SIM[sim.fail].moments, sim.moment, (k) => { sim.moment = k; drawControls(); resetBoard(); });
+    segment(document.getElementById('sim-sev'), SEVERITIES, sim.sev, (k) => { sim.sev = k; drawControls(); resetBoard(); });
+  }
+
+  function resetBoard() {
+    if (simTl) simTl.kill();
+    board.innerHTML = '';
+    TILES.forEach(([key, label]) => {
+      const li = document.createElement('li');
+      li.className = 'tile';
+      li.dataset.tile = key;
+      li.dataset.state = 'ok';
+      li.innerHTML = '<b></b><span></span>';
+      li.querySelector('b').textContent = label;
+      li.querySelector('span').textContent = key === 'redis' ? 'Normal (new component)' : 'Normal';
+      board.appendChild(li);
+    });
+    log.innerHTML = '';
+    runbook.innerHTML = '';
+    simNote.textContent = 'Press Run simulation.';
+  }
+
+  function applyBoard(patch) {
+    Object.entries(patch).forEach(([key, value]) => {
+      const tile = board.querySelector('[data-tile="' + key + '"]');
+      const [state, ...text] = value.split(':');
+      tile.dataset.state = state;
+      tile.querySelector('span').textContent = text.join(':');
+    });
+  }
+
+  function showEvent(e) {
+    log.querySelectorAll('li.new').forEach((li) => li.classList.remove('new'));
+    const li = document.createElement('li');
+    li.className = 'new';
+    li.innerHTML = '<b></b>';
+    li.querySelector('b').textContent = 'T+' + e.t;
+    li.appendChild(document.createTextNode(e.say));
+    log.appendChild(li);
+    applyBoard(e.board);
+  }
+
+  function runSim() {
+    resetBoard();
+    const { events, book } = SIM[sim.fail].build(sim.moment, sim.sev);
+    book.forEach(([who, html]) => {
+      const li = document.createElement('li');
+      const pill = who === 'Automatic' ? 'p-auto' : who === 'Operator' ? 'p-op' : 'p-gap';
+      li.innerHTML = '<span class="pill ' + pill + '">' + who + '</span> ' + html;
+      runbook.appendChild(li);
+    });
+    simNote.textContent = sim.fail === 'redis'
+      ? 'Redis is a proposed component: the code keeps rate limits in each API process today.'
+      : 'Times are illustrative; the behaviour follows the code as reviewed on 30 Oct 2026.';
+    if (!animate) {
+      events.forEach(showEvent);
+      return;
+    }
+    simTl = gsap.timeline();
+    events.forEach((e) => {
+      simTl.call(showEvent, [e]);
+      simTl.to({}, { duration: 1.7 });
+    });
+  }
+
+  function playOnDiagram() {
+    const { events } = SIM[sim.fail].build(sim.moment, sim.sev);
+    const moment = SIM[sim.fail].moments.find(([k]) => k === sim.moment)[1];
+    const drillDef = {
+      title: 'Your simulation: ' + SIM[sim.fail].label.toLowerCase() + ' while ' + moment,
+      steps: events.map((e) => ({ say: 'T+' + e.t + '  ' + e.say, ops: e.ops })),
+    };
+    if (customIndex < 0) {
+      DRILLS.push(drillDef);
+      customIndex = DRILLS.length - 1;
+      customButton = addPickerButton(drillDef, customIndex);
+    } else {
+      DRILLS[customIndex] = drillDef;
+    }
+    customButton.textContent = 'Your simulation';
+    userPaused = false;
+    select(customIndex);
+    if (animate) play();
+    document.querySelector('.lab').scrollIntoView({ block: 'start' });
+  }
+
+  drawControls();
+  resetBoard();
+  document.getElementById('sim-run').addEventListener('click', runSim);
+  document.getElementById('sim-diagram').addEventListener('click', playOnDiagram);
+
+  if (!animate) {
+    // Reduced motion or no GSAP: the steps read as a list; the diagram stays still.
+    document.querySelector('.controls').hidden = true;
+    caption.textContent = 'Pick a drill to read its steps.';
+    select(0);
+    return;
+  }
+
+  toggle.addEventListener('click', () => (tl.paused() ? play() : pause()));
+  document.querySelector('[data-act="next"]').addEventListener('click', () => go(current + 1));
+  document.querySelector('[data-act="prev"]').addEventListener('click', () => go(current - 1));
+  document.querySelector('[data-act="restart"]').addEventListener('click', () => { renderStates(0); tl.restart(); play(); });
+
+  select(0);
+  new IntersectionObserver((entries) => {
+    entries.forEach((e) => {
+      visible = e.isIntersecting;
+      if (visible && !userPaused) play();
+      else if (!visible) tl.pause();
+    });
+  }, { threshold: 0 }).observe(document.querySelector('.lab'));
+})();
+</script>
+</body>
+</html>

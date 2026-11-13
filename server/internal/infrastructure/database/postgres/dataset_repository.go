@@ -37,7 +37,10 @@ func NewDatasetRepository(db *DB) *DatasetRepository {
 var _ interfaces.DatasetRepository = (*DatasetRepository)(nil)
 
 // leaveReady is the status a change to the draft leaves: a validated
-// outcome no longer describes it.
+// outcome no longer describes it. It only ever makes moves the lifecycle
+// table allows (READY, READY_WITH_WARNINGS or FAILED -> DRAFT, pinned by
+// TestLeavingReadyIsAllowed); DRAFT and VALIDATING stay as they are, and
+// every caller holds the row through lockDraft, which refuses ARCHIVED.
 const leaveReady = `CASE WHEN lifecycle_status IN ('READY', 'READY_WITH_WARNINGS', 'FAILED') THEN 'DRAFT' ELSE lifecycle_status END`
 
 func newRowID() string {

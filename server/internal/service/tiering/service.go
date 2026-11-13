@@ -55,7 +55,7 @@ type Store interface {
 
 	VersionUses(ctx context.Context, tenantID, datasetID string) ([]postgres.VersionUse, error)
 	Freed(ctx context.Context, tenantID string, versionIDs []string) ([]model.Asset, error)
-	Expire(ctx context.Context, tenantID string, versionIDs []string, by string, now time.Time) error
+	Expire(ctx context.Context, tenantID string, versionIDs []string, by string, now time.Time) ([]string, error)
 	VersionProfile(ctx context.Context, tenantID, versionID string, now time.Time) ([]postgres.VersionProfile, error)
 	VersionObjects(ctx context.Context, tenantID, versionID, afterPath string, limit int) ([]postgres.VersionObject, error)
 }

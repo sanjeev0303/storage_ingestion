@@ -20,6 +20,13 @@ func TestSecurityDefaultsAreValid(t *testing.T) {
 	if s.Quotas.MaxActiveUploads != 200 || s.Quotas.MaxObjectBytes > s.Quotas.MaxStorageBytes {
 		t.Fatalf("quota defaults %+v", s.Quotas)
 	}
+	if s.Auth.APITokenPepper != nil {
+		t.Fatal("no pepper unless one is configured")
+	}
+	t.Setenv("API_TOKEN_PEPPER", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+	if s, err = LoadSecurity(); err != nil || len(s.Auth.APITokenPepper) != 32 {
+		t.Fatalf("pepper: %d bytes, %v", len(s.Auth.APITokenPepper), err)
+	}
 }
 
 // Any invalid security setting stops startup: there is no fallback to a
@@ -48,6 +55,8 @@ func TestInvalidSecuritySettingsFailStartup(t *testing.T) {
 		{"QUOTA_MAX_ACTIVE_MULTIPART", "500", "QUOTA_MAX_ACTIVE_MULTIPART"},
 		{"QUOTA_MAX_OBJECT_BYTES", "2199023255552", "QUOTA_MAX_OBJECT_BYTES"},
 		{"INGESTION_TENANT_STORAGE_QUOTA", "1024", "QUOTA_MAX_STORAGE_BYTES"},
+		{"API_TOKEN_PEPPER", "c2hvcnQ=", "API_TOKEN_PEPPER"},
+		{"API_TOKEN_PEPPER", "not base64!", "API_TOKEN_PEPPER"},
 	} {
 		t.Run(c.key+"="+c.value, func(t *testing.T) {
 			t.Setenv(c.key, c.value)

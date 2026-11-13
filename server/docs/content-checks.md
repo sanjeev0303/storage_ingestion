@@ -83,6 +83,10 @@ A CLEAN verdict holds for the signatures that gave it. Each processing cycle tha
 
 A claim lasts an hour; a re-scan that fails is tried again after it.
 
+A blocked asset is not usable anywhere, not only for downloads: packing, delta uploads, training streams, Git LFS, chat shares, DICOM listings and edge recordings skip it; ingestion reports its entry failed instead of published; dataset validation and quality checks see its version as `BLOCKED`, never `AVAILABLE`.
+
+An operator who judges the verdict wrong clears the block with `POST /api/v1/assets/{id}/unblock {"reason": "..."}` (quarantine.release, as releasing a file from quarantine). The reason is required; the audit event `asset.unblock` records it with the block it lifted. An asset that is not blocked answers 409 `asset_not_blocked`. The finding and the job's INFECTED result stay as they were.
+
 ## Where findings show
 
 - `GET /api/v1/assets/{id}/findings` (assets.read), and in `GET /api/v1/assets/{id}/quarantine`.

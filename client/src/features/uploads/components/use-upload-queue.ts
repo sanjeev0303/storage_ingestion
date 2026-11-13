@@ -62,8 +62,11 @@ export function useUploadQueue({ connections, defaultConnectionId, maxObjectByte
   const [entries, setEntries] = useState<QueueEntry[]>([]);
   // Files started but still waiting for a free slot, in the order they will go.
   const [waitingIds, setWaitingIds] = useState<string[]>([]);
-  // Read by a running pool, which outlives the render that started it.
-  const removedIds = useRef(new Set<string>());
+  // Files already handed to a pool. A second Start before the screen redraws
+  // sees the same queued files, and must not start them twice.
+  const pooledIds = useRef(new Set<string>());
+  // For callbacks and the unmount cleanup, which outlive the render that made them.
+  const latest = useRef(entries);
   const [chosenDestination, setDestination] = useState<string | null>(null);
   // The default arrives with the connections list, after the first render.
   const destination = chosenDestination ?? defaultConnectionId;
@@ -80,6 +83,20 @@ export function useUploadQueue({ connections, defaultConnectionId, maxObjectByte
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
   }, [snapshots]);
+
+  useEffect(() => {
+    latest.current = entries;
+  }, [entries]);
+
+  // Leaving the page stops its uploads, as closing the tab would. Nothing is
+  // aborted on the server, so a multipart upload can be continued from
+  // Unfinished uploads; none keeps running unseen.
+  useEffect(() => {
+    const current = latest;
+    return () => {
+      for (const entry of current.current) entry.task.stop();
+    };
+  }, []);
 
   const errors = useMemo(() => {
     const result = new Map<string, DraftErrors>();
@@ -106,7 +123,8 @@ export function useUploadQueue({ connections, defaultConnectionId, maxObjectByte
   }, []);
 
   const remove = useCallback((id: string) => {
-    removedIds.current.add(id);
+    // A cancelled file is also skipped by a pool it is still waiting in.
+    latest.current.find((entry) => entry.id === id)?.task.cancel();
     setWaitingIds((current) => current.filter((waiting) => waiting !== id));
     setEntries((current) => current.filter((entry) => entry.id !== id));
   }, []);
@@ -131,15 +149,16 @@ export function useUploadQueue({ connections, defaultConnectionId, maxObjectByte
   const startable = ready.filter((entry) => !hasErrors(errors.get(entry.id) ?? {}));
 
   const start = useCallback(() => {
-    for (const entry of startable) {
+    const fresh = startable.filter((entry) => !pooledIds.current.has(entry.id));
+    for (const entry of fresh) {
+      pooledIds.current.add(entry.id);
       entry.task.setRequest(toRequest(entry.task.file, entry.draft, defaultConnectionId));
       configure(entry.task, entry.draft.connectionId || defaultConnectionId);
     }
-    setWaitingIds((current) => [...current, ...startable.map((entry) => entry.id)]);
-    void runPool(startable, FILES_AT_ONCE, async (entry) => {
+    setWaitingIds((current) => [...current, ...fresh.map((entry) => entry.id)]);
+    // run() does nothing for a file removed (cancelled) while it waited.
+    void runPool(fresh, FILES_AT_ONCE, async (entry) => {
       setWaitingIds((current) => current.filter((id) => id !== entry.id));
-      // Removed while it waited: it must not upload anyway.
-      if (removedIds.current.has(entry.id)) return;
       await entry.task.run();
     });
   }, [startable, defaultConnectionId, configure]);

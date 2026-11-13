@@ -39,11 +39,6 @@ type UploadRepository interface {
 	// when status is not empty. next is "" on the last page.
 	List(ctx context.Context, tenantID string, status model.UploadStatus, after string, limit int) (uploads []model.UploadSession, next string, err error)
 
-	Update(
-		ctx context.Context,
-		upload *model.UploadSession,
-	) error
-
 	// TransitionStatus moves the session to `to` only while its current
 	// status is one of `from`, as one conditional write. It returns
 	// model.ErrInvalidUploadState when the session is in any other status,

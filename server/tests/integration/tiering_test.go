@@ -208,7 +208,7 @@ func TestTieringMovesWholePacks(t *testing.T) {
 	s.delivery.Route(rig.router)
 	connections := postgres.NewStorageConnectionRepository(s.db)
 	conn := activeConnection(t, connections, acme.org.ID, "Packed glacier", testKeyring(t), model.ProviderAWSS3)
-	if _, err := connections.RecordTest(ctx, acme.org.ID, conn.ID, interfaces.ConnectionTestRecord{OK: true, At: time.Now().UTC(),
+	if _, err := connections.RecordTest(ctx, acme.org.ID, conn.ID, interfaces.ConnectionTestRecord{OK: true, At: time.Now().UTC(), CredentialVersion: 1,
 		Capabilities: &model.ProviderCapabilities{PresignedUpload: true, Multipart: true, RangeReads: true}}); err != nil {
 		t.Fatal(err)
 	}

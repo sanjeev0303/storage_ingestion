@@ -29,7 +29,7 @@ The platform does not capture messages or collect from devices. It is where thos
 git config -f .lfsconfig lfs.url https://storage.example.org/lfs/game
 ```
 
-Objects are stored under `.lfs/` by their SHA-256, through the same upload path as everything else: verified, scanned, deduplicated. A verify waits for those checks, so a push fails where a file is rejected. One object is at most 5 GiB (the basic transfer is one PUT). Reads go directly to your storage, so CI re-downloads are not billed by a forge. `git lfs lock` works, and a push refuses to overwrite a file someone else holds.
+Objects are stored under `.lfs/` by their SHA-256, through the same upload path as everything else: verified, scanned, deduplicated. A verify waits for those checks, so a push fails where a file is rejected. One object is at most 5 GiB (the basic transfer is one PUT). The upload session's idempotency key is the object's, so an earlier upload of the same object that ended unfinished answers that object with error 409 until the session is compacted; an object already uploaded and being checked gets no upload action. Reads go directly to your storage, so CI re-downloads are not billed by a forge. `git lfs lock` works, and a push refuses to overwrite a file someone else holds.
 
 `osp lfs-promote DATASET LABEL [--hold REF]` pins the LFS files at HEAD in the dataset's draft, under their repository paths, snapshots and labels them, and with `--hold` places a legal hold, so what shipped cannot change or go away.
 

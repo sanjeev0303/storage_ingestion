@@ -60,6 +60,8 @@ The change is tested against the bucket first and refused (422, with the test re
 3. `POST .../credentials/rollback`: puts the replaced ones back while they are kept.
 4. `DELETE .../credentials/staged` discards staged keys.
 
+A plain rotation (`POST .../rotate-credentials`) replaces the current credentials outright: it discards staged keys and the rollback slot, so a later promote or rollback can never bring back keys the rotation replaced. A promote whose staged keys are not newer than the current ones answers 409 `stale_staged_credential`. Promote, rollback and discard act on the keys the call read: a promote puts in use only the staged keys it just tested, and a rollback or discard refuses keys staged, promoted or rolled back by someone else meanwhile, with 409 `credential_changed`. Read the connection and try again. No request body is needed.
+
 A failed test answers 422 with the result; nothing changes. Replaced credentials past their window are erased by the cleanup worker. The connection response shows `staged_credential` and `previous_credential_until`, never a secret.
 
 ## Changes outside the platform

@@ -298,8 +298,12 @@ function MergePanel({
   }
 
   function run(dryRun: boolean) {
+    let sourceVersion = version || undefined;
+    // After a preview of "the latest version", merge the version that preview
+    // showed, not one that arrived since.
+    if (!dryRun && !sourceVersion && merge.variables?.dry_run) sourceVersion = merge.data?.source_version_id || undefined;
     merge.mutate(
-      { source_dataset_id: sourceId, source_version_id: version || undefined, strategy, dry_run: dryRun, idempotency_key: dryRun ? undefined : key.current },
+      { source_dataset_id: sourceId, source_version_id: sourceVersion, strategy, dry_run: dryRun, idempotency_key: dryRun ? undefined : key.current },
       {
         onSuccess: (result) => {
           if (result.applied) {
@@ -385,12 +389,18 @@ function MergePanel({
         </fieldset>
 
         <div className="flex flex-wrap gap-3">
-          <Button disabled={Boolean(blocked) || noVersion} title={blocked} loading={merge.isPending && merge.variables?.dry_run} onClick={() => run(true)}>
+          {/* One call at a time, so the result shown and its preview label come from the same call. */}
+          <Button
+            disabled={Boolean(blocked) || noVersion || merge.isPending}
+            title={blocked}
+            loading={merge.isPending && merge.variables?.dry_run}
+            onClick={() => run(true)}
+          >
             Preview the merge
           </Button>
           <Button
             variant="primary"
-            disabled={Boolean(blocked) || noVersion || (result?.applied ?? false)}
+            disabled={Boolean(blocked) || noVersion || merge.isPending || (result?.applied ?? false)}
             title={blocked}
             loading={merge.isPending && !merge.variables?.dry_run}
             onClick={() => run(false)}

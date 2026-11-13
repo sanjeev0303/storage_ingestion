@@ -11,6 +11,8 @@ import (
 var (
 	ErrWebhookNotFound  = errors.New("webhook endpoint not found")
 	ErrDeliveryNotFound = errors.New("webhook delivery not found")
+	// ErrDeliveryInFlight: a worker is sending the delivery right now.
+	ErrDeliveryInFlight = errors.New("the delivery is being sent right now; try again shortly")
 )
 
 // WebhookEventTypes are the events an endpoint can subscribe to. The

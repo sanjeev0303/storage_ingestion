@@ -31,10 +31,16 @@ func (s *Service) Login(ctx context.Context, email, pw string, client Client) (T
 	ipKey := "login-ip:" + client.IP
 	emailRule := ratelimit.Rule{Requests: s.cfg.LoginAttempts, Window: s.cfg.LoginWindow}
 	ipRule := ratelimit.Rule{Requests: s.cfg.LoginIPAttempts, Window: s.cfg.LoginWindow}
+	// The client address can be wrong (a proxy that passes on what callers
+	// write), so one account also has a cap of its own, whatever the
+	// address. Looser than the per-address one, so a guesser elsewhere does
+	// not lock its owner out for long.
+	accountKey := "login-account:" + strings.ToLower(email)
+	accountRule := ratelimit.Rule{Requests: 4 * s.cfg.LoginAttempts, Window: s.cfg.LoginWindow}
 	for _, check := range []struct {
 		key  string
 		rule ratelimit.Rule
-	}{{emailKey, emailRule}, {ipKey, ipRule}} {
+	}{{emailKey, emailRule}, {ipKey, ipRule}, {accountKey, accountRule}} {
 		if over, wait := s.deps.Limiter.Exceeded(check.key, check.rule); over {
 			e := audit.Anonymous(ctx, "auth.login", "session", "")
 			e.Outcome, e.Reason = model.AuditDenied, "throttled"
@@ -46,6 +52,7 @@ func (s *Service) Login(ctx context.Context, email, pw string, client Client) (T
 	fail := func(userID, reason string) error {
 		s.deps.Limiter.Add(emailKey, emailRule)
 		s.deps.Limiter.Add(ipKey, ipRule)
+		s.deps.Limiter.Add(accountKey, accountRule)
 		e := audit.Anonymous(ctx, "auth.login", "user", userID)
 		e.Outcome, e.Reason = model.AuditFailed, reason
 		s.deps.Audit.Record(ctx, e)

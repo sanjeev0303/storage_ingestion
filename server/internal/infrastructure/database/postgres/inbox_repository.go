@@ -159,6 +159,17 @@ func (r *InboxRepository) Fail(ctx context.Context, consumer, eventID, owner str
 	`, consumer, eventID, owner, now, next, lastError)
 }
 
+// Release leaves the record FAILED and due now, the state in which the
+// next delivery takes it, with the cut-short attempt not counted.
+func (r *InboxRepository) Release(ctx context.Context, consumer, eventID, owner string, now time.Time) error {
+	return r.leased(ctx, `
+		UPDATE event_inbox
+		SET status = 'FAILED', attempts = GREATEST(attempts - 1, 0), next_attempt_at = $4,
+		    lease_owner = NULL, lease_expires_at = NULL, updated_at = $4
+		WHERE consumer = $1 AND event_id = $2 AND lease_owner = $3 AND status = 'PROCESSING'
+	`, consumer, eventID, owner, now)
+}
+
 func (r *InboxRepository) Dead(ctx context.Context, consumer, eventID, owner string, dl model.DeadLetter) error {
 	tx, err := r.db.Pool.Begin(ctx)
 	if err != nil {

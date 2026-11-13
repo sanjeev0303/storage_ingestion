@@ -86,6 +86,33 @@ describe("dataset overview", () => {
     await waitFor(() => expect(within(dialog).getByLabelText("Description")).toHaveValue("changed by someone else"));
   });
 
+  it("keeps edits through a background refetch and saves against the revision the edit started from", async () => {
+    let revision = 3;
+    let sent: unknown;
+    server.use(
+      http.get(`${API}/datasets/ds-1`, () => HttpResponse.json(makeDataset({ revision }))),
+      http.patch(`${API}/datasets/ds-1`, async ({ request }) => {
+        sent = ((await request.json()) as { revision: number }).revision;
+        return HttpResponse.json({ error: "stale", code: "revision_conflict" }, { status: 412 });
+      }),
+      http.get(`${API}/validation-profiles`, () => HttpResponse.json({ profiles: [] })),
+    );
+    const { client } = renderWithProviders(<DatasetOverview id="ds-1" />);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    const dialog = await screen.findByRole("dialog");
+    const box = within(dialog).getByLabelText("Description");
+    await userEvent.clear(box);
+    await userEvent.type(box, "mine");
+
+    revision = 4;
+    await client.invalidateQueries();
+    expect(await within(dialog).findByText(/changed this dataset after you started editing/)).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Description")).toHaveValue("mine");
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(sent).toBe(3));
+  });
+
   it("sends the revision and merges metadata with null for removed keys", async () => {
     let body: Record<string, unknown> = {};
     server.use(

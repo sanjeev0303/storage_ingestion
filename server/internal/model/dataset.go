@@ -316,6 +316,9 @@ const (
 type ObjectDatasets struct {
 	Members   []ObjectMembership
 	Snapshots []ObjectSnapshot
+	// NextMembers and NextSnapshots continue each list; empty at its end.
+	NextMembers   string
+	NextSnapshots string
 }
 
 // ObjectMembership is a dataset whose draft holds the object.

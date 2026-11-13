@@ -105,6 +105,33 @@ On the command line: `osp branch pets relabel`, `osp branches pets`,
 4. Adds every published file as a dataset member pinned to that exact
    version, so the next snapshot holds it.
 
+While it waits for the platform's checks, a file whose upload failed and
+went back to the job's queue is claimed and sent again. Each wait gives up
+after two hours (`ingest.WAIT_TIMEOUT`): pass
+`ingest_folder(..., timeout=seconds)` for another limit, or `timeout=None`
+to wait for ever. `wait_for_job` takes the same `timeout`. A run that gave
+up is picked up where it stopped by running it again.
+
+## On a bad connection
+
+A PUT to storage that sends nothing for 30 seconds is dropped and sent
+again; a slow link that keeps moving is never cut off. Network errors,
+408, 429 and 5xx are retried with backoff and full jitter (up to 30 s
+between tries, or what `Retry-After` asks for); a part link that expired
+is replaced by a fresh one; other refusals fail at once. API calls are
+retried only when sending them twice is safe: GETs, PUTs, requests with an
+idempotency key, and the upload routes. The token refresh is never sent
+twice, because its refresh token works once. Each part is
+confirmed as soon as it is in, and `osp ingest` records it in
+`~/.osp/uploads.json`, so running the same command again after a crash or
+a lost connection sends only the parts not yet confirmed. From Python,
+pass `ingest_folder(..., resume_file="uploads.json")` for the same. When
+the API says a saved upload session has ended, its saved parts are
+forgotten, and a changed file's new version (one PUT or parts) starts
+again once under a new key; one whose upload already completed is not sent
+again. Two `osp ingest` runs can share `uploads.json`: a lock file beside
+it keeps their writes apart.
+
 ## Tests
 
 ```sh

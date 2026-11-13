@@ -6,6 +6,8 @@ import (
 	"io"
 	"log/slog"
 	"runtime"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -22,13 +24,26 @@ import (
 // consumer calls nothing else on the success path.
 type acceptingInbox struct {
 	interfaces.InboxRepository
-	mu   sync.Mutex
-	done []string
+	mu       sync.Mutex
+	done     []string
+	claimed  []string // the owner of each claim
+	finished []string // the owner each completion was written as
+	released []string // the owner each shutdown release was written as
 }
 
-func (i *acceptingInbox) Claim(_ context.Context, rec model.InboxRecord, _ string, _ time.Time, _ time.Duration) (string, model.InboxRecord, error) {
+func (i *acceptingInbox) Claim(_ context.Context, rec model.InboxRecord, owner string, _ time.Time, _ time.Duration) (string, model.InboxRecord, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.claimed = append(i.claimed, owner)
 	rec.Attempts = 1
 	return model.ClaimAcquired, rec, nil
+}
+
+func (i *acceptingInbox) Release(_ context.Context, _, _, owner string, _ time.Time) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.released = append(i.released, owner)
+	return nil
 }
 
 func (i *acceptingInbox) NewerHandled(context.Context, string, string, string, int64) (int64, error) {
@@ -39,10 +54,11 @@ func (i *acceptingInbox) Extend(context.Context, string, string, string, time.Ti
 	return nil
 }
 
-func (i *acceptingInbox) Complete(_ context.Context, _, eventID, _ string, _ time.Time, _ string) error {
+func (i *acceptingInbox) Complete(_ context.Context, _, eventID, owner string, _ time.Time, _ string) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.done = append(i.done, eventID)
+	i.finished = append(i.finished, owner)
 	return nil
 }
 
@@ -215,8 +231,47 @@ func TestRunWaitsForRunningEventsOnShutdownAndLeaksNothing(t *testing.T) {
 	if n := returned.Load(); n != 2 {
 		t.Fatalf("Run returned while handlers were still running: %d of 2 had returned", n)
 	}
+	// Both were handed back under the claim they were taken with, and
+	// neither was recorded as done.
+	inbox.mu.Lock()
+	released, claimed, done := append([]string(nil), inbox.released...), append([]string(nil), inbox.claimed...), len(inbox.done)
+	inbox.mu.Unlock()
+	slices.Sort(released)
+	slices.Sort(claimed)
+	if done != 0 || len(released) != 2 || !slices.Equal(released, claimed) {
+		t.Fatalf("shutdown: released %v, claimed %v, completed %d", released, claimed, done)
+	}
 	time.Sleep(50 * time.Millisecond)
 	if after := runtime.NumGoroutine(); after > before {
 		t.Fatalf("goroutines: %d before, %d after Run returned", before, after)
+	}
+}
+
+// Each claim is made under an owner of its own, and the outcome is written
+// under that same owner: an earlier attempt of this worker that lost its
+// lease cannot write over a later one.
+func TestEveryClaimHasItsOwnOwner(t *testing.T) {
+	q := memory.New()
+	inbox := &acceptingInbox{}
+	c := newTestConsumer(t, q, inbox, func(context.Context, event.Envelope) (string, error) { return "done", nil })
+	for _, id := range []string{"a", "b", "c"} {
+		publishImport(t, q, id)
+	}
+	if _, err := c.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, owner := range inbox.claimed {
+		if !strings.HasPrefix(owner, "test#") || seen[owner] {
+			t.Fatalf("claim owners %v", inbox.claimed)
+		}
+		seen[owner] = true
+	}
+	finished := append([]string(nil), inbox.finished...)
+	claimed := append([]string(nil), inbox.claimed...)
+	slices.Sort(finished)
+	slices.Sort(claimed)
+	if len(claimed) != 3 || !slices.Equal(finished, claimed) {
+		t.Fatalf("completed as %v, claimed as %v", finished, claimed)
 	}
 }

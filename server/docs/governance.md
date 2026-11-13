@@ -41,6 +41,8 @@ Starting points with their citations; counsel confirms they fit.
 
 `POST /api/v1/legal-holds` also takes `scope: "QUERY"` with a `query` (`dataset`, `path_prefix`, `content_type_prefix`, `metadata` that must all match, `created_after`, `created_before`), and `matter` and `custodians`. The query is evaluated whenever an asset is checked (deletion, purge, lock sync), so a QUERY hold also covers assets created after it. Its matter names it.
 
+`GET /api/v1/legal-holds?include_released=&cursor=&limit=` (`retention.manage`) pages the organization's holds, newest placed first (`placed_at`, then ID, both descending). Active holds only unless `include_released=true`. `limit` defaults to 50 and is capped at 200; the answer is `{"holds": [...], "next_cursor": "..."}`, with no `next_cursor` on the last page. A malformed cursor or a `limit` that is not a positive number is `400 invalid_request`.
+
 `GET /api/v1/legal-holds/{id}/proof` lists what a hold covers (up to 1000 assets), with each one's Object Lock: when it was applied, the hold and retention set. With `?verify=true` it reads up to 100 locks back from the provider and says `MATCH` or what differs. Reading a proof is audited.
 
 ## Governance and approvals
@@ -54,6 +56,8 @@ Starting points with their citations; counsel confirms they fit.
 | `profile` | `STANDARD`, `GXP_VAULT` (two-person and approved deletes: 21 CFR Part 11, EU Annex 11) or `SEC_17A4_AUDIT_TRAIL` (two-person and a six-year retention floor: the audit-trail alternative to WORM in Rule 17a-4(f)(2)) |
 
 A change that waits answers **202** `{"status": "PENDING_APPROVAL", "approval_id": ...}` and is not made. `GET /api/v1/approvals` lists them (pending first; unexpired ones last seven days). `POST /api/v1/approvals/{id}/approve` carries the change out as asked; the member who asked cannot approve it (403 `self_approval`), and an approval is decided once (409). `POST .../reject` closes it.
+
+An approval's `state` is `PENDING`, then `REJECTED`, `EXPIRED` (past `expires_at`: it can no longer be approved, and is marked so when listed or when someone tries), or `EXECUTING` while the approved change is made, then `EXECUTED` or `FAILED` (with the error in `result`). Migration 000053. One left `EXECUTING` was interrupted mid-change: check whether the change took effect (the hold, policy, settings or deletions it names) and ask again if it did not.
 
 Every attempt to loosen protection, made, refused or sent for approval, is the webhook `retention.change_requested`; a new approval is `governance.approval_requested`.
 

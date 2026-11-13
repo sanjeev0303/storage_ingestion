@@ -2,7 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   ACCESS_COOKIE,
   BACKEND_URL,
+  RECENT_MS,
   REFRESH_COOKIE,
+  RefreshUnavailable,
   clearSessionCookies,
   clientAddress,
   isSameOrigin,
@@ -106,6 +108,7 @@ async function handle(req: NextRequest, ctx: RouteContext<"/api/proxy/[...path]"
   const address = clientAddress(req);
   if (address) headers.set("x-forwarded-for", address);
 
+  const arrived = Date.now();
   let access = req.cookies.get(ACCESS_COOKIE)?.value;
   const refresh = req.cookies.get(REFRESH_COOKIE)?.value;
   // No session at all: refused before a byte of the body is read.
@@ -115,19 +118,6 @@ async function handle(req: NextRequest, ctx: RouteContext<"/api/proxy/[...path]"
   if (length !== null && Number(length) > MAX_BODY_BYTES) {
     return NextResponse.json({ error: "request body too large", code: "payload_too_large" }, { status: 413 });
   }
-  let body: ArrayBuffer | undefined;
-  // A chunked body has no length: read it, within the same cap.
-  if (unsafe && length !== "0") {
-    try {
-      body = await readBody(req);
-    } catch (error) {
-      if (!(error instanceof BodyTooLarge)) throw error;
-      return NextResponse.json({ error: "request body too large", code: "payload_too_large" }, { status: 413 });
-    }
-  }
-  // Each segment encoded again: a decoded "?" or "#" must not become part
-  // of the URL's query or fragment.
-  const target = `${BACKEND_URL}/api/v1/${segments.map(encodeURIComponent).join("/")}${req.nextUrl.search}`;
 
   let renewed: Tokens | null = null;
   let sessionEnded = false;
@@ -145,6 +135,31 @@ async function handle(req: NextRequest, ctx: RouteContext<"/api/proxy/[...path]"
     return true;
   };
 
+  // Renewed before the body is read: a slow body must not push the refresh
+  // past the window in which a concurrent rotation's answer is still cached.
+  if (!access) {
+    try {
+      await renew();
+    } catch (error) {
+      return refreshFailed(error, where);
+    }
+    if (!access && !isPublic(path)) return unauthenticated(sessionEnded);
+  }
+
+  let body: ArrayBuffer | undefined;
+  // A chunked body has no length: read it, within the same cap.
+  if (unsafe && length !== "0") {
+    try {
+      body = await readBody(req);
+    } catch (error) {
+      if (!(error instanceof BodyTooLarge)) throw error;
+      return NextResponse.json({ error: "request body too large", code: "payload_too_large" }, { status: 413 });
+    }
+  }
+  // Each segment encoded again: a decoded "?" or "#" must not become part
+  // of the URL's query or fragment.
+  const target = `${BACKEND_URL}/api/v1/${segments.map(encodeURIComponent).join("/")}${req.nextUrl.search}`;
+
   const send = () => {
     const outgoing = new Headers(headers);
     if (access) outgoing.set("authorization", `Bearer ${access}`);
@@ -153,19 +168,24 @@ async function handle(req: NextRequest, ctx: RouteContext<"/api/proxy/[...path]"
 
   let upstream: Response;
   try {
-    if (!access) await renew();
-    if (!access && !isPublic(path)) {
-      return unauthenticated(sessionEnded);
-    }
     upstream = await send();
-    if (upstream.status === 401 && refresh && !renewed && !sessionEnded) {
+    if (upstream.status === 401 && refresh && !renewed && !sessionEnded && (await sessionRefused(upstream))) {
       await upstream.body?.cancel();
+      // The refresh token came with the request. After RECENT_MS another
+      // request may have spent it and its cached answer is gone; presenting
+      // it then would revoke the session. Ask for a retry instead, which
+      // carries the browser's current cookies.
+      if (Date.now() - arrived > RECENT_MS) return renewalUnavailable();
       // The 401's body is gone now; when the session cannot be renewed
       // (revoked, expired), answer with our own 401.
       if (!(await renew())) return unauthenticated(true);
       upstream = await send();
     }
+    // Only the API's word that the token or session is no longer valid ends
+    // the session; a refused password or SSO check is passed on as it is.
+    if (upstream.status === 401 && !isPublic(path) && (await sessionRefused(upstream))) sessionEnded = true;
   } catch (error) {
+    if (error instanceof RefreshUnavailable) return refreshFailed(error, where);
     logServerError("upstream_unreachable", { where, error: String(error) });
     return NextResponse.json(
       { error: "the storage API could not be reached", code: "upstream_unreachable" },
@@ -173,7 +193,6 @@ async function handle(req: NextRequest, ctx: RouteContext<"/api/proxy/[...path]"
     );
   }
 
-  if (upstream.status === 401 && !isPublic(path)) sessionEnded = true;
   if (upstream.status >= 500) return hideServerFailure(upstream, where);
 
   const responseHeaders = new Headers();
@@ -188,9 +207,38 @@ async function handle(req: NextRequest, ctx: RouteContext<"/api/proxy/[...path]"
     status: upstream.status,
     headers: responseHeaders,
   });
-  if (renewed) setSessionCookies(res, renewed);
+  // A session the API refused even with renewed tokens is over: clear, never set.
   if (sessionEnded) clearSessionCookies(res);
+  else if (renewed) setSessionCookies(res, renewed);
   return res;
+}
+
+// The API's 401 codes for a token or session it no longer accepts. The bare
+// "authentication required" 401s some handlers send mean the same.
+const SESSION_REFUSED_CODES = new Set(["unauthenticated", "refresh_reused"]);
+
+async function sessionRefused(res: Response) {
+  let code: unknown;
+  try {
+    code = (await res.clone().json()).code;
+  } catch {
+    // not JSON, so no code
+  }
+  return typeof code !== "string" || SESSION_REFUSED_CODES.has(code);
+}
+
+// A refresh that got no answer is not presented again for a short while (see
+// RefreshUnavailable), so the browser keeps its cookies and is asked to retry.
+function refreshFailed(error: unknown, where: string) {
+  logServerError("refresh_unavailable", { where, error: String(error) });
+  return renewalUnavailable();
+}
+
+function renewalUnavailable() {
+  return NextResponse.json(
+    { error: "the session could not be renewed just now; try again", code: "refresh_unavailable" },
+    { status: 503, headers: { "retry-after": String(Math.ceil(RECENT_MS / 1000)) } },
+  );
 }
 
 function unauthenticated(clear: boolean) {

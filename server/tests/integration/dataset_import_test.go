@@ -7,8 +7,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/sanjeev0303/object-storage-platform/internal/catalogbench"
@@ -348,5 +350,72 @@ func TestManifestImportCancellation(t *testing.T) {
 	}
 	if got = s.importOf(t, dev, d.ID, waiting.ID); got.State != model.ImportCancelled {
 		t.Fatalf("import of an archived dataset: %+v", got)
+	}
+}
+
+// A worker stopped in the middle of an import gives the import back with
+// its attempt not counted, so restarts cannot use up its retries; and each
+// claim holds the lease under an owner of its own.
+func TestShutdownDoesNotUseUpAnImportAttempt(t *testing.T) {
+	s := openSecurityStack(t, nil)
+	ctx := context.Background()
+	acme := s.team(t, "ds-shutdown")
+	dev := acme.developer
+	const objects = 20
+	if _, err := catalogbench.Populate(ctx, s.db.Pool, catalogbench.Spec{
+		TenantID: acme.org.ID, Objects: objects, VersionsPerObject: 1, Datasets: 1, BatchSize: objects, Base: time.Now(),
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var manifest bytes.Buffer
+	for i := range objects {
+		fmt.Fprintf(&manifest, "{\"object_id\":\"obj-%s-%d\"}\n", acme.org.ID, i)
+	}
+	body := manifest.Bytes()
+	sum := sha256.Sum256(body)
+	d := s.newDataset(t, dev, "shutdown")
+	imp, _, _, err := s.datasets.StageImport(ctx, dev, d.ID, datasetservice.ImportInput{
+		IdempotencyKey: "shutdown-1", SizeBytes: int64(len(body)), SHA256: hex.EncodeToString(sum[:]),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.ie.storage.PutObject(imp.ManifestKey, body)
+	if _, err := s.datasets.SubmitImport(ctx, dev, d.ID, imp.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// The worker is told to stop just as it starts reading the manifest.
+	runCtx, stop := context.WithCancel(ctx)
+	var leaseOwner string
+	s.ie.storage.WrapRange = func(readCtx context.Context, body io.ReadCloser) io.ReadCloser {
+		_ = s.db.Pool.QueryRow(ctx, `SELECT lease_owner FROM dataset_manifest_imports WHERE id = $1`, imp.ID).Scan(&leaseOwner)
+		stop()
+		body.Close()
+		return io.NopCloser(iotest.ErrReader(readCtx.Err()))
+	}
+	note, err := s.newDatasetService(t, nil).RunImport(runCtx, "worker-a", acme.org.ID, imp.ID)
+	s.ie.storage.WrapRange = nil
+	if err != nil || note != "interrupted by shutdown" {
+		t.Fatalf("interrupted run: %q %v", note, err)
+	}
+	if !strings.HasPrefix(leaseOwner, "worker-a#") {
+		t.Fatalf("the claim's owner is the worker's own, per claim: %q", leaseOwner)
+	}
+	var attempts int
+	var owner *string
+	if err := s.db.Pool.QueryRow(ctx, `SELECT attempts, lease_owner FROM dataset_manifest_imports WHERE id = $1`, imp.ID).Scan(&attempts, &owner); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 0 || owner != nil {
+		t.Fatalf("after shutdown: %d attempts, lease owner %v", attempts, owner)
+	}
+
+	// The next worker can take it at once, with no backoff, and finishes it.
+	if note, err := s.newDatasetService(t, nil).RunImport(ctx, "worker-b", acme.org.ID, imp.ID); err != nil || !strings.Contains(note, "completed") {
+		t.Fatalf("after the restart: %q %v", note, err)
+	}
+	if imp = s.importOf(t, dev, d.ID, imp.ID); imp.State != model.ImportCompleted || imp.MembersAdded != objects {
+		t.Fatalf("after the restart: %+v", imp)
 	}
 }

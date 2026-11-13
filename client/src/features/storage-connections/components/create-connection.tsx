@@ -346,8 +346,12 @@ function Created({ connection, onAnother }: { connection: StorageConnection; onA
     <div className="flex max-w-3xl flex-col gap-6">
       <Panel
         title={connection.name}
-        actions={<StateBadge>{connection.status === "PENDING" ? "Pending" : connection.status}</StateBadge>}
-        description="The connection exists but has not been tested. It cannot take uploads until a test passes."
+        actions={<StateBadge>{result?.ok ? "Active" : connection.status === "PENDING" ? "Pending" : connection.status}</StateBadge>}
+        description={
+          result?.ok
+            ? "The connection passed its test and can take uploads."
+            : "The connection exists but has not been tested. It cannot take uploads until a test passes."
+        }
       >
         <h3 className="text-md font-semibold">Test the connection</h3>
         <p className="mt-1 max-w-prose text-base text-muted">

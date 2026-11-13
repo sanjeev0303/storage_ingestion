@@ -82,6 +82,9 @@ func inspectPDF(ctx context.Context, f *os.File, size int64, in *inspection) err
 	budget := int64(pdfInflatedBudget)
 	dict := make([]byte, pdfDictLookback)
 	for start := range starts {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if budget <= 0 {
 			in.note("PDF content checked in %d MiB of decompressed streams; the rest were not", pdfInflatedBudget>>20)
 			break
@@ -93,24 +96,16 @@ func inspectPDF(ctx context.Context, f *os.File, size int64, in *inspection) err
 		if !ok {
 			continue // an image or crypt filter
 		}
-		body := io.NewSectionReader(f, start, size-start)
+		// Each stream is charged what it read as well as what it decoded,
+		// failed decodes included: a stream that reads to the end of the
+		// file and fails would otherwise cost nothing, 20000 times over.
+		body := &countingReader{r: io.NewSectionReader(f, start, size-start)}
 		limit := min(pdfStreamLimit, budget)
-		var decoded []byte
-		if filters == nil {
-			// No /Filter where we looked: try Flate, as most streams are.
-			zr, err := zlib.NewReader(body)
-			if err != nil {
-				continue
-			}
-			decoded, _ = io.ReadAll(io.LimitReader(zr, limit))
-			zr.Close()
-		} else {
-			var err error
-			if decoded, err = pdfDecode(body, filters, earlyChange, limit); err != nil {
-				continue
-			}
+		decoded, err := pdfDecodeStream(body, filters, earlyChange, limit)
+		budget -= max(int64(len(decoded)), body.n)
+		if err != nil {
+			continue
 		}
-		budget -= int64(len(decoded))
 		pdfCollectNames(decoded, names)
 	}
 
@@ -132,6 +127,21 @@ func pdfCollectNames(data []byte, names map[string]bool) {
 }
 
 // pdfDecodeName undoes #xx escapes in a PDF name.
+// pdfDecodeStream decodes one stream with its filters, or with Flate when
+// no /Filter was found, as most streams are.
+func pdfDecodeStream(body io.Reader, filters []string, earlyChange int, limit int64) ([]byte, error) {
+	if filters != nil {
+		return pdfDecode(body, filters, earlyChange, limit)
+	}
+	zr, err := zlib.NewReader(body)
+	if err != nil {
+		return nil, err
+	}
+	defer zr.Close()
+	decoded, _ := io.ReadAll(io.LimitReader(zr, limit))
+	return decoded, nil
+}
+
 func pdfDecodeName(raw []byte) string {
 	if !bytes.Contains(raw, []byte("#")) {
 		return string(raw)

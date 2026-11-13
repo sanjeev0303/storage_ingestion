@@ -1,0 +1,6 @@
+# Copy to backend.hcl (git-ignored) and fill in from the bootstrap stack's
+# outputs, or let scripts/bootstrap-state.sh write it. Then:
+#   terraform init -backend-config=backend.hcl
+bucket     = "REPLACE_WITH_STATE_BUCKET"
+region     = "ap-southeast-1"
+kms_key_id = "arn:aws:kms:ap-southeast-1:123456789012:key/REPLACE_WITH_KEY_ID"

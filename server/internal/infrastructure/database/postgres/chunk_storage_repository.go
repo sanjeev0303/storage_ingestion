@@ -117,23 +117,11 @@ func (r *PackRepository) releaseChunks(ctx context.Context, tenantID, assetID st
 		tenantID, assetID, now); err != nil {
 		return false, fmt.Errorf("release chunked asset: %w", err)
 	}
-	rows, err := tx.Query(ctx, `DELETE FROM chunk_refs WHERE tenant_id = $1 AND asset_id = $2 RETURNING connection_id, chunk_sha256`, tenantID, assetID)
-	if err != nil {
+	// No RETURNING: the released refs were read into a slice nobody used,
+	// one row per chunk sent and held for nothing (staticcheck SA4010). What
+	// is waiting is worked out from the chunks' own state below.
+	if _, err := tx.Exec(ctx, `DELETE FROM chunk_refs WHERE tenant_id = $1 AND asset_id = $2`, tenantID, assetID); err != nil {
 		return false, fmt.Errorf("release chunks: %w", err)
-	}
-	type ref struct{ connection, sha string }
-	var refs []ref
-	for rows.Next() {
-		var x ref
-		if err := rows.Scan(&x.connection, &x.sha); err != nil {
-			rows.Close()
-			return false, err
-		}
-		refs = append(refs, x)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, err
@@ -221,22 +209,39 @@ func (r *ChunkStorageRepository) SharedBytes(ctx context.Context, tenantID, sha 
 	return n, err
 }
 
-func (r *ChunkStorageRepository) mark(ctx context.Context, c ChunkCandidate, state, reason string, now time.Time) error {
-	_, err := r.db.Pool.Exec(ctx, `INSERT INTO chunked_assets (asset_id, tenant_id, connection_id, file_sha256, state, reason, source_key, source_etag, checked_at)
+// ErrChunkStateChanged: the asset's chunk state moved on since it was read
+// (published, rehydrating or released by someone else); leave it.
+var ErrChunkStateChanged = errors.New("the asset's chunk state changed")
+
+// mark records a conversion's state, and says whether it did: only an asset
+// never looked at, SKIPPED or WRITING is the conversion's to change. A
+// published, rehydrating or released one is never moved back by a stale pass.
+func mark(ctx context.Context, q execer, c ChunkCandidate, state, reason string, now time.Time) (bool, error) {
+	tag, err := q.Exec(ctx, `INSERT INTO chunked_assets (asset_id, tenant_id, connection_id, file_sha256, state, reason, source_key, source_etag, checked_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		ON CONFLICT (asset_id) DO UPDATE SET state = $5, reason = $6, checked_at = $9`,
+		ON CONFLICT (asset_id) DO UPDATE SET state = $5, reason = $6, checked_at = $9
+		WHERE chunked_assets.state IN ('SKIPPED', 'WRITING')`,
 		c.AssetID, c.TenantID, c.ConnectionID, c.SHA256, state, reason, c.ObjectKey, c.ETag, now)
-	return err
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // Skip records that an asset was looked at and left whole.
 func (r *ChunkStorageRepository) Skip(ctx context.Context, c ChunkCandidate, reason string, now time.Time) error {
-	return r.mark(ctx, c, "SKIPPED", reason, now)
+	_, err := mark(ctx, r.db.Pool, c, "SKIPPED", reason, now)
+	return err
 }
 
-// StartWriting records that chunks are being written for an asset.
+// StartWriting records that chunks are being written for an asset, or
+// answers ErrChunkStateChanged when the asset is no longer this pass's.
 func (r *ChunkStorageRepository) StartWriting(ctx context.Context, c ChunkCandidate, now time.Time) error {
-	return r.mark(ctx, c, "WRITING", "", now)
+	ok, err := mark(ctx, r.db.Pool, c, "WRITING", "", now)
+	if err == nil && !ok {
+		return ErrChunkStateChanged
+	}
+	return err
 }
 
 // FileChunks answers a file's chunks in order.
@@ -307,12 +312,22 @@ func (r *ChunkStorageRepository) Publish(ctx context.Context, c ChunkCandidate, 
 	return tag.RowsAffected() == 1, nil
 }
 
-// Abandon takes an asset off its chunks after a conversion that cannot finish.
+// Abandon takes an asset off its chunks after a conversion that cannot
+// finish. An asset someone else has published meanwhile keeps its chunks.
 func (r *ChunkStorageRepository) Abandon(ctx context.Context, c ChunkCandidate, reason string, now time.Time) error {
-	if _, err := r.db.Pool.Exec(ctx, `DELETE FROM chunk_refs WHERE tenant_id = $1 AND asset_id = $2`, c.TenantID, c.AssetID); err != nil {
+	tx, err := r.db.Pool.Begin(ctx)
+	if err != nil {
 		return err
 	}
-	return r.mark(ctx, c, "SKIPPED", reason, now)
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	ok, err := mark(ctx, tx, c, "SKIPPED", reason, now)
+	if err != nil || !ok {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM chunk_refs WHERE tenant_id = $1 AND asset_id = $2`, c.TenantID, c.AssetID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // ChunkSource is a published chunked asset whose original object may go.
@@ -349,8 +364,11 @@ func (r *ChunkStorageRepository) SourcesToRetire(ctx context.Context, before tim
 	return out, rows.Err()
 }
 
+// MarkSourceRetired records that the original object is gone, while the
+// asset is still read from its chunks: a rehydration needs to know it.
 func (r *ChunkStorageRepository) MarkSourceRetired(ctx context.Context, tenantID, assetID string, now time.Time) error {
-	_, err := r.db.Pool.Exec(ctx, `UPDATE chunked_assets SET source_retired_at = $3 WHERE tenant_id = $1 AND asset_id = $2`, tenantID, assetID, now)
+	_, err := r.db.Pool.Exec(ctx, `UPDATE chunked_assets SET source_retired_at = $3
+		WHERE tenant_id = $1 AND asset_id = $2 AND state IN ('PUBLISHED', 'REHYDRATING') AND source_retired_at IS NULL`, tenantID, assetID, now)
 	return err
 }
 
@@ -377,20 +395,27 @@ func (r *ChunkStorageRepository) ToRehydrate(ctx context.Context, limit int) ([]
 
 // Rehydrated points the asset at its object again, if one was written, and
 // takes it off its chunks, all or none. An asset rehydrated is not chunked again.
+// Only a rehydration finishes this way, and one that wrote nothing only while
+// the original is still there (ErrChunkStateChanged otherwise).
 func (r *ChunkStorageRepository) Rehydrated(ctx context.Context, s ChunkSource, wrote bool, etag, versionID string, now time.Time) error {
 	tx, err := r.db.Pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+	tag, err := tx.Exec(ctx, `UPDATE chunked_assets SET state = 'RELEASED', released_at = $3
+		WHERE tenant_id = $1 AND asset_id = $2 AND state = 'REHYDRATING' AND ($4 OR source_retired_at IS NULL)`, s.TenantID, s.AssetID, now, wrote)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrChunkStateChanged
+	}
 	if wrote {
 		if _, err := tx.Exec(ctx, `UPDATE assets SET storage_etag = $3, storage_version_id = NULLIF($4, ''), updated_at = $5 WHERE tenant_id = $1 AND id = $2`,
 			s.TenantID, s.AssetID, etag, versionID, now); err != nil {
 			return fmt.Errorf("point the asset at its object: %w", err)
 		}
-	}
-	if _, err := tx.Exec(ctx, `UPDATE chunked_assets SET state = 'RELEASED', released_at = $3 WHERE tenant_id = $1 AND asset_id = $2`, s.TenantID, s.AssetID, now); err != nil {
-		return err
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM chunk_refs WHERE tenant_id = $1 AND asset_id = $2`, s.TenantID, s.AssetID); err != nil {
 		return err

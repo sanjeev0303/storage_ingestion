@@ -84,13 +84,24 @@ type TierCandidate struct {
 	Provider StorageProviderType
 }
 
+// Restore states: PENDING -> RESTORING -> READY -> EXPIRED, and FAILED from
+// PENDING or RESTORING. PENDING may go straight to READY when there is
+// nothing to restore.
+const (
+	RestorePending   = "PENDING"
+	RestoreRestoring = "RESTORING"
+	RestoreReady     = "READY"
+	RestoreFailed    = "FAILED"
+	RestoreExpired   = "EXPIRED"
+)
+
 // ArchiveRestore is a temporary readable copy of an archived asset.
 type ArchiveRestore struct {
 	ID            string       `json:"id"`
 	TenantID      string       `json:"-"`
 	AssetID       string       `json:"asset_id"`
 	VersionID     string       `json:"version_id,omitempty"`
-	State         string       `json:"state"` // PENDING, RESTORING, READY, FAILED, EXPIRED
+	State         string       `json:"state"` // RestorePending, RestoreRestoring, ...
 	Days          int          `json:"days"`
 	Speed         RestoreSpeed `json:"speed"`
 	Error         string       `json:"error,omitempty"`

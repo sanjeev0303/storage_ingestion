@@ -2,7 +2,6 @@ package adoption
 
 import (
 	"bufio"
-	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/md5"
@@ -15,12 +14,14 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os"
 	"path"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/sanjeev0303/object-storage-platform/internal/model"
+	"github.com/sanjeev0303/object-storage-platform/internal/platform/csvlimit"
 )
 
 // A source is read into entries, numbered in the order read. An entry the
@@ -219,15 +220,16 @@ func readInventory(ctx context.Context, r objectReader, manifestKey, bucket stri
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		raw, err := readChecked(ctx, r, f.Key, f.MD5Checksum)
+		spool, err := spoolChecked(ctx, r, f.Key, f.MD5Checksum)
 		if err != nil {
 			return err
 		}
 		if format == "PARQUET" {
-			err = inventoryParquet(ctx, raw, emit)
+			err = inventoryParquet(ctx, spool, emit)
 		} else {
-			err = inventoryCSV(raw, m.FileSchema, emit)
+			err = inventoryCSV(spool, m.FileSchema, emit)
 		}
+		discardSpool(spool)
 		if err != nil {
 			return fmt.Errorf("inventory file %s: %w", f.Key, err)
 		}
@@ -237,7 +239,7 @@ func readInventory(ctx context.Context, r objectReader, manifestKey, bucket stri
 
 // inventoryCSV reads a gzipped CSV data file, whose columns the manifest's
 // fileSchema names.
-func inventoryCSV(raw []byte, schema string, emit func(inventoryRow) error) error {
+func inventoryCSV(data io.Reader, schema string, emit func(inventoryRow) error) error {
 	column := map[string]int{}
 	for i, name := range strings.Split(schema, ",") {
 		column[strings.TrimSpace(name)] = i
@@ -251,11 +253,11 @@ func inventoryCSV(raw []byte, schema string, emit func(inventoryRow) error) erro
 		}
 		return ""
 	}
-	zr, err := gzip.NewReader(bytes.NewReader(raw))
+	zr, err := gzip.NewReader(data)
 	if err != nil {
 		return err
 	}
-	rows := csv.NewReader(zr)
+	rows := csv.NewReader(csvlimit.Reader(zr, maxSourceLine))
 	rows.FieldsPerRecord = -1
 	for {
 		row, err := rows.Read()
@@ -273,25 +275,49 @@ func inventoryCSV(raw []byte, schema string, emit func(inventoryRow) error) erro
 	}
 }
 
-// readChecked reads a small object whole (an inventory data file) and
-// checks its MD5 when the report gives one.
-func readChecked(ctx context.Context, r objectReader, key, wantMD5 string) ([]byte, error) {
+// maxInventoryFile caps one inventory data file (a variable so a test can lower it).
+var maxInventoryFile int64 = 1 << 30
+
+// spoolChecked copies an inventory data file to a temporary file, hashing it
+// on the way, and checks its MD5 when the report gives one. The rows are
+// parsed only after the check, as before, but the file now sits on disk
+// rather than in memory: a run used to hold up to 1 GiB per data file. The
+// caller hands the file back to discardSpool.
+//
+// A file over the cap is refused. The old reader stopped at the cap and,
+// without an MD5 to catch it, parsed the truncated file as if it were whole.
+func spoolChecked(ctx context.Context, r objectReader, key, wantMD5 string) (*os.File, error) {
 	body, err := r.Open(ctx, key)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", key, err)
 	}
 	defer body.Close()
-	raw, err := io.ReadAll(io.LimitReader(body, 1<<30))
+	spool, err := os.CreateTemp("", "inventory-*")
 	if err != nil {
+		return nil, fmt.Errorf("spool %s: %w", key, err)
+	}
+	hash := md5.New()
+	n, err := io.Copy(io.MultiWriter(spool, hash), io.LimitReader(body, maxInventoryFile+1))
+	if err == nil && n > maxInventoryFile {
+		err = fmt.Errorf("%s is larger than %d bytes", key, maxInventoryFile)
+	}
+	if err == nil && wantMD5 != "" && !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), wantMD5) {
+		err = fmt.Errorf("%s does not match the MD5 the report gives", key)
+	}
+	if err == nil {
+		_, err = spool.Seek(0, io.SeekStart)
+	}
+	if err != nil {
+		discardSpool(spool)
 		return nil, fmt.Errorf("read %s: %w", key, err)
 	}
-	if wantMD5 != "" {
-		sum := md5.Sum(raw)
-		if !strings.EqualFold(hex.EncodeToString(sum[:]), wantMD5) {
-			return nil, fmt.Errorf("%s does not match the MD5 the report gives", key)
-		}
-	}
-	return raw, nil
+	return spool, nil
+}
+
+// discardSpool closes and removes a file spoolChecked made.
+func discardSpool(f *os.File) {
+	f.Close()
+	os.Remove(f.Name())
 }
 
 // ─── ASC MHL ─────────────────────────────────────────────────────────

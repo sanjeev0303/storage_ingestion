@@ -56,6 +56,11 @@ func (r *AssetRepository) Create(ctx context.Context, asset *model.Asset) error 
 	return nil
 }
 
+// assetUsableStatus is an asset's status (alias a) as a reader deciding
+// whether to use it should see it: an AVAILABLE asset a check after
+// publication blocked reads as BLOCKED (model.AssetStatusBlocked).
+const assetUsableStatus = `CASE WHEN a.status = 'AVAILABLE' AND a.blocked_reason IS NOT NULL THEN 'BLOCKED' ELSE a.status END`
+
 const assetColumns = `
 	id, tenant_id, owner_id, upload_id, object_key, file_name,
 	content_type, size_bytes, COALESCE(checksum_sha256, ''), status,

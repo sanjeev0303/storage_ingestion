@@ -134,25 +134,40 @@ func (r *EdgeRepository) Recordings(ctx context.Context, tenantID, deviceID stri
 }
 
 // AddChunk records a chunk once: sent again with the same bytes it changes
-// nothing, with other bytes it is refused.
+// nothing, with other bytes it is refused. A COMPLETE recording takes no
+// new chunk. The recording's share lock makes a close that is completing
+// it wait for this chunk, or this chunk wait for the close.
 func (r *EdgeRepository) AddChunk(ctx context.Context, tenantID, recordingID string, c model.EdgeChunk) error {
-	tag, err := r.db.Pool.Exec(ctx, `INSERT INTO edge_chunks (recording_id, tenant_id, path, sha256, size_bytes, starts_at, ends_at, added_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (recording_id, path) DO NOTHING`,
-		recordingID, tenantID, c.Path, c.SHA256, c.SizeBytes, c.StartsAt, c.EndsAt, c.AddedAt)
-	if err != nil {
-		return fmt.Errorf("add chunk: %w", err)
-	}
-	if tag.RowsAffected() == 1 {
+	return withTx(ctx, r.db, func(tx pgx.Tx) error {
+		var state string
+		err := tx.QueryRow(ctx, `SELECT state FROM edge_recordings WHERE id = $1 AND tenant_id = $2 FOR SHARE`, recordingID, tenantID).Scan(&state)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.ErrDeviceNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("lock recording: %w", err)
+		}
+		if state == model.RecordingComplete {
+			return model.ErrRecordingComplete
+		}
+		tag, err := tx.Exec(ctx, `INSERT INTO edge_chunks (recording_id, tenant_id, path, sha256, size_bytes, starts_at, ends_at, added_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (recording_id, path) DO NOTHING`,
+			recordingID, tenantID, c.Path, c.SHA256, c.SizeBytes, c.StartsAt, c.EndsAt, c.AddedAt)
+		if err != nil {
+			return fmt.Errorf("add chunk: %w", err)
+		}
+		if tag.RowsAffected() == 1 {
+			return nil
+		}
+		var existing string
+		if err := tx.QueryRow(ctx, `SELECT sha256 FROM edge_chunks WHERE recording_id = $1 AND path = $2`, recordingID, c.Path).Scan(&existing); err != nil {
+			return err
+		}
+		if existing != c.SHA256 {
+			return model.ErrChunkDiffers
+		}
 		return nil
-	}
-	var existing string
-	if err := r.db.Pool.QueryRow(ctx, `SELECT sha256 FROM edge_chunks WHERE recording_id = $1 AND path = $2`, recordingID, c.Path).Scan(&existing); err != nil {
-		return err
-	}
-	if existing != c.SHA256 {
-		return model.ErrChunkDiffers
-	}
-	return nil
+	})
 }
 
 func (r *EdgeRepository) Chunks(ctx context.Context, tenantID, recordingID string) ([]model.EdgeChunk, error) {
@@ -176,10 +191,10 @@ func (r *EdgeRepository) Chunks(ctx context.Context, tenantID, recordingID strin
 // FileAt finds the version of a path with these bytes.
 func (r *EdgeRepository) FileAt(ctx context.Context, tenantID, namespace, path, sha256 string) (model.EdgeFile, bool, error) {
 	var f model.EdgeFile
-	err := r.db.Pool.QueryRow(ctx, `SELECT a.id, a.object_id, a.status, COALESCE(a.rejection_reason, '') FROM assets a
+	err := r.db.Pool.QueryRow(ctx, `SELECT a.id, a.object_id, `+assetUsableStatus+`, COALESCE(a.blocked_reason, a.rejection_reason, '') FROM assets a
 		JOIN catalog_objects o ON o.tenant_id = a.tenant_id AND o.id = a.object_id
 		WHERE a.tenant_id = $1 AND a.dataset = $2 AND o.path = $3 AND a.checksum_sha256 = $4 AND a.status <> 'DELETED'
-		ORDER BY (a.status = 'AVAILABLE') DESC, a.created_at DESC LIMIT 1`, tenantID, namespace, path, sha256).Scan(&f.AssetID, &f.ObjectID, &f.Status, &f.Reason)
+		ORDER BY (a.status = 'AVAILABLE' AND a.blocked_reason IS NULL) DESC, a.created_at DESC LIMIT 1`, tenantID, namespace, path, sha256).Scan(&f.AssetID, &f.ObjectID, &f.Status, &f.Reason)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return f, false, nil
 	}
@@ -189,18 +204,40 @@ func (r *EdgeRepository) FileAt(ctx context.Context, tenantID, namespace, path, 
 	return f, true, nil
 }
 
-// CloseRecording records how a recording ended.
-func (r *EdgeRepository) CloseRecording(ctx context.Context, e model.EdgeRecording) error {
+// CloseRecording records how a recording ended. COMPLETE is final: a close
+// that read the recording before another completed it changes nothing and
+// gets ErrRecordingComplete. INCOMPLETE may be closed again. A COMPLETE
+// close names how many chunks it read; when a chunk arrived since, nothing
+// changes and it gets ErrRecordingChanged.
+func (r *EdgeRepository) CloseRecording(ctx context.Context, e model.EdgeRecording, chunks int) error {
 	missing, err := json.Marshal(e.Missing)
 	if err != nil {
 		return err
 	}
-	_, err = r.db.Pool.Exec(ctx, `UPDATE edge_recordings SET state = $3, missing = $4, version_id = NULLIF($5, ''), closed_at = $6 WHERE tenant_id = $1 AND id = $2`,
-		e.TenantID, e.ID, e.State, missing, e.VersionID, e.ClosedAt)
-	if err != nil {
-		return fmt.Errorf("close recording: %w", err)
-	}
-	return nil
+	return withTx(ctx, r.db, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE edge_recordings SET state = $3, missing = $4, version_id = NULLIF($5, ''), closed_at = $6
+			WHERE tenant_id = $1 AND id = $2 AND state <> 'COMPLETE'`,
+			e.TenantID, e.ID, e.State, missing, e.VersionID, e.ClosedAt)
+		if err != nil {
+			return fmt.Errorf("close recording: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return model.ErrRecordingComplete
+		}
+		if e.State != model.RecordingComplete {
+			return nil
+		}
+		// Counted under the row lock the update took: a chunk added from
+		// here on waits for this close and then finds the recording COMPLETE.
+		var count int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM edge_chunks WHERE tenant_id = $1 AND recording_id = $2`, e.TenantID, e.ID).Scan(&count); err != nil {
+			return fmt.Errorf("count chunks: %w", err)
+		}
+		if count != chunks {
+			return model.ErrRecordingChanged
+		}
+		return nil
+	})
 }
 
 // QueueBackfill sends the webhook for a closed gap.

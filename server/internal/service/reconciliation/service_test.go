@@ -364,7 +364,7 @@ func TestWorkerRecoversALostCompletion(t *testing.T) {
 	}
 
 	session, _ := uploads.GetByID(ctx, "tenant-1", id)
-	if session.Status != model.UploadStatusCompleted || session.CanPromote() {
+	if session.Status != model.UploadStatusCompleted {
 		t.Fatalf("expected COMPLETED and not promotable, got %s (%s)", session.Status, session.FailureReason)
 	}
 	if len(tasks.Tasks()) != 1 {

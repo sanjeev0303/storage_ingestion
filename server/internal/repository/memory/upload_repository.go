@@ -204,31 +204,6 @@ func (r *UploadRepository) CreateWithIdempotency(
 	return nil
 }
 
-// Update replaces the stored session after checking tenant ownership
-func (r *UploadRepository) Update(
-	ctx context.Context,
-	upload *model.UploadSession,
-) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	if upload == nil {
-		return errors.New("upload session must not be nil")
-	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	current, exists := r.uploads[upload.ID]
-	if !exists || current.TenantID != upload.TenantID {
-		return model.ErrUploadNotFound
-	}
-
-	r.uploads[upload.ID] = *upload
-	return nil
-}
-
 // TransitionStatus mirrors the PostgreSQL compare-and-set under the lock.
 func (r *UploadRepository) TransitionStatus(
 	ctx context.Context,

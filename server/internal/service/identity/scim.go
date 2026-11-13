@@ -24,6 +24,9 @@ var (
 	ErrSCIMNotFound = errors.New("no such resource in this organization")
 	// ErrSCIMConflict: the user is already a member.
 	ErrSCIMConflict = errors.New("the user is already a member of this organization")
+	// ErrSCIMAccountExists: the email has an account, which joins by
+	// accepting an invitation, not by provisioning.
+	ErrSCIMAccountExists = errors.New("an account with this email already exists: invite it from the console so its holder accepts")
 	// ErrSCIMOwner: SCIM may not change owners.
 	ErrSCIMOwner = errors.New("SCIM does not change owners or give the owner role; do it in the console")
 )
@@ -192,10 +195,11 @@ func (s *Service) SCIMUser(ctx context.Context, p model.Principal, userID string
 	return SCIMUser{User: user, Member: member}, err
 }
 
-// SCIMCreateUser makes the person a member: an existing account joins; a
-// new one is made without a password, to sign in through the
-// organization's identity provider. The role is the SSO connection's
-// default role, or developer.
+// SCIMCreateUser makes the person a member with a new account, made
+// without a password, to sign in through the organization's identity
+// provider. An existing account is never added: whoever holds it might not
+// be the directory's person, so it joins by accepting an invitation. The
+// role is the SSO connection's default role, or developer.
 func (s *Service) SCIMCreateUser(ctx context.Context, p model.Principal, userName, displayName string, active bool) (SCIMUser, error) {
 	email, err := normalizeEmail(userName)
 	if err != nil {
@@ -228,6 +232,7 @@ func (s *Service) SCIMCreateUser(ctx context.Context, p model.Principal, userNam
 		if _, _, _, err := s.deps.Tenancy.Access(ctx, p.TenantID, user.ID); err == nil {
 			return SCIMUser{}, ErrSCIMConflict
 		}
+		return SCIMUser{}, ErrSCIMAccountExists
 	}
 	status := model.MembershipActive
 	if !active {

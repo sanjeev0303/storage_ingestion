@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -78,7 +79,11 @@ func (r *ContentCheckRepository) RecordCoverage(ctx context.Context, jobID, cove
 
 // ClaimStaleScans claims published assets whose CLEAN verdict came from
 // other signatures than version, for one re-scan each. A claim lasts an
-// hour: a re-scan that fails is tried again after it.
+// hour: a re-scan that fails is tried again after it. Archived assets wait
+// until they are restored: their bytes cannot be read before, and a re-scan
+// that cannot read would be claimed and fail every hour.
+// ponytail: also skips archive tiers that read directly (GCS, Azure ARCHIVE);
+// join the connection's provider if those must be re-scanned while archived.
 func (r *ContentCheckRepository) ClaimStaleScans(ctx context.Context, scanner, version string, now time.Time, limit int) ([]model.StaleScan, error) {
 	rows, err := r.db.Pool.Query(ctx, `
 		UPDATE processing_jobs AS pj SET rescanned_at = $3::timestamptz
@@ -87,6 +92,7 @@ func (r *ContentCheckRepository) ClaimStaleScans(ctx context.Context, scanner, v
 			JOIN assets AS a ON a.id = j.asset_id AND a.tenant_id = j.tenant_id
 			WHERE j.scan_result = 'CLEAN' AND j.scanner = $1::text AND j.scanner_version IS DISTINCT FROM $2::text
 			  AND a.status = 'AVAILABLE'
+			  AND (a.storage_tier IN ('STANDARD', 'INFREQUENT') OR a.readable_until > $3::timestamptz)
 			  AND (j.rescanned_at IS NULL OR j.rescanned_at < $3::timestamptz - interval '1 hour')
 			ORDER BY j.id
 			LIMIT $4
@@ -131,6 +137,28 @@ func (r *ContentCheckRepository) BlockAsset(ctx context.Context, tenantID, asset
 		return fmt.Errorf("block asset: %w", err)
 	}
 	return nil
+}
+
+// UnblockAsset clears a block and answers the reason it had. An asset that
+// is not blocked answers model.ErrAssetNotBlocked, so two operators clearing
+// the same block record one clearing.
+func (r *ContentCheckRepository) UnblockAsset(ctx context.Context, tenantID, assetID string, at time.Time) (string, error) {
+	var reason string
+	err := r.db.Pool.QueryRow(ctx, `
+		UPDATE assets a SET blocked_reason = NULL, blocked_at = NULL, updated_at = $3
+		FROM (SELECT id, blocked_reason FROM assets WHERE tenant_id = $1 AND id = $2 AND blocked_reason IS NOT NULL FOR UPDATE) old
+		WHERE a.id = old.id
+		RETURNING old.blocked_reason`, tenantID, assetID, at).Scan(&reason)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if _, err := NewAssetRepository(r.db).GetByID(ctx, tenantID, assetID); err != nil {
+			return "", err
+		}
+		return "", model.ErrAssetNotBlocked
+	}
+	if err != nil {
+		return "", fmt.Errorf("unblock asset: %w", err)
+	}
+	return reason, nil
 }
 
 // MarkRescanInfected records that a re-scan found malware. The signature

@@ -7,6 +7,7 @@ import { Panel } from "@/components/ui/panel";
 import { Time } from "@/components/ui/time";
 import { api } from "@/lib/api/client";
 import { formatBytes } from "@/lib/utils/format";
+import { isSameFile } from "../engine/file-upload";
 import type { ResumeStore } from "../engine/store";
 import type { ResumeRecord } from "../types";
 
@@ -35,13 +36,11 @@ export function ResumePanel({ store, organizationId, runningIds, onResume }: Pro
   const shown = records.filter((record) => !runningIds.includes(record.upload_id));
   if (shown.length === 0) return null;
 
-  function choose(file: File | undefined) {
+  async function choose(file: File | undefined) {
     const record = picking.current;
     if (!file || !record) return;
 
-    const same =
-      file.name === record.request.file_name && file.size === record.file_size && file.lastModified === record.file_last_modified;
-    if (!same) {
+    if (!(await isSameFile(file, record))) {
       setMismatch(record.upload_id);
       return;
     }
@@ -60,18 +59,18 @@ export function ResumePanel({ store, organizationId, runningIds, onResume }: Pro
   return (
     <Panel
       title="Unfinished uploads"
-      description="Large uploads that stopped before they finished. Choose the same file again to continue."
+      description="Large uploads that stopped before they finished, for example when the tab closed. The browser cannot reopen a file on its own, so choose the same file again to continue."
     >
       <ul className="flex flex-col gap-4">
         {shown.map((record) => (
           <li key={record.upload_id} className="neo-in-sm p-3">
             <p className="font-medium [overflow-wrap:anywhere]">{record.request.file_name}</p>
             <p className="text-sm text-muted">
-              {formatBytes(record.file_size)}, {record.parts.length} parts confirmed. Session ends <Time value={record.expires_at} />
+              {formatBytes(record.file_size)}, {record.parts.length + (record.unconfirmed?.length ?? 0)} parts sent. Session ends <Time value={record.expires_at} />
             </p>
             {mismatch === record.upload_id && (
               <p role="alert" className="mt-1 text-sm font-medium">
-                That is not the same file. The name, size and last modified date must match the original.
+                That is not the same file. The name, size and first megabyte must match the original.
               </p>
             )}
             <div className="mt-2 flex flex-wrap gap-2">
@@ -89,10 +88,10 @@ export function ResumePanel({ store, organizationId, runningIds, onResume }: Pro
         ))}
       </ul>
       <p className="mt-3 text-sm text-muted">
-        The server keeps no list of uploaded parts, so only parts this browser confirmed are skipped. Sessions last about 30
-        minutes; after that the upload starts again from the beginning.
+        Only parts this browser sent are skipped, and each is checked with the server first. Sessions last about 30 minutes;
+        after that the upload starts again from the beginning.
       </p>
-      <input ref={input} hidden type="file" onChange={(event) => { choose(event.target.files?.[0]); event.target.value = ""; }} />
+      <input ref={input} hidden type="file" onChange={(event) => { void choose(event.target.files?.[0]); event.target.value = ""; }} />
 
       <ConfirmDialog
         open={discarding !== null}

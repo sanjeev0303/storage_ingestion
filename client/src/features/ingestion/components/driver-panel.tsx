@@ -1,7 +1,7 @@
 "use client";
 
 import { Pause, Play } from "@phosphor-icons/react";
-import { useRef, useState, type DragEvent } from "react";
+import { useEffect, useRef, useState, type DragEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/panel";
 import { Table, Td, Th } from "@/components/ui/table";
@@ -17,6 +17,7 @@ const CHECK_CAP = 5000;
 const END_TEXT = {
   finished: "Nothing is waiting to be uploaded right now. Files that are processing or waiting to retry move on by themselves. Press Start again if failed entries return to pending.",
   paused: "Paused. Started uploads finished first.",
+  stopped: "Stopped before finishing. Uploads that were under way return to the queue when their 15 minute lease runs out.",
   job_not_running: "The job is not accepting uploads any more.",
   unmatched: "Ten claimed entries in a row had no matching local file, so the loop stopped instead of claiming the whole job. Attach the right folder and press Start again. The unmatched entries return to the queue when their 15 minute lease runs out.",
 } as const;
@@ -64,7 +65,12 @@ export function DriverPanel({ job, canWrite }: { job: IngestionJob; canWrite: bo
     getFile: (entry) => findFile(index.current, entry),
   });
 
+  const checkAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => checkAbort.current?.abort(), []);
+
   function attach(next: FileIndex) {
+    // A check still running was for the old files.
+    checkAbort.current?.abort();
     index.current = next;
     setFileCount(next.size);
     setCheck(null);
@@ -73,18 +79,24 @@ export function DriverPanel({ job, canWrite }: { job: IngestionJob; canWrite: bo
   async function onDrop(event: DragEvent) {
     event.preventDefault();
     setDragging(false);
+    // Running uploads look their files up in the index; it must not change under them.
+    if (view.running) return;
     attach(await indexDroppedItems(event.dataTransfer.items));
   }
 
   async function runCheck() {
+    checkAbort.current?.abort();
+    const controller = new AbortController();
+    checkAbort.current = controller;
     setChecking(true);
     setCheckError(null);
     try {
-      setCheck(await checkMatches(job.id, index.current, new AbortController().signal));
+      const result = await checkMatches(job.id, index.current, controller.signal);
+      if (!controller.signal.aborted) setCheck(result);
     } catch (e) {
-      setCheckError(describeError(e));
+      if (!controller.signal.aborted) setCheckError(describeError(e));
     } finally {
-      setChecking(false);
+      if (checkAbort.current === controller) setChecking(false);
     }
   }
 

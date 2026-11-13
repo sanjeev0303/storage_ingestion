@@ -21,6 +21,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/retry"
 	reconciliationservice "github.com/sanjeev0303/object-storage-platform/internal/service/reconciliation"
 	uploadservice "github.com/sanjeev0303/object-storage-platform/internal/service/upload"
+	"github.com/sanjeev0303/object-storage-platform/internal/worker/heartbeat"
 	reconciliationworker "github.com/sanjeev0303/object-storage-platform/internal/worker/reconciliation"
 )
 
@@ -34,6 +35,7 @@ func main() {
 func run() error {
 	once := flag.Bool("once", false, "run a single reconciliation cycle, print its report as JSON and exit")
 	dryRun := flag.Bool("dry-run", false, "report what would be done without changing storage or the database")
+	requeue := flag.String("requeue", "", "give the EXHAUSTED reconciliation task with this ID a fresh attempt budget and exit")
 	flag.Parse()
 
 	cfg, err := config.Load()
@@ -59,6 +61,16 @@ func run() error {
 		return fmt.Errorf("connect to PostgreSQL: %w", err)
 	}
 	defer db.Close()
+
+	// An operator's way out for a task that ran out of attempts: the upload
+	// stays COMPLETING or ABORTING, holding its quota, until it is retried.
+	if *requeue != "" {
+		if err := postgres.NewReconciliationRepository(db).Requeue(startupCtx, *requeue, time.Now().UTC()); err != nil {
+			return fmt.Errorf("requeue task %s: %w", *requeue, err)
+		}
+		fmt.Printf("reconciliation task %s is PENDING again with a fresh attempt budget\n", *requeue)
+		return nil
+	}
 
 	storageConfig, err := s3storage.LoadConfig()
 	if err != nil {
@@ -173,6 +185,7 @@ func run() error {
 		"session_scan", workerCfg.SessionScan,
 		"delete_unrecorded", workerCfg.DeleteUnrecorded,
 	)
+	go heartbeat.Run(ctx, db, "reconciliation", owner, log)
 	reconciliationworker.Run(ctx, service, workerCfg.PollInterval, log)
 	log.Info("reconciliation worker stopped")
 

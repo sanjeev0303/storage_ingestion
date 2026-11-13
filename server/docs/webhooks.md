@@ -31,7 +31,7 @@ webhook-signature: v1,<base64 HMAC-SHA256>
 The signature follows [Standard Webhooks](https://www.standardwebhooks.com/). It is HMAC-SHA256 over `id.timestamp.body`, keyed with the bytes of the secret after `whsec_` (base64). Standard Webhooks libraries verify it as is. Reject a timestamp more than a few minutes old to stop replays, and deduplicate on `webhook-id`: delivery is at least once.
 
 - **Success:** any 2xx within 10 seconds.
-- **Retries:** after 10s, 1m, 5m, 30m, 2h, 6h, 12h and 24h; then the delivery is `FAILED`. `POST /webhooks/{id}/deliveries/{delivery}/retry` sends it again.
+- **Retries:** after 10s, 1m, 5m, 30m, 2h, 6h, 12h and 24h; then the delivery is `FAILED`. `POST /webhooks/{id}/deliveries/{delivery}/retry` sends it again, a `DELIVERED` one too. A delivery the worker is sending at that moment answers 409 `conflict`: try again once its attempt is recorded.
 - **Redirects:** not followed. A 3xx counts as a failure.
 - **Order:** not guaranteed between events.
 
@@ -53,10 +53,10 @@ The signature follows [Standard Webhooks](https://www.standardwebhooks.com/). It
 | `POST /api/v1/webhooks/{id}/rotate-secret` | a new secret, effective at once |
 | `POST /api/v1/webhooks/{id}/test` | queues a `webhook.test` event |
 | `GET /api/v1/webhooks/{id}/deliveries?status=&before=` | newest first, 50 a page (`next_before`) |
-| `POST /api/v1/webhooks/{id}/deliveries/{delivery}/retry` | send again from a fresh attempt count |
+| `POST /api/v1/webhooks/{id}/deliveries/{delivery}/retry` | send again from a fresh attempt count, whatever its status; 409 while it is being sent |
 
 At most 20 endpoints per organization. Secrets are sealed with the credential keyring (`STORAGE_CREDENTIAL_KEYS`). Without it, webhooks answer 501 and the worker does not start. The audit log records changes with the URL's host only, since a path or query can carry a receiver's token.
 
 ## Worker
 
-`webhook-worker` claims due deliveries under a one-minute lease (`FOR UPDATE SKIP LOCKED`), so several can run. A `NOTIFY` from the trigger wakes it as soon as a delivery commits; it also polls every `WEBHOOK_POLL_INTERVAL` (5s). `WEBHOOK_CONCURRENCY` (16) bounds sends in flight.
+`webhook-worker` claims due deliveries under a one-minute lease (`FOR UPDATE SKIP LOCKED`), so several can run. An attempt is recorded only under the worker's own unexpired lease on a `PENDING` delivery; a result that arrives after the lease ran out is dropped, and the delivery is sent again. A `NOTIFY` from the trigger wakes it as soon as a delivery commits; it also polls every `WEBHOOK_POLL_INTERVAL` (5s). `WEBHOOK_CONCURRENCY` (16) bounds sends in flight.

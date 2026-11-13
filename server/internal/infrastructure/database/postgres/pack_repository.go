@@ -127,14 +127,27 @@ func (r *PackRepository) PackedLocation(ctx context.Context, tenantID, assetID s
 }
 
 func (r *PackRepository) ReleaseAsset(ctx context.Context, tenantID, assetID string, now time.Time) (bool, error) {
-	if _, err := r.db.Pool.Exec(ctx, `
-		UPDATE pack_entries SET state = 'DELETED', deleted_at = $3, updated_at = $3
-		WHERE tenant_id = $1 AND asset_id = $2 AND state = 'PUBLISHED'
-	`, tenantID, assetID, now); err != nil {
-		return false, fmt.Errorf("release packed asset: %w", err)
+	err := r.inTx(ctx, func(tx pgx.Tx) error {
+		// A rewrite being published holds the asset FOR SHARE (PublishPack).
+		// Without waiting for it here, the update below could find the old
+		// entry already moved and miss the new one it was moved to, leaving
+		// a deleted asset served from the new pack.
+		if _, err := tx.Exec(ctx, `SELECT 1 FROM assets WHERE tenant_id = $1 AND id = $2 FOR UPDATE`, tenantID, assetID); err != nil {
+			return fmt.Errorf("lock released asset: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE pack_entries SET state = 'DELETED', deleted_at = $3, updated_at = $3
+			WHERE tenant_id = $1 AND asset_id = $2 AND state = 'PUBLISHED'
+		`, tenantID, assetID, now); err != nil {
+			return fmt.Errorf("release packed asset: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
 	}
 	var holding bool
-	err := r.db.Pool.QueryRow(ctx, `
+	err = r.db.Pool.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM pack_entries e JOIN packs p ON p.id = e.pack_id
 			WHERE e.tenant_id = $1 AND e.asset_id = $2 AND p.state <> 'DELETED')
@@ -201,7 +214,7 @@ func (r *PackRepository) PackCandidates(ctx context.Context, tenantID string, af
 			SELECT a.*, COALESCE(o.dataset, '') AS ns, COALESCE(o.path_key, a.id COLLATE "C") AS pk
 			FROM assets a
 			LEFT JOIN catalog_objects o ON o.id = a.object_id AND o.tenant_id = a.tenant_id
-			WHERE a.tenant_id = $1 AND a.status = 'AVAILABLE' AND a.adoption IS NULL
+			WHERE a.tenant_id = $1 AND a.status = 'AVAILABLE' AND a.blocked_reason IS NULL AND a.adoption IS NULL
 			  AND a.size_bytes BETWEEN $5 AND $6
 			  AND COALESCE(a.published_at, a.updated_at) <= $7
 			  AND COALESCE(a.storage_etag, '') <> '' AND COALESCE(a.checksum_sha256, '') <> ''
@@ -369,9 +382,14 @@ func (r *PackRepository) Repacks(ctx context.Context, tenantID, datasetID string
 	return out, nil
 }
 
+// PendingRepacks takes the tenants in turn: every tenant's oldest request
+// before anyone's second, so one tenant with many requests waiting for its
+// pack slots cannot fill the page every cycle.
 func (r *PackRepository) PendingRepacks(ctx context.Context, limit int) ([]model.RepackRequest, error) {
 	out, err := collectRepacks(r.db.Pool.Query(ctx, `
-		SELECT `+repackColumns+` FROM repack_requests WHERE state = 'PENDING' ORDER BY updated_at LIMIT $1
+		SELECT `+repackColumns+` FROM repack_requests WHERE state = 'PENDING'
+		ORDER BY row_number() OVER (PARTITION BY tenant_id ORDER BY updated_at), updated_at
+		LIMIT $1
 	`, limit))
 	if err != nil {
 		return nil, fmt.Errorf("list pending repacks: %w", err)
@@ -420,7 +438,7 @@ func (r *PackRepository) CreatePack(ctx context.Context, p model.Pack, entries [
 		_, err := tx.Exec(ctx, `
 			INSERT INTO packs (id, tenant_id, storage_connection_id, bucket, object_key, manifest_key, format, format_version,
 			                   state, entry_count, total_bytes, rewrite_of, max_attempts, next_attempt_at, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'PLANNED', $9, $10, NULLIF($11, ''), $12, $13, $13, $13)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'PLANNED', $9, $10, NULLIF($11, ''), $12, now(), $13, $13)
 		`, p.ID, p.TenantID, p.ConnectionID, p.Bucket, p.ObjectKey, p.ManifestKey, p.Format, p.FormatVersion,
 			len(entries), p.TotalBytes, p.RewriteOf, p.MaxAttempts, p.CreatedAt)
 		if err != nil {
@@ -471,15 +489,20 @@ func nullable(s string) any {
 // processing jobs do: two paths of one worker process (the poll and the
 // event consumer) share an owner string, and only the claim that is current
 // may write. Later calls pass the pack's LeaseOwner.
+//
+// Leases are taken, renewed and checked by the database's clock, never the
+// worker's: a worker whose clock runs ahead would otherwise take a lease
+// that is still held, and one whose clock runs behind would renew a lease
+// into the past. now is only recorded as the time of the change.
 func (r *PackRepository) ClaimPacks(ctx context.Context, owner string, now time.Time, lease time.Duration, limit int) ([]model.Pack, error) {
 	packs, err := collectPacks(r.db.Pool.Query(ctx, `
 		UPDATE packs SET lease_owner = $1 || '#' || (attempts + 1)::text,
-		                 lease_expires_at = $2::timestamptz + make_interval(secs => $3),
+		                 lease_expires_at = now() + make_interval(secs => $3),
 		                 attempts = attempts + 1, updated_at = $2
 		WHERE id IN (
 			SELECT id FROM packs
-			WHERE state IN ('PLANNED', 'WRITING', 'VERIFYING') AND next_attempt_at <= $2
-			  AND (lease_expires_at IS NULL OR lease_expires_at <= $2)
+			WHERE state IN ('PLANNED', 'WRITING', 'VERIFYING') AND next_attempt_at <= now()
+			  AND (lease_expires_at IS NULL OR lease_expires_at <= now())
 			ORDER BY next_attempt_at, created_at
 			LIMIT $4
 			FOR UPDATE SKIP LOCKED)
@@ -493,10 +516,10 @@ func (r *PackRepository) ClaimPacks(ctx context.Context, owner string, now time.
 func (r *PackRepository) ClaimPack(ctx context.Context, tenantID, packID, owner string, now time.Time, lease time.Duration) (model.Pack, bool, error) {
 	p, err := scanPack(r.db.Pool.QueryRow(ctx, `
 		UPDATE packs SET lease_owner = $3 || '#' || (attempts + 1)::text,
-		                 lease_expires_at = $4::timestamptz + make_interval(secs => $5),
+		                 lease_expires_at = now() + make_interval(secs => $5),
 		                 attempts = attempts + 1, updated_at = $4
-		WHERE tenant_id = $1 AND id = $2 AND state IN ('PLANNED', 'WRITING', 'VERIFYING') AND next_attempt_at <= $4
-		  AND (lease_expires_at IS NULL OR lease_expires_at <= $4)
+		WHERE tenant_id = $1 AND id = $2 AND state IN ('PLANNED', 'WRITING', 'VERIFYING') AND next_attempt_at <= now()
+		  AND (lease_expires_at IS NULL OR lease_expires_at <= now())
 		RETURNING `+packColumns, tenantID, packID, owner, now, lease.Seconds()))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return p, false, nil
@@ -507,11 +530,12 @@ func (r *PackRepository) ClaimPack(ctx context.Context, tenantID, packID, owner 
 	return p, true, nil
 }
 
-func (r *PackRepository) RenewPack(ctx context.Context, packID, owner string, now time.Time, lease time.Duration) error {
+// RenewPack extends the lease by the database's clock (see ClaimPacks).
+func (r *PackRepository) RenewPack(ctx context.Context, packID, owner string, _ time.Time, lease time.Duration) error {
 	tag, err := r.db.Pool.Exec(ctx, `
-		UPDATE packs SET lease_expires_at = $3::timestamptz + make_interval(secs => $4)
-		WHERE id = $1 AND lease_owner = $2 AND lease_expires_at > $3 AND state IN ('PLANNED', 'WRITING', 'VERIFYING')
-	`, packID, owner, now, lease.Seconds())
+		UPDATE packs SET lease_expires_at = now() + make_interval(secs => $3)
+		WHERE id = $1 AND lease_owner = $2 AND lease_expires_at > now() AND state IN ('PLANNED', 'WRITING', 'VERIFYING')
+	`, packID, owner, lease.Seconds())
 	if err != nil {
 		return fmt.Errorf("renew pack lease: %w", err)
 	}
@@ -545,7 +569,10 @@ func (r *PackRepository) AdvancePack(ctx context.Context, packID, owner string, 
 
 func (r *PackRepository) RetryPack(ctx context.Context, packID, owner string, now, next time.Time, lastError string) error {
 	tag, err := r.db.Pool.Exec(ctx, `
-		UPDATE packs SET lease_owner = NULL, lease_expires_at = NULL, next_attempt_at = $3, last_error = NULLIF($4, ''), updated_at = $5
+		UPDATE packs SET lease_owner = NULL, lease_expires_at = NULL,
+		       -- The worker's delay, counted from the database's clock.
+		       next_attempt_at = now() + ($3::timestamptz - $5::timestamptz),
+		       last_error = NULLIF($4, ''), updated_at = $5
 		WHERE id = $1 AND lease_owner = $2 AND state IN ('PLANNED', 'WRITING', 'VERIFYING')
 	`, packID, owner, next, lastError, now)
 	if err != nil {
@@ -608,11 +635,23 @@ func (r *PackRepository) PublishPack(ctx context.Context, packID, owner, manifes
 		}
 
 		// The assets are locked against a concurrent deletion while their
-		// entries are decided. An entry copied from the asset's own object
-		// is served only if the asset is still the same published bytes:
-		// unchanged and not deleted. One copied from another pack (a
-		// rewrite or a repack) only if it is still served from that pack;
-		// it moves out of that pack here.
+		// entries are decided, every one of them: ReleaseAsset waits for
+		// this lock, so a deletion either went first (the entry is not
+		// moved below) or sees the entry this pack publishes.
+		if _, err := tx.Exec(ctx, `
+			SELECT a.id FROM assets a
+			JOIN pack_entries e ON e.asset_id = a.id AND e.tenant_id = a.tenant_id
+			WHERE e.pack_id = $1 AND e.state = 'RESERVED'
+			ORDER BY a.id
+			FOR SHARE OF a
+		`, packID); err != nil {
+			return fmt.Errorf("lock pack assets: %w", err)
+		}
+		// An entry copied from the asset's own object is served only if the
+		// asset is still the same published bytes: unchanged and not
+		// deleted. One copied from another pack (a rewrite or a repack)
+		// only if it is still served from that pack; it moves out of that
+		// pack here.
 		live, err := collectStrings(tx.Query(ctx, `
 			SELECT a.id FROM assets a
 			JOIN pack_entries e ON e.asset_id = a.id AND e.tenant_id = a.tenant_id
@@ -762,6 +801,7 @@ func (r *PackRepository) RetireEmptyPacks(ctx context.Context, now time.Time) (i
 	return int(tag.RowsAffected()), nil
 }
 
+// PacksToRewrite takes the tenants in turn, as PendingRepacks does.
 func (r *PackRepository) PacksToRewrite(ctx context.Context, ratio float64, waitedBefore time.Time, limit int) ([]model.Pack, error) {
 	packs, err := collectPacks(r.db.Pool.Query(ctx, `
 		SELECT `+packColumns+`
@@ -774,7 +814,7 @@ func (r *PackRepository) PacksToRewrite(ctx context.Context, ratio float64, wait
 		  AND EXISTS (
 			SELECT 1 FROM pack_entries d WHERE d.pack_id = p.id AND d.state = 'DELETED'
 			HAVING sum(d.stored_length) >= $1 * p.total_bytes OR min(d.deleted_at) <= $2)
-		ORDER BY p.published_at
+		ORDER BY row_number() OVER (PARTITION BY p.tenant_id ORDER BY p.published_at), p.published_at
 		LIMIT $3
 	`, ratio, waitedBefore, limit))
 	if err != nil {
@@ -826,4 +866,68 @@ func (r *PackRepository) PackPlaces(ctx context.Context) ([]model.Pack, error) {
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+// ─── Unpacking ────────────────────────────────────────────────────────
+
+// PublishedPacks lists the tenant's published packs, oldest first.
+func (r *PackRepository) PublishedPacks(ctx context.Context, tenantID string) ([]model.Pack, error) {
+	packs, err := collectPacks(r.db.Pool.Query(ctx, `
+		SELECT `+packColumns+` FROM packs WHERE tenant_id = $1 AND state = 'PUBLISHED' ORDER BY published_at, id
+	`, tenantID))
+	if err != nil {
+		return nil, fmt.Errorf("list published packs: %w", err)
+	}
+	return packs, nil
+}
+
+// UnpackEntry points the entry's asset at its own object (etag, versionID)
+// and takes the entry out of its pack, in one transaction. It does nothing
+// and reports false unless the entry is still served from its published
+// pack and the asset is still the bytes recorded as oldETag. The pack
+// retires once nothing is served from it.
+func (r *PackRepository) UnpackEntry(ctx context.Context, e model.PackEntry, oldETag, etag, versionID string, now time.Time) (bool, error) {
+	done := false
+	err := r.inTx(ctx, func(tx pgx.Tx) error {
+		// The asset's lock is the one ReleaseAsset and PublishPack take: a
+		// deletion or a rewrite either went first and shows below, or waits.
+		var status, current string
+		err := tx.QueryRow(ctx, `
+			SELECT status, COALESCE(storage_etag, '') FROM assets WHERE tenant_id = $1 AND id = $2 FOR UPDATE
+		`, e.TenantID, e.AssetID).Scan(&status, &current)
+		if err != nil {
+			return fmt.Errorf("lock unpacked asset: %w", err)
+		}
+		if current != oldETag || (status != string(model.AssetStatusAvailable) && status != string(model.AssetStatusSoftDeleted)) {
+			return nil
+		}
+		// The asset's own object serves it again, so nothing is left for
+		// this entry to retire.
+		tag, err := tx.Exec(ctx, `
+			UPDATE pack_entries e SET state = 'MOVED', source_retired_at = COALESCE(e.source_retired_at, $3), updated_at = $3
+			FROM packs p
+			WHERE e.pack_id = $1 AND e.ordinal = $2 AND e.state = 'PUBLISHED' AND p.id = e.pack_id AND p.state = 'PUBLISHED'
+		`, e.PackID, e.Ordinal, now)
+		if err != nil {
+			return fmt.Errorf("unpack entry: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return nil
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE assets SET storage_etag = $3, storage_version_id = NULLIF($4, ''), updated_at = $5 WHERE tenant_id = $1 AND id = $2
+		`, e.TenantID, e.AssetID, etag, versionID, now); err != nil {
+			return fmt.Errorf("point the asset at its object: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE packs SET state = 'RETIRING', retired_at = $2, updated_at = $2
+			WHERE id = $1 AND state = 'PUBLISHED'
+			  AND NOT EXISTS (SELECT 1 FROM pack_entries l WHERE l.pack_id = packs.id AND l.state = 'PUBLISHED')
+		`, e.PackID, now); err != nil {
+			return fmt.Errorf("retire unpacked pack: %w", err)
+		}
+		done = true
+		return nil
+	})
+	return done, err
 }

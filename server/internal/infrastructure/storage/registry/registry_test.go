@@ -258,6 +258,42 @@ func TestCredentialsSealedForAnotherConnectionDoNotOpen(t *testing.T) {
 	}
 }
 
+// Credentials sealed in an envelope (the current format) and ones sealed
+// by the master key directly (before envelopes) both build clients, so
+// existing connections keep working until they are re-sealed.
+func TestEnvelopedAndOlderCredentialsBothOpen(t *testing.T) {
+	h := newHarness(t, nil)
+	ctx := context.Background()
+	older := h.connection(t, "t1", "sc_older", keys)
+
+	enveloped := h.connection(t, "t1", "sc_enveloped", keys)
+	plain, _ := json.Marshal(map[string]string{"AccessKeyID": "AKIDENVELOPE", "SecretAccessKey": "enveloped-secret"})
+	sealed, err := secretbox.NewEnvelope(h.keyring).Seal(plain, enveloped.CredentialAAD(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.repo.Put(enveloped, interfaces.SealedCredential{Version: 2, KeyVersion: sealed.KeyVersion, Nonce: sealed.Nonce,
+		Ciphertext: sealed.Ciphertext, WrappedKey: sealed.WrappedKey})
+
+	if _, err := h.registry.Locate(ctx, "t1", older.ID); err != nil {
+		t.Fatalf("older credential: %v", err)
+	}
+	if _, err := h.registry.Locate(ctx, "t1", enveloped.ID); err != nil {
+		t.Fatalf("enveloped credential: %v", err)
+	}
+	if h.secrets[len(h.secrets)-1].AccessKeyID != "AKIDENVELOPE" {
+		t.Fatal("the enveloped credential was not the one built from")
+	}
+
+	// The envelope is bound to its connection too: moved, it does not open.
+	moved := h.connection(t, "t2", "sc_moved", keys)
+	h.repo.Put(moved, interfaces.SealedCredential{Version: 2, KeyVersion: sealed.KeyVersion, Nonce: sealed.Nonce,
+		Ciphertext: sealed.Ciphertext, WrappedKey: sealed.WrappedKey})
+	if _, err := h.registry.Locate(ctx, "t2", moved.ID); !errors.Is(err, model.ErrCredentialMissing) {
+		t.Fatalf("a moved envelope must not open, got %v", err)
+	}
+}
+
 func TestWithoutBYOSOnlyThePlatformResolves(t *testing.T) {
 	h := newHarness(t, nil)
 	h.registry.deps.Sealer = nil

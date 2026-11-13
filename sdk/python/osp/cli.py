@@ -123,8 +123,11 @@ def cmd_ingest(args):
                                                                bytes=sum(f.size for f in files)))
     except APIError:
         pass  # estimates need storage.read; the upload does not
+    # Next to the saved session: a run cut short continues from its confirmed parts.
+    resume_file = os.path.join(os.path.dirname(config_path()), "uploads.json")
     r = ingest.ingest_folder(client, args.folder, args.dataset,
-                             concurrency=args.concurrency, wait=not args.no_wait, progress=say, branch=args.branch)
+                             concurrency=args.concurrency, wait=not args.no_wait, progress=say, branch=args.branch,
+                             resume_file=resume_file)
     where = f"{args.dataset}@{args.branch}" if args.branch else args.dataset
     print(f"{r['new']} new, {r['changed']} changed (new versions), {r['unchanged']} unchanged; "
           f"{r['members']} files pinned as members of {where}")

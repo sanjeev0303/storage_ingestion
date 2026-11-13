@@ -499,7 +499,7 @@ func TestVerifiedChecksumIsTheOnlyWayToPromotion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("complete: %v", err)
 	}
-	if completed.CanPromote() {
+	if completed.Status == model.UploadStatusVerified {
 		t.Fatal("a completed but unverified upload must not be promotable")
 	}
 
@@ -507,7 +507,7 @@ func TestVerifiedChecksumIsTheOnlyWayToPromotion(t *testing.T) {
 	if err != nil || status != model.UploadStatusVerified {
 		t.Fatalf("verify: %s, %v", status, err)
 	}
-	if !h.session(t, session.ID).CanPromote() {
+	if h.session(t, session.ID).Status != model.UploadStatusVerified {
 		t.Fatal("a verified upload must be promotable")
 	}
 }
@@ -540,7 +540,7 @@ func TestChecksumMismatchFailsAndBlocksPromotion(t *testing.T) {
 		t.Fatalf("verify: %s, %v", status, err)
 	}
 	got := h.session(t, id)
-	if got.FailureReason != model.FailureChecksumMismatch || got.CanPromote() {
+	if got.FailureReason != model.FailureChecksumMismatch || got.Status == model.UploadStatusVerified {
 		t.Fatalf("expected a durable checksum failure that blocks promotion, got %s/%s", got.Status, got.FailureReason)
 	}
 	if _, ok := h.storage.Object(got.ObjectKey); !ok {

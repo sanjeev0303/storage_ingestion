@@ -107,12 +107,18 @@ export function Members() {
                     <Td>
                       <div className="flex flex-wrap gap-2">
                         {manageable && m.status === "ACTIVE" && (
-                          <Button onClick={() => run(() => suspend.mutateAsync(m.user_id), "Member suspended")}>
+                          <Button
+                            loading={suspend.isPending && suspend.variables === m.user_id}
+                            onClick={() => run(() => suspend.mutateAsync(m.user_id), "Member suspended")}
+                          >
                             Suspend
                           </Button>
                         )}
                         {manageable && m.status === "SUSPENDED" && (
-                          <Button onClick={() => run(() => reactivate.mutateAsync(m.user_id), "Member reactivated")}>
+                          <Button
+                            loading={reactivate.isPending && reactivate.variables === m.user_id}
+                            onClick={() => run(() => reactivate.mutateAsync(m.user_id), "Member reactivated")}
+                          >
                             Reactivate
                           </Button>
                         )}

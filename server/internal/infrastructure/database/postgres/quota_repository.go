@@ -1,9 +1,11 @@
 package postgres
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -231,18 +233,20 @@ func (r *QuotaRepository) CreateReservedUpload(ctx context.Context, upload *mode
 			return &model.QuotaError{Limit: "assets", Max: limits.MaxAssets, Used: usage.AssetCount + usage.ReservedUploads, Requested: 1}
 		}
 
+		// Both counts in one statement: the usage row is held until commit,
+		// and every round trip under it is time no other reservation of this
+		// tenant can run (docs/hardening-report.md, the per-tenant ceiling).
+		// Read after the lock, never before: a statement's snapshot is taken
+		// when it starts, so counts read earlier would miss the sessions the
+		// previous holder committed.
 		var active, activeMultipart, pending int64
 		if err := tx.QueryRow(ctx, `
-			SELECT count(*), count(*) FILTER (WHERE multipart OR storage_upload_id IS NOT NULL)
+			SELECT count(*), count(*) FILTER (WHERE multipart OR storage_upload_id IS NOT NULL),
+			       (SELECT count(*) FROM processing_jobs WHERE tenant_id = $1 AND state = 'PENDING')
 			FROM upload_sessions
 			WHERE tenant_id = $1 AND status IN ('PENDING', 'UPLOADING', 'COMPLETING', 'ABORTING')
-		`, upload.TenantID).Scan(&active, &activeMultipart); err != nil {
+		`, upload.TenantID).Scan(&active, &activeMultipart, &pending); err != nil {
 			return fmt.Errorf("count active uploads: %w", err)
-		}
-		if err := tx.QueryRow(ctx, `
-			SELECT count(*) FROM processing_jobs WHERE tenant_id = $1 AND state = 'PENDING'
-		`, upload.TenantID).Scan(&pending); err != nil {
-			return fmt.Errorf("count pending processing: %w", err)
 		}
 		switch {
 		case limits.MaxActiveUploads > 0 && active >= int64(limits.MaxActiveUploads):
@@ -257,6 +261,118 @@ func (r *QuotaRepository) CreateReservedUpload(ctx context.Context, upload *mode
 			return err
 		}
 		return addUsage(ctx, tx, upload.TenantID, usageDelta{reserved: size, uploads: 1}, upload.CreatedAt)
+	})
+}
+
+// CreateReservedUploads stores single-request upload sessions of one tenant
+// with their quota reservations in one transaction, so a batch locks the
+// tenant's usage row once instead of once per session (the per-tenant
+// ingestion ceiling, docs/ingestion.md). It applies the limits of
+// CreateReservedUpload to each session in turn, counting the ones before it.
+//
+// All or nothing. When any session would be refused, or its path is taken
+// or busy, nothing is stored and model.ErrBatchNotReserved is returned; a
+// database error (a taken idempotency key) rolls everything back too. The
+// caller then reserves the sessions one at a time, which reports each
+// outcome as before.
+//
+// Lock order as in CreateReservedUpload: the object rows first, in path
+// order so two batches never wait on each other in a circle, then usage.
+func (r *QuotaRepository) CreateReservedUploads(ctx context.Context, uploads []model.ReservedUpload, limits model.TenantQuota) error {
+	if len(uploads) == 0 {
+		return nil
+	}
+	tenantID := ""
+	for _, u := range uploads {
+		if u.Upload == nil {
+			return errors.New("upload session must not be nil")
+		}
+		if tenantID == "" {
+			tenantID = u.Upload.TenantID
+		}
+		if u.Upload.TenantID != tenantID {
+			return errors.New("a batch reservation holds one tenant's sessions")
+		}
+	}
+	ordered := slices.Clone(uploads)
+	slices.SortFunc(ordered, func(a, b model.ReservedUpload) int {
+		return cmp.Or(cmp.Compare(a.Upload.Dataset, b.Upload.Dataset),
+			cmp.Compare(model.PathKey(a.Upload.Path), model.PathKey(b.Upload.Path)))
+	})
+	now := ordered[0].Upload.CreatedAt
+
+	return withTx(ctx, r.db, func(tx pgx.Tx) error {
+		for i, u := range ordered {
+			if u.Upload.Path == "" {
+				continue
+			}
+			// Two sessions of one path: the second's claim would not see the
+			// first in flight (it is inserted below), so a create-only rule
+			// could pass. One at a time judges them as before.
+			if i > 0 && ordered[i-1].Upload.Dataset == u.Upload.Dataset &&
+				model.PathKey(ordered[i-1].Upload.Path) == model.PathKey(u.Upload.Path) {
+				return model.ErrBatchNotReserved
+			}
+			if err := claimObject(ctx, tx, u.Upload); err != nil {
+				if errors.Is(err, model.ErrPathExists) || errors.Is(err, model.ErrPathBusy) {
+					return model.ErrBatchNotReserved
+				}
+				return err
+			}
+		}
+
+		usage, err := lockStorageUsage(ctx, tx, tenantID, now)
+		if err != nil {
+			return err
+		}
+		var active, pending int64
+		if err := tx.QueryRow(ctx, `
+			SELECT count(*), (SELECT count(*) FROM processing_jobs WHERE tenant_id = $1 AND state = 'PENDING')
+			FROM upload_sessions
+			WHERE tenant_id = $1 AND status IN ('PENDING', 'UPLOADING', 'COMPLETING', 'ABORTING')
+		`, tenantID).Scan(&active, &pending); err != nil {
+			return fmt.Errorf("count active uploads: %w", err)
+		}
+
+		used := usage.ReservedBytes + usage.StoredBytes + usage.PendingDeletionBytes
+		assets := usage.AssetCount + usage.ReservedUploads
+		var total int64
+		for _, u := range ordered {
+			size := u.Upload.ExpectedSize
+			refused := (limits.MaxObjectBytes > 0 && size > limits.MaxObjectBytes) ||
+				(limits.MaxStorageBytes > 0 && used+size > limits.MaxStorageBytes) ||
+				(limits.MaxAssets > 0 && assets+1 > limits.MaxAssets) ||
+				(limits.MaxActiveUploads > 0 && active >= int64(limits.MaxActiveUploads)) ||
+				(limits.MaxPendingProcessing > 0 && pending >= int64(limits.MaxPendingProcessing))
+			if refused {
+				return model.ErrBatchNotReserved
+			}
+			used += size
+			assets++
+			active++
+			total += size
+		}
+
+		// One round trip for every insert: the usage row is held meanwhile.
+		batch := &pgx.Batch{}
+		for _, u := range ordered {
+			sql, args, err := uploadSessionInsert(u.Upload, u.IdempotencyKey, true, false)
+			if err != nil {
+				return err
+			}
+			batch.Queue(sql, args...)
+		}
+		results := tx.SendBatch(ctx, batch)
+		for range ordered {
+			if _, err := results.Exec(); err != nil {
+				results.Close()
+				return mapDatabaseError(bindingError(err))
+			}
+		}
+		if err := results.Close(); err != nil {
+			return mapDatabaseError(bindingError(err))
+		}
+		return addUsage(ctx, tx, tenantID, usageDelta{reserved: total, uploads: int64(len(ordered))}, now)
 	})
 }
 
@@ -312,15 +428,6 @@ func (r *QuotaRepository) Reconcile(ctx context.Context, tenantID string, now ti
 		{`UPDATE adoption_jobs SET reserved_bytes = 0, reserved_assets = 0
 		  WHERE tenant_id = $1 AND state IN ('COMPLETED', 'FAILED', 'CANCELLED') AND (reserved_bytes > 0 OR reserved_assets > 0)`,
 			[]any{tenantID}},
-		// A single-request upload past its expiry can no longer be sent:
-		// expire it. (Multipart sessions are expired by their own
-		// reconciliation, which aborts the provider upload first.)
-		{`UPDATE upload_sessions
-		  SET status = 'EXPIRED', quota_state = 'RELEASED', failure_reason = COALESCE(failure_reason, 'expired'),
-		      aborted_at = $2, updated_at = $2
-		  WHERE tenant_id = $1 AND quota_state = 'RESERVED' AND status = 'PENDING'
-		    AND NOT multipart AND storage_upload_id IS NULL AND expires_at < $2`,
-			[]any{tenantID, now}},
 	}
 	for _, step := range steps {
 		tag, err := r.db.Pool.Exec(ctx, step.sql, step.args...)
@@ -329,8 +436,13 @@ func (r *QuotaRepository) Reconcile(ctx context.Context, tenantID string, now ti
 		}
 		settled += int(tag.RowsAffected())
 	}
+	expired, err := r.expireStaleUploads(ctx, tenantID, now)
+	settled += expired
+	if err != nil {
+		return before, after, settled, err
+	}
 
-	err := withTx(ctx, r.db, func(tx pgx.Tx) error {
+	err = withTx(ctx, r.db, func(tx pgx.Tx) error {
 		var err error
 		if before, err = lockStorageUsage(ctx, tx, tenantID, now); err != nil {
 			return err
@@ -360,6 +472,39 @@ func (r *QuotaRepository) Reconcile(ctx context.Context, tenantID string, now ti
 		return nil
 	})
 	return before, after, settled, err
+}
+
+// expireStaleUploads expires single-request uploads past their expiry,
+// which can no longer be sent, through the upload state machine: the same
+// guarded transition, with its reservation released, as any other expiry.
+// (Multipart sessions are expired by their own reconciliation, which aborts
+// the provider upload first.)
+func (r *QuotaRepository) expireStaleUploads(ctx context.Context, tenantID string, now time.Time) (int, error) {
+	rows, err := r.db.Pool.Query(ctx, `
+		SELECT id FROM upload_sessions
+		WHERE tenant_id = $1 AND quota_state = 'RESERVED' AND status = 'PENDING'
+		  AND NOT multipart AND storage_upload_id IS NULL AND expires_at < $2`, tenantID, now)
+	if err != nil {
+		return 0, fmt.Errorf("find expired uploads: %w", err)
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return 0, fmt.Errorf("find expired uploads: %w", err)
+	}
+	uploads := NewUploadRepository(r.db)
+	expired := 0
+	for _, id := range ids {
+		err := uploads.TransitionStatus(ctx, tenantID, id, []model.UploadStatus{model.UploadStatusPending},
+			model.UploadStatusExpired, model.FailureExpired, now)
+		if errors.Is(err, model.ErrInvalidUploadState) {
+			continue // completed or ended since it was read
+		}
+		if err != nil {
+			return expired, fmt.Errorf("expire upload: %w", err)
+		}
+		expired++
+	}
+	return expired, nil
 }
 
 func (r *QuotaRepository) TenantsWithUsage(ctx context.Context, after string, limit int) ([]string, error) {

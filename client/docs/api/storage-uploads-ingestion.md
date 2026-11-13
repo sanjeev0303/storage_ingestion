@@ -240,7 +240,15 @@ Response 201 (new) or **200 (idempotent replay)** + `Location: /api/v1/uploads/{
 ```ts
 { upload_id: string; status: UploadStatus; file_name: string; size_bytes: number; expires_at: string; multipart: boolean }
 ```
-(no created_at/updated_at, no failure reason, no asset id, no part list). 404 `not_found`. There is **no list-uploads route**.
+(no created_at/updated_at, no failure reason, no part list; `asset` is added once processing made one). 404 `not_found`.
+
+### GET /api/v1/uploads?status=&cursor=&limit=  (`uploads.write` OR `assets.read`; tenant-wide)
+Newest first; `limit` 1 to 200 (default 50); an unknown `status` or a bad cursor is 400.
+```ts
+{ uploads: { upload_id: string; status: UploadStatus; file_name: string; content_type: string; size_bytes: number;
+  multipart: boolean; created_at: string; updated_at: string; expires_at: string; asset_id?: string }[]; next_cursor?: string }
+```
+`asset_id` is set once processing created the asset.
 
 ---
 

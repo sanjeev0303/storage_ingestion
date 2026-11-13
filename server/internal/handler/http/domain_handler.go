@@ -58,6 +58,8 @@ func (h *DomainHandler) fail(w nethttp.ResponseWriter, err error) {
 		writeJSON(w, nethttp.StatusConflict, problem{Error: err.Error(), Code: "publishing_not_configured"})
 	case errors.Is(err, model.ErrDOIOff):
 		writeJSON(w, nethttp.StatusConflict, problem{Error: err.Error(), Code: "doi_not_configured"})
+	case errors.Is(err, model.ErrWithdrawn):
+		writeJSON(w, nethttp.StatusConflict, problem{Error: err.Error(), Code: "publication_withdrawn"})
 	default:
 		writeSecurityError(w, h.log, err)
 	}

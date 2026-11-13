@@ -75,10 +75,14 @@ func (r *LockSyncRepository) Assets(ctx context.Context, req model.LockSyncReque
 	return out, nil
 }
 
+// Advance records how far a request got, and whether it is done. Two
+// workers may run one request at once (it has no lease): the position
+// only moves forward, and a finished request stays finished, so the
+// slower one changes nothing.
 func (r *LockSyncRepository) Advance(ctx context.Context, id, position string, done bool, at time.Time) error {
 	_, err := r.db.Pool.Exec(ctx, `
 		UPDATE lock_sync_requests SET position = $2, updated_at = $3::timestamptz, done_at = CASE WHEN $4::boolean THEN $3::timestamptz END
-		WHERE id = $1`, id, position, at, done)
+		WHERE id = $1 AND done_at IS NULL AND position <= $2`, id, position, at, done)
 	if err != nil {
 		return fmt.Errorf("advance lock sync: %w", err)
 	}

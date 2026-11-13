@@ -18,6 +18,8 @@ var (
 	// ErrDeadLetterClosed: the dead letter was already retried, replayed,
 	// resolved or discarded.
 	ErrDeadLetterClosed = errors.New("dead letter is not open")
+	// ErrEventInFlight: a publisher holds the event's lease right now.
+	ErrEventInFlight = errors.New("the event is being published right now; try again shortly")
 )
 
 // Outbox statuses.

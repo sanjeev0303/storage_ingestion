@@ -19,7 +19,14 @@ const (
 	AssetStatusSoftDeleted AssetStatus = "SOFT_DELETED"
 	// AssetStatusDeleted is a tombstone: the asset's objects are gone.
 	AssetStatusDeleted AssetStatus = "DELETED"
+	// AssetStatusBlocked is never stored: readers report it for an
+	// AVAILABLE asset whose reads a check after publication stopped
+	// (BlockedReason), so nothing takes such an asset as usable.
+	AssetStatusBlocked AssetStatus = "BLOCKED"
 )
+
+// ErrAssetNotBlocked: the asset has no block to clear.
+var ErrAssetNotBlocked = errors.New("the asset is not blocked")
 
 // Rejection reasons recorded with REJECTED assets. Sanitized codes only.
 const (
@@ -177,5 +184,5 @@ func (a Asset) Validate() error {
 
 // IsAvailable reports whether the asset can be delivered to a client.
 func (a Asset) IsAvailable() bool {
-	return a.Status == AssetStatusAvailable
+	return a.Status == AssetStatusAvailable && a.BlockedReason == ""
 }

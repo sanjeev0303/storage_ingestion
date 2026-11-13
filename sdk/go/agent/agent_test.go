@@ -16,6 +16,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sanjeev0303/object-storage-platform/sdk/go/osp"
 )
 
 // fakePlatform plays the API and storage.
@@ -35,12 +37,14 @@ type fakePlatform struct {
 	uploads   map[string]map[string]any
 	closeWith string
 	refuse    string
+	busy      string          // a path suffix answered 409 path_busy
+	complete  map[string]bool // recordings closed COMPLETE take no more chunks
 }
 
 func newFake(t *testing.T) *fakePlatform {
 	t.Helper()
 	f := &fakePlatform{objects: map[string]string{}, partPuts: map[string]int{}, state: map[string]string{}, chunks: map[string][]map[string]any{},
-		closed: map[string]map[string]any{}, uploads: map[string]map[string]any{}, closeWith: "COMPLETE"}
+		closed: map[string]map[string]any{}, uploads: map[string]map[string]any{}, closeWith: "COMPLETE", complete: map[string]bool{}}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)
 	return f
@@ -66,6 +70,11 @@ func (f *fakePlatform) serve(w http.ResponseWriter, r *http.Request) {
 		if f.refuse != "" && strings.HasSuffix(body["path"].(string), f.refuse) {
 			w.WriteHeader(http.StatusBadRequest)
 			reply(map[string]string{"error": "refused"})
+			return
+		}
+		if f.busy != "" && strings.HasSuffix(body["path"].(string), f.busy) {
+			w.WriteHeader(http.StatusConflict)
+			reply(map[string]string{"error": "another upload is creating this path", "code": "path_busy"})
 			return
 		}
 		id := fmt.Sprintf("u%d", len(f.uploads)+1)
@@ -115,6 +124,11 @@ func (f *fakePlatform) serve(w http.ResponseWriter, r *http.Request) {
 		reply(map[string]string{"id": "rec-" + body["name"].(string)})
 	case strings.HasSuffix(r.URL.Path, "/chunks"):
 		id := strings.Split(r.URL.Path, "/")[5]
+		if f.complete[id] {
+			w.WriteHeader(http.StatusConflict)
+			reply(map[string]string{"error": "the recording is complete: it takes no more chunks", "code": "recording_complete"})
+			return
+		}
 		f.chunks[id] = append(f.chunks[id], body)
 		reply(map[string]any{})
 	case strings.HasSuffix(r.URL.Path, "/close"):
@@ -124,6 +138,7 @@ func (f *fakePlatform) serve(w http.ResponseWriter, r *http.Request) {
 		if m, _ := body["missing"].([]any); len(m) > 0 {
 			state = "INCOMPLETE"
 		}
+		f.complete[id] = state == "COMPLETE"
 		reply(map[string]string{"state": state})
 	default:
 		w.WriteHeader(http.StatusNotFound)
@@ -385,18 +400,22 @@ func TestAnInterruptedUploadContinuesAfterARestart(t *testing.T) {
 	}
 
 	second := newAgent(t, f, state, watches, nil)
+	// A part that reached storage while a sibling's failure cancelled its
+	// confirmation was never saved, so it rightly goes again: only the saved
+	// ones must not.
+	saved := second.journal.Get(big).Parts
 	tick(t, second)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.starts != starts {
 		t.Fatalf("started a new upload: %d", f.starts)
 	}
-	if f.puts != 10 {
-		t.Fatalf("parts in all: %d, want 10 with none sent twice", f.puts)
+	if len(f.partPuts) != 10 {
+		t.Fatalf("%d of 10 parts arrived", len(f.partPuts))
 	}
-	for part, n := range f.partPuts {
-		if n != 1 {
-			t.Fatalf("part %s sent %d times", part, n)
+	for part := range saved {
+		if n := f.partPuts[fmt.Sprintf("part=%d", part)]; n != 1 {
+			t.Fatalf("part %d was saved before the crash and sent %d times", part, n)
 		}
 	}
 }
@@ -410,7 +429,7 @@ func TestAJournalCutShortStillReads(t *testing.T) {
 	if err := j.Put(&Entry{File: "a", State: StateQueued, Size: 3}); err != nil {
 		t.Fatal(err)
 	}
-	if err := entryStoreFor(j, "a").SaveUpload("u1", 8); err != nil {
+	if err := entryStoreFor(j, "a").SaveUpload(osp.Progress{UploadID: "u1", PartSize: 8}); err != nil {
 		t.Fatal(err)
 	}
 	if err := entryStoreFor(j, "a").SavePart(2, "etag2"); err != nil {

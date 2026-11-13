@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 import { Field, Select } from "@/components/ui/field";
 import { LoadMore } from "@/components/ui/page";
@@ -11,7 +12,7 @@ import { api } from "@/lib/api/client";
 import { useOrganizationId } from "@/lib/auth/session";
 import { orgKey } from "@/lib/query/keys";
 import { usePagedQuery } from "@/lib/query/paged";
-import { formatBytes } from "@/lib/utils/format";
+import { formatBytes, shortId } from "@/lib/utils/format";
 
 type UploadListItem = {
   upload_id: string;
@@ -21,7 +22,10 @@ type UploadListItem = {
   size_bytes: number;
   multipart: boolean;
   created_at: string;
+  updated_at: string;
   expires_at: string;
+  // Set once processing made an asset from the upload.
+  asset_id?: string;
 };
 
 const TONE: Record<string, "done" | "failed" | "active" | "neutral"> = {
@@ -87,7 +91,20 @@ export function RecentUploads() {
                   <p className="text-sm text-muted">
                     {formatBytes(u.size_bytes)}
                     {u.multipart && ", multipart"}, <Time value={u.created_at} />
+                    {u.updated_at !== u.created_at && (
+                      <>
+                        , last changed <Time value={u.updated_at} />
+                      </>
+                    )}
                   </p>
+                  {u.asset_id && (
+                    <Link
+                      href={`/app/operations/assets?id=${encodeURIComponent(u.asset_id)}`}
+                      className="text-sm underline underline-offset-2"
+                    >
+                      Asset <span className="mono-data">{shortId(u.asset_id)}</span>
+                    </Link>
+                  )}
                 </div>
                 <StateBadge tone={TONE[u.status] ?? "neutral"}>{u.status.toLowerCase()}</StateBadge>
               </li>

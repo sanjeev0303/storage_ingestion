@@ -47,6 +47,8 @@ func (h *EdgeHandler) fail(w nethttp.ResponseWriter, err error) {
 		writeJSON(w, nethttp.StatusForbidden, problem{Error: err.Error(), Code: "outside_device_path"})
 	case errors.Is(err, model.ErrChunkDiffers):
 		writeJSON(w, nethttp.StatusConflict, problem{Error: err.Error(), Code: "chunk_differs"})
+	case errors.Is(err, model.ErrRecordingComplete):
+		writeJSON(w, nethttp.StatusConflict, problem{Error: err.Error(), Code: "recording_complete"})
 	default:
 		writeSecurityError(w, h.log, err)
 	}

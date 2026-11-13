@@ -169,7 +169,9 @@ export function VersionDetail({
         {available && (
           <section aria-label="Download and preview" className="flex flex-col gap-4">
             <h3 className="text-md font-semibold">Download and preview</h3>
+            {/* Keyed by asset: a link or preview of one version must not carry over to another. */}
             <DownloadControl
+              key={`download-${version.asset_id}`}
               assetId={version.asset_id}
               fileName={version.file_name}
               canDownload={can("assets.download")}
@@ -178,6 +180,7 @@ export function VersionDetail({
             {can("assets.download") && <ShareToChat assetId={version.asset_id} />}
             {can("assets.download") && (
               <Preview
+                key={`preview-${version.asset_id}`}
                 assetId={version.asset_id}
                 contentType={version.content_type}
                 sizeBytes={version.size_bytes}

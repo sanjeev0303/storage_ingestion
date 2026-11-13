@@ -2,6 +2,8 @@ package identity
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/hex"
 	"strings"
 	"time"
@@ -22,6 +24,8 @@ const legacyAPITokenPrefix = "osp_pat_"
 type TokenStore interface {
 	TokenByHash(ctx context.Context, hash string) (model.APIToken, error)
 	TouchToken(ctx context.Context, id, ip string, at time.Time) error
+	// RehashToken replaces a token's stored hash, if it is still oldHash.
+	RehashToken(ctx context.Context, id, oldHash, newHash string) error
 }
 
 // WithTokens lets API tokens authenticate.
@@ -30,9 +34,18 @@ func (s *Service) WithTokens(store TokenStore) *Service {
 	return s
 }
 
-// HashAPIToken is what is stored for a token.
-func HashAPIToken(raw string) string {
-	return hex.EncodeToString(hashToken(raw))
+// HashAPIToken is what is stored for a token. With a pepper it is an
+// HMAC-SHA-256 keyed by it: whoever can read or write the token table but
+// not the server's configuration can neither check a token against it nor
+// plant one. Without a pepper it is the plain SHA-256 tokens were first
+// stored as.
+func HashAPIToken(raw string, pepper []byte) string {
+	if len(pepper) == 0 {
+		return hex.EncodeToString(hashToken(raw))
+	}
+	mac := hmac.New(sha256.New, pepper)
+	mac.Write([]byte(raw))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 // authenticateToken checks an API token: live, unexpired, used from one
@@ -41,7 +54,7 @@ func (s *Service) authenticateToken(ctx context.Context, raw string) (Identity, 
 	if s.tokens == nil || len(raw) != len(APITokenPrefix)+43 {
 		return Identity{}, model.ErrSessionInvalid
 	}
-	token, err := s.tokens.TokenByHash(ctx, HashAPIToken(raw))
+	token, err := s.lookupToken(ctx, raw)
 	if err != nil {
 		return Identity{}, model.ErrSessionInvalid
 	}
@@ -59,6 +72,28 @@ func (s *Service) authenticateToken(ctx context.Context, raw string) (Identity, 
 		_ = s.tokens.TouchToken(ctx, token.ID, ip, now)
 	}
 	return Identity{User: user, Token: &token}, nil
+}
+
+// lookupToken finds a token by its peppered hash, or, for a token issued
+// before the pepper was set, by its plain SHA-256. That older hash is
+// replaced by the peppered one on first use, so it does not stay stored.
+// Both lookups are by an index on the hash; no token value is compared
+// here, so there is nothing to time.
+func (s *Service) lookupToken(ctx context.Context, raw string) (model.APIToken, error) {
+	pepper := s.cfg.APITokenPepper
+	token, err := s.tokens.TokenByHash(ctx, HashAPIToken(raw, pepper))
+	if err == nil || len(pepper) == 0 {
+		return token, err
+	}
+	legacy := HashAPIToken(raw, nil)
+	token, err = s.tokens.TokenByHash(ctx, legacy)
+	if err != nil {
+		return token, err
+	}
+	if err := s.tokens.RehashToken(ctx, token.ID, legacy, HashAPIToken(raw, pepper)); err != nil {
+		s.deps.Log.Warn("API token hash not upgraded", "token_id", token.ID, "error", err)
+	}
+	return token, nil
 }
 
 // tokenPrincipal confines a token's principal: its own organization only,

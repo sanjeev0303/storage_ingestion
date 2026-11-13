@@ -87,6 +87,13 @@ function AssetDetail({ id }: { id: string }) {
   const actions = useAssetActions(id);
   const [confirm, setConfirm] = useState<"delete" | "restore" | "release" | null>(null);
 
+  // One result card at a time: starting an action clears what the others said.
+  function clearResults() {
+    actions.remove.reset();
+    actions.restore.reset();
+    actions.release.reset();
+  }
+
   if (asset.isPending) return <SkeletonRows rows={6} />;
   if (asset.isError) {
     return (
@@ -264,7 +271,10 @@ function AssetDetail({ id }: { id: string }) {
           </>
         }
         confirmLabel="Schedule deletion"
-        onConfirm={() => actions.remove.mutateAsync()}
+        onConfirm={() => {
+          clearResults();
+          return actions.remove.mutateAsync();
+        }}
       />
       <ConfirmDialog
         open={confirm === "restore"}
@@ -272,7 +282,10 @@ function AssetDetail({ id }: { id: string }) {
         title="Restore this asset?"
         description="The asset returns to the status it had before deletion and is served again, if its objects are still in storage."
         confirmLabel="Restore asset"
-        onConfirm={() => actions.restore.mutateAsync()}
+        onConfirm={() => {
+          clearResults();
+          return actions.restore.mutateAsync();
+        }}
       />
       <ConfirmDialog
         open={confirm === "release"}
@@ -280,7 +293,10 @@ function AssetDetail({ id }: { id: string }) {
         title="Release from quarantine?"
         description="This requeues the processing job for this asset. Verification and the malware scan run again, and an asset that fails them stays unavailable."
         confirmLabel="Release"
-        onConfirm={() => actions.release.mutateAsync()}
+        onConfirm={() => {
+          clearResults();
+          return actions.release.mutateAsync();
+        }}
       />
     </div>
   );

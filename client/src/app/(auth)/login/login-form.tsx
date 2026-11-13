@@ -37,6 +37,9 @@ export function LoginForm({ ssoError }: { ssoError?: string }) {
   const router = useRouter();
   const params = useSearchParams();
   const [formError, setFormError] = useState<string | null>(null);
+  // Stays true until the next page replaces this one, so the button cannot
+  // be pressed again while the navigation is still loading.
+  const [leaving, setLeaving] = useState(false);
   const {
     register,
     handleSubmit,
@@ -62,6 +65,7 @@ export function LoginForm({ ssoError }: { ssoError?: string }) {
         setFormError(messageFor(error.code, describeError(error), error.retryAfter));
         return;
       }
+      setLeaving(true);
       router.replace(safeNext(params.get("next")));
     } catch {
       setFormError("Could not reach the server. Check the connection and try again.");
@@ -87,7 +91,7 @@ export function LoginForm({ ssoError }: { ssoError?: string }) {
           </p>
         )}
 
-        <SubmitButton valid={isValid} loading={isSubmitting} className="h-10" hint="Enter your email and password to continue.">
+        <SubmitButton valid={isValid} loading={isSubmitting || leaving} className="h-10" hint="Enter your email and password to continue.">
           Sign in
         </SubmitButton>
       </form>

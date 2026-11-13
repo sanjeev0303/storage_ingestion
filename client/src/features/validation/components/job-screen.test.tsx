@@ -31,6 +31,20 @@ describe("JobScreen", () => {
     expect(requests).toBe(seen);
   }, 15000);
 
+  it("stops polling when the first load fails, until the user retries", async () => {
+    let requests = 0;
+    server.use(
+      http.get(`${API}/validation-jobs/job-1`, () => {
+        requests += 1;
+        return HttpResponse.json({ error: "boom" }, { status: 500 });
+      }),
+    );
+    renderWithProviders(<JobScreen jobId="job-1" />);
+    await screen.findByRole("button", { name: "Try again" });
+    await sleep(3200);
+    expect(requests).toBe(1);
+  }, 15000);
+
   it("says the version failed when FAILED comes with a report", async () => {
     server.use(http.get(`${API}/validation-jobs/job-1`, () => HttpResponse.json(job({ state: "FAILED", report_id: "rep-1" }))));
     renderWithProviders(<JobScreen jobId="job-1" />);
@@ -59,6 +73,19 @@ describe("JobScreen", () => {
     const dialog = await screen.findByRole("alertdialog");
     await userEvent.click(dialog.querySelector("button:last-of-type") as HTMLElement);
     await waitFor(() => expect(screen.getByText(/Cancel requested/)).toBeInTheDocument());
+  });
+
+  it("keeps Cancel disabled once a stop is requested, before the job shows it", async () => {
+    server.use(
+      http.get(`${API}/validation-jobs/job-1`, () => HttpResponse.json(job({ state: "RUNNING" }))),
+      http.post(`${API}/validation-jobs/job-1/cancel`, () => HttpResponse.json(job({ state: "RUNNING" }), { status: 202 })),
+    );
+    const { default: userEvent } = await import("@testing-library/user-event");
+    renderWithProviders(<JobScreen jobId="job-1" />);
+    await userEvent.click(await screen.findByRole("button", { name: "Cancel job" }));
+    const dialog = await screen.findByRole("alertdialog");
+    await userEvent.click(dialog.querySelector("button:last-of-type") as HTMLElement);
+    expect(await screen.findByRole("button", { name: "Stopping" })).toBeDisabled();
   });
 
   it("shows an error with retry when the job cannot be loaded", async () => {

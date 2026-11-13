@@ -1,4 +1,4 @@
-import { screen, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
@@ -125,6 +125,76 @@ describe("branches", () => {
     expect(typeof sent?.idempotency_key).toBe("string");
     expect(screen.getByRole("button", { name: "Create snapshot" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Merge into the draft" })).toBeDisabled();
+  });
+
+  it("merges the exact version the preview showed when merging from the latest", async () => {
+    serveFamily();
+    const sent: Record<string, unknown>[] = [];
+    server.use(
+      http.post(`${API}/datasets/ds-1/merges`, async ({ request }) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        sent.push(body);
+        return HttpResponse.json({ ...conflicted, strategy: "SOURCE", conflicts: 0, conflict_list: [], applied: !body.dry_run });
+      }),
+    );
+    renderWithProviders(<BranchesScreen id="ds-1" />);
+
+    await userEvent.click(await screen.findByRole("radio", { name: /Take the incoming side/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Preview the merge" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Merge into the draft" })).toBeEnabled());
+    await userEvent.click(screen.getByRole("button", { name: "Merge into the draft" }));
+
+    expect(await screen.findByText(/Merged into the draft/)).toBeInTheDocument();
+    expect(sent[0]).toMatchObject({ dry_run: true });
+    expect(sent[0].source_version_id).toBeUndefined();
+    // A newer version may have arrived since the preview; the merge applies the one previewed.
+    expect(sent[1]).toMatchObject({ dry_run: false, source_version_id: "ver-9" });
+  });
+
+  it("forgets the chosen version when the source changes, so another dataset's version id is never sent", async () => {
+    serveFamily();
+    const other = makeDataset({
+      id: "ds-3",
+      name: "pets@crop",
+      branch: { parent_id: "ds-1", name: "crop", fork_version_id: "ver-1", merge_base_version_id: "ver-1" },
+    });
+    let sent: Record<string, unknown> | undefined;
+    server.use(
+      http.get(`${API}/datasets/ds-1/branches`, () => HttpResponse.json({ branches: [branch, other] })),
+      http.get(`${API}/datasets/ds-3/versions`, () => HttpResponse.json({ versions: [version({ id: "ver-30", dataset_id: "ds-3" })] })),
+      http.post(`${API}/datasets/ds-1/merges`, async ({ request }) => {
+        sent = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json(conflicted);
+      }),
+    );
+    renderWithProviders(<BranchesScreen id="ds-1" />);
+
+    await userEvent.selectOptions(await screen.findByLabelText("Bring changes from"), "ds-2");
+    await screen.findByRole("option", { name: "Version 1" });
+    await userEvent.selectOptions(screen.getByLabelText("Version"), "ver-9");
+    await userEvent.selectOptions(screen.getByLabelText("Bring changes from"), "ds-3");
+    expect(screen.getByLabelText("Version")).toHaveValue("");
+    await userEvent.click(screen.getByRole("button", { name: "Preview the merge" }));
+    await vi.waitFor(() => expect(sent).toEqual({ source_dataset_id: "ds-3", strategy: "FAIL", dry_run: true }));
+  });
+
+  it("runs one merge call at a time, so a preview and a merge are never both in flight", async () => {
+    serveFamily();
+    let finish = () => {};
+    server.use(
+      http.post(`${API}/datasets/ds-1/merges`, async () => {
+        await new Promise<void>((resolve) => (finish = resolve));
+        return HttpResponse.json(conflicted);
+      }),
+    );
+    renderWithProviders(<BranchesScreen id="ds-1" />);
+
+    await screen.findByRole("link", { name: "Version 1" });
+    await userEvent.click(await screen.findByRole("button", { name: "Preview the merge" }));
+    expect(screen.getByRole("button", { name: "Merge into the draft" })).toBeDisabled();
+    finish();
+    expect(await screen.findByText(/Preview: 1 object was changed differently/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Merge into the draft" })).toBeEnabled();
   });
 
   it("creates a branch from a chosen version and opens it", async () => {

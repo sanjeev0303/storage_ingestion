@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -108,21 +109,40 @@ func (d delta) closing() bool { return d.open < 0 }
 // before the job.
 func applyDelta(ctx context.Context, tx pgx.Tx, tenantID, datasetID, jobID string, d delta, now time.Time) (model.IngestionJob, error) {
 	// A closing change always changes the usage: one less open entry.
-	if d.reserved != 0 || d.stored != 0 || d.slots != 0 || d.multipart != 0 || d.open != 0 || d.awaiting != 0 {
+	if d.movesUsage() {
 		if err := updateUsage(ctx, tx, tenantID, d, now); err != nil {
 			return model.IngestionJob{}, err
 		}
 	}
-	if d.reserved != 0 || d.stored != 0 || d.closing() {
-		if _, err := tx.Exec(ctx, `
-			UPDATE datasets SET reserved_bytes = GREATEST(reserved_bytes + $2, 0), stored_bytes = GREATEST(stored_bytes + $3, 0),
-			       updated_at = $4
-			WHERE id = $1
-		`, datasetID, d.reserved, d.stored, now); err != nil {
-			return model.IngestionJob{}, fmt.Errorf("update dataset bytes: %w", err)
+	if d.movesDataset() {
+		if err := updateDatasetBytes(ctx, tx, datasetID, d, now); err != nil {
+			return model.IngestionJob{}, err
 		}
 	}
+	return updateJobCounters(ctx, tx, jobID, d, now)
+}
 
+// movesUsage reports whether d changes the tenant's usage row.
+func (d delta) movesUsage() bool {
+	return d.reserved != 0 || d.stored != 0 || d.slots != 0 || d.multipart != 0 || d.open != 0 || d.awaiting != 0
+}
+
+// movesDataset reports whether d changes the dataset's row: its bytes, or
+// the job may finish, which updates the dataset's status.
+func (d delta) movesDataset() bool { return d.reserved != 0 || d.stored != 0 || d.closing() }
+
+func updateDatasetBytes(ctx context.Context, tx pgx.Tx, datasetID string, d delta, now time.Time) error {
+	if _, err := tx.Exec(ctx, `
+		UPDATE datasets SET reserved_bytes = GREATEST(reserved_bytes + $2, 0), stored_bytes = GREATEST(stored_bytes + $3, 0),
+		       updated_at = $4
+		WHERE id = $1
+	`, datasetID, d.reserved, d.stored, now); err != nil {
+		return fmt.Errorf("update dataset bytes: %w", err)
+	}
+	return nil
+}
+
+func updateJobCounters(ctx context.Context, tx pgx.Tx, jobID string, d delta, now time.Time) (model.IngestionJob, error) {
 	sets := "required_failed = GREATEST(required_failed + $2, 0), stored_bytes = stored_bytes + $3, updated_at = $4"
 	args := []any{jobID, d.requiredFailed, d.stored, now}
 	states := make([]model.EntryState, 0, len(d.counts))
@@ -476,14 +496,204 @@ func (r *IngestionRepository) Transition(ctx context.Context, ch interfaces.Entr
 		if err != nil {
 			return err
 		}
-		attempt, generation := 0, 0
-		if ch.CountAttempt {
-			attempt = 1
+		sql, args := entryUpdate(ch)
+		out, err = scanEntry(tx.QueryRow(ctx, sql, args...))
+		if err != nil {
+			return fmt.Errorf("move ingestion entry: %w", err)
 		}
-		if ch.NewGeneration {
-			generation = 1
+		if !d.closing() {
+			return nil // no entry closed: the job cannot have finished
 		}
-		out, err = scanEntry(tx.QueryRow(ctx, `
+		_, err = settle(ctx, tx, job, ch.Now)
+		return err
+	})
+	return out, err
+}
+
+// errBatchRepeatsEntry refuses a batch that names one entry twice: the second
+// change would be judged against the entry as it was before the first.
+var errBatchRepeatsEntry = errors.New("the batch changes one entry twice")
+
+// TransitionMany applies many entry changes in one transaction, each as
+// Transition would: the same checks, counters and job settlement. It is the
+// group commit of the hot per-file transitions (an upload completed, an
+// entry published): a tenant's usage row, and each dataset and job row, is
+// updated once for the whole batch instead of once per entry, so concurrent
+// completions share one lock and one commit rather than queueing on the row
+// (docs/ingestion.md, "Where the database's time goes").
+//
+// A change that would be refused alone (wrong state, another upload, no such
+// entry) gets that error in its outcome and changes nothing; the others still
+// apply. An error return means nothing was applied.
+//
+// Lock order is Transition's for every entry at once: the entries, in
+// (job, position) order, then usage rows by tenant, datasets, and jobs, each
+// sorted. A row is locked whenever one of its changes would lock it on its
+// own, even if the batch's sum leaves it as it was: a change that can finish
+// a job must hold the usage and dataset rows before the job's.
+func (r *IngestionRepository) TransitionMany(ctx context.Context, changes []interfaces.EntryChange) ([]interfaces.EntryOutcome, error) {
+	out := make([]interfaces.EntryOutcome, len(changes))
+	if len(changes) == 0 {
+		return out, nil
+	}
+	type key struct {
+		job string
+		pos int64
+	}
+	order := make([]int, len(changes))
+	for i := range order {
+		order[i] = i
+	}
+	slices.SortFunc(order, func(a, b int) int {
+		return cmp.Or(cmp.Compare(changes[a].JobID, changes[b].JobID), cmp.Compare(changes[a].Position, changes[b].Position))
+	})
+	jobs := make([]string, len(changes))
+	positions := make([]int64, len(changes))
+	for n, i := range order {
+		if n > 0 && changes[order[n-1]].JobID == changes[i].JobID && changes[order[n-1]].Position == changes[i].Position {
+			return nil, errBatchRepeatsEntry
+		}
+		jobs[n], positions[n] = changes[i].JobID, changes[i].Position
+	}
+
+	err := r.inTx(ctx, func(tx pgx.Tx) error {
+		// One statement locks every entry, in the sort's order.
+		locked, err := collectEntries(tx.Query(ctx, `
+			SELECT `+entryColumns+` FROM ingestion_entries
+			WHERE (job_id, position) IN (SELECT * FROM unnest($1::text[], $2::bigint[]))
+			ORDER BY job_id, position
+			FOR UPDATE
+		`, jobs, positions))
+		if err != nil {
+			return err
+		}
+		before := make(map[key]model.IngestionEntry, len(locked))
+		for _, e := range locked {
+			before[key{e.JobID, e.Position}] = e
+		}
+
+		type rowChange struct {
+			d    delta
+			lock bool
+		}
+		usage := map[string]*rowChange{}
+		datasets := map[string]*rowChange{}
+		jobDelta := map[string]*rowChange{}
+		closing := map[string]bool{}
+		get := func(m map[string]*rowChange, id string) *rowChange {
+			c := m[id]
+			if c == nil {
+				c = &rowChange{}
+				m[id] = c
+			}
+			return c
+		}
+		var valid []int
+		for _, i := range order {
+			ch := changes[i]
+			e, ok := before[key{ch.JobID, ch.Position}]
+			if !ok {
+				out[i].Err = model.ErrEntryNotFound
+				continue
+			}
+			out[i].Entry = e
+			if !slices.Contains(ch.From, e.State) || (ch.UploadID != "" && e.UploadID != ch.UploadID) {
+				out[i].Err = model.ErrInvalidEntryState
+				continue
+			}
+			var own delta
+			own.move(e, ch.To, ch.StoredBytes)
+			u, ds, j := get(usage, e.TenantID), get(datasets, e.DatasetID), get(jobDelta, e.JobID)
+			u.d.move(e, ch.To, ch.StoredBytes)
+			ds.d.move(e, ch.To, ch.StoredBytes)
+			j.d.move(e, ch.To, ch.StoredBytes)
+			u.lock = u.lock || own.movesUsage()
+			ds.lock = ds.lock || own.movesDataset()
+			closing[e.JobID] = closing[e.JobID] || own.closing()
+			valid = append(valid, i)
+		}
+		if len(valid) == 0 {
+			return nil
+		}
+
+		sortedKeys := func(m map[string]*rowChange) []string {
+			ids := make([]string, 0, len(m))
+			for id := range m {
+				ids = append(ids, id)
+			}
+			slices.Sort(ids)
+			return ids
+		}
+		now := changes[valid[0]].Now
+		for _, id := range sortedKeys(usage) {
+			if c := usage[id]; c.lock {
+				if err := updateUsage(ctx, tx, id, c.d, now); err != nil {
+					return err
+				}
+			}
+		}
+		for _, id := range sortedKeys(datasets) {
+			if c := datasets[id]; c.lock {
+				if err := updateDatasetBytes(ctx, tx, id, c.d, now); err != nil {
+					return err
+				}
+			}
+		}
+		settled := map[string]model.IngestionJob{}
+		for _, id := range sortedKeys(jobDelta) {
+			job, err := updateJobCounters(ctx, tx, id, jobDelta[id].d, now)
+			if err != nil {
+				return err
+			}
+			settled[id] = job
+		}
+
+		// Every entry's update in one round trip.
+		batch := &pgx.Batch{}
+		for _, i := range valid {
+			sql, args := entryUpdate(changes[i])
+			batch.Queue(sql, args...)
+		}
+		results := tx.SendBatch(ctx, batch)
+		for _, i := range valid {
+			moved, err := scanEntry(results.QueryRow())
+			if err != nil {
+				results.Close()
+				return fmt.Errorf("move ingestion entry: %w", err)
+			}
+			out[i].Entry = moved
+		}
+		if err := results.Close(); err != nil {
+			return fmt.Errorf("move ingestion entries: %w", err)
+		}
+
+		// Only a job that had an entry close can have finished.
+		for _, id := range sortedKeys(jobDelta) {
+			if closing[id] {
+				if _, err := settle(ctx, tx, settled[id], now); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// entryUpdate is the statement that moves one entry as ch says, returning
+// the entry as it then is. Transition and TransitionMany both run it.
+func entryUpdate(ch interfaces.EntryChange) (string, []any) {
+	attempt, generation := 0, 0
+	if ch.CountAttempt {
+		attempt = 1
+	}
+	if ch.NewGeneration {
+		generation = 1
+	}
+	return `
 			UPDATE ingestion_entries SET
 			    state = $3,
 			    attempts = attempts + $4,
@@ -498,19 +708,8 @@ func (r *IngestionRepository) Transition(ctx context.Context, ch interfaces.Entr
 			    upload_id = CASE WHEN $11 > 0 THEN NULL ELSE upload_id END,
 			    updated_at = $12
 			WHERE job_id = $1 AND position = $2
-			RETURNING `+entryColumns,
-			ch.JobID, ch.Position, string(ch.To), attempt, ch.AssetID, ch.StoredBytes,
-			ch.ErrorCode, clipText(ch.ErrorDetail), ch.NextAttemptAt, ch.LeaseExpiresAt, generation, ch.Now))
-		if err != nil {
-			return fmt.Errorf("move ingestion entry: %w", err)
-		}
-		if !d.closing() {
-			return nil // no entry closed: the job cannot have finished
-		}
-		_, err = settle(ctx, tx, job, ch.Now)
-		return err
-	})
-	return out, err
+			RETURNING ` + entryColumns, []any{ch.JobID, ch.Position, string(ch.To), attempt, ch.AssetID, ch.StoredBytes,
+			ch.ErrorCode, clipText(ch.ErrorDetail), ch.NextAttemptAt, ch.LeaseExpiresAt, generation, ch.Now}
 }
 
 func (r *IngestionRepository) RequestCancel(ctx context.Context, tenantID, jobID string, now time.Time) (model.IngestionJob, error) {
@@ -609,6 +808,20 @@ func (r *IngestionRepository) Retry(ctx context.Context, req interfaces.RetryReq
 		if err != nil {
 			return fmt.Errorf("read ingestion job: %w", err)
 		}
+		// Whether the job is revived (and counted active again) is decided
+		// from its locked row: two retries, or a retry and a settle, never
+		// both act on the same stale state. Lock order: tenant usage, then
+		// dataset, then job.
+		if err := lockUsage(ctx, tx, job.TenantID, req.Now); err != nil {
+			return err
+		}
+		if _, err := lockDataset(ctx, tx, job.TenantID, job.DatasetID); err != nil {
+			return err
+		}
+		job, err = scanIngestionJob(tx.QueryRow(ctx, `SELECT `+ingestionJobColumns+` FROM ingestion_jobs WHERE id = $1 FOR UPDATE`, req.JobID))
+		if err != nil {
+			return fmt.Errorf("lock ingestion job: %w", err)
+		}
 		switch job.State {
 		case model.JobRunning, model.JobReady, model.JobPartiallyCompleted, model.JobFailed, model.JobCompleted:
 		default:
@@ -637,14 +850,6 @@ func (r *IngestionRepository) Retry(ctx context.Context, req interfaces.RetryReq
 			FOR UPDATE OF e SKIP LOCKED
 		`, req.JobID, positions, model.RetryableEntryErrors, req.MaxManualRetries, req.Limit))
 		if err != nil || len(entries) == 0 {
-			return err
-		}
-		// Reviving a finished job refreshes its dataset after the job's
-		// counters, so lock the usage and the dataset before the job.
-		if err := lockUsage(ctx, tx, job.TenantID, req.Now); err != nil {
-			return err
-		}
-		if _, err := lockDataset(ctx, tx, job.TenantID, job.DatasetID); err != nil {
 			return err
 		}
 		var d delta

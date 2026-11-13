@@ -18,19 +18,21 @@ The plan lists the objects (connection, path, size, SHA-256), what would hold ea
 
 `POST /api/v1/erasures {"kind", "reason", "reference", "institution", ...the search}` records a request with its plan. `kind` is `SUBJECT_WITHDRAWAL`, `COPYRIGHT`, `PII`, `CONSENT_EXPIRED` or `OTHER`; `institution` names who the certificate is for (one request per institution for a withdrawal that must be attested to each). `GET /api/v1/erasures[?state=]`, `GET /api/v1/erasures/{id}`.
 
-Where the organization's governance requires two people for deletions (docs/governance.md), `POST .../approve {"note"}` by a second member with `retention.manage` comes first. `POST .../cancel` drops a request not yet executed.
+Where the organization's governance requires two people for deletions (docs/governance.md), `POST .../approve {"note"}` by a second member with `retention.manage` comes first. `POST .../cancel` drops a request not yet executed, or one that `FAILED` (see below).
 
 ## Executing it
 
 `POST /api/v1/erasures/{id}/execute` searches again (the plan is never stale), then:
 
-1. **Successor snapshots.** For each snapshot that pins an erased file, oldest first, a new version of its dataset with every other member as it was, the same order, its own manifest SHA-256, lineage `derived_from` the old one, and `superseded_by` set on the old one. A successor of the dataset's current version becomes current. The old snapshot keeps its record; its erased members show as erased once their bytes are gone.
+1. **Successor snapshots.** For each snapshot that pins an erased file, oldest first, a new version of its dataset with every other member as it was, the same order, its own manifest SHA-256, lineage `derived_from` the old one, and `superseded_by` set on the old one. A successor of the dataset's current version becomes current. Snapshots of archived datasets are superseded too. The old snapshot keeps its record; its erased members show as erased once their bytes are gone.
 2. **Reads stop.** A superseded snapshot cannot be streamed for training or recorded as a training run's input any more: **409** `version_superseded`, naming its successor.
 3. **Drafts.** Erased files leave every dataset's draft, so no later snapshot takes them back.
 4. **Deletion.** Every matched object, each copy included, is deleted through the lifecycle (docs/lifecycle.md) at once, without the grace period: all its stored objects, its replicas, its entry in any pack (the pack is rewritten), on its own connection. A legal hold, a retention period or an Object Lock still in force holds a file back: the request waits (`WAITING_ON_HOLD`) and finishes on its own when the hold is released. Erasure overrides snapshots; it never overrides a hold.
 5. **Tombstone.** An `erasure.executed` entry in the audit chain records the request, the content hashes, the subjects as SHA-256 hashes, and the counts. After completion the request keeps the subjects only as those hashes.
 
-The cleanup worker follows each file's deletion. When every file is gone the request is `COMPLETED`, `erasure.completed` is sent (with the models to retrain), and the certificate is issued.
+Steps 1 and 3 make the request **prepared** (`prepared_at`, migration `000054_erasure_prepared.sql`). The request is `DELETING` from the moment execution starts, before either step, so a cancel can no longer win. If the execute fails or stops partway, the cleanup worker searches again and does steps 1 and 3 itself before it asks for any deletion. It does the same for an execute still running: both runs are safe to repeat and to run at once, and the successors are read back from the snapshots, so neither loses the other's. A request is never certified before it is prepared.
+
+The cleanup worker follows each file's deletion. When every file is gone the request is `COMPLETED`, `erasure.completed` is sent (with the models to retrain), and the certificate is issued. Each pass takes the requests it looked at longest ago first. A request whose pass fails is logged and skipped, and the others go on. A request is `FAILED` when a file's deletion failed or was cancelled (the file was restored). An operator's `lifecycle-admin requeue` of a failed deletion lets it finish. Otherwise `POST .../cancel` drops it. What it already did stays done, and no certificate is issued.
 
 ## The certificate of destruction
 

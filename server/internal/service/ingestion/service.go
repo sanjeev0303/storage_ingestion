@@ -92,6 +92,9 @@ type Service struct {
 	// has reached in this process (sweeps.go).
 	cancelMu    sync.Mutex
 	cancelledTo map[string]int64
+
+	// group batches the hot per-file entry changes (coalesce.go).
+	group coalescer
 }
 
 func NewService(deps Dependencies, cfg config.Ingestion) (*Service, error) {
@@ -240,6 +243,9 @@ func (s *Service) CreateJob(ctx context.Context, p model.Principal, in CreateJob
 	}
 	ds, err := s.deps.Repo.GetDataset(ctx, p.TenantID, in.DatasetID)
 	if err != nil {
+		return model.IngestionJob{}, false, err
+	}
+	if err := inScope(p, ds); err != nil {
 		return model.IngestionJob{}, false, err
 	}
 	if ds.ParentID != "" {

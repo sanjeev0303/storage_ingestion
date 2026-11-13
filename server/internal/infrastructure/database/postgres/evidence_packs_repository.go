@@ -230,8 +230,8 @@ func (r *EvidenceRepository) SummariesDue(ctx context.Context, now time.Time) (i
 	tag, err := r.db.Pool.Exec(ctx, `
 		WITH due AS (
 			UPDATE models SET summary_reminded_at = $1
-			WHERE COALESCE(summary_published_at, created_at + interval '1 month' - interval '6 months') <= $1 - interval '6 months'
-			  AND (summary_reminded_at IS NULL OR summary_reminded_at <= $1 - interval '6 months')
+			WHERE COALESCE(summary_published_at, created_at + interval '1 month' - interval '6 months') <= $1::timestamptz - interval '6 months'
+			  AND (summary_reminded_at IS NULL OR summary_reminded_at <= $1::timestamptz - interval '6 months')
 			RETURNING tenant_id, id, name, version, summary_published_at)
 		SELECT queue_webhook(tenant_id, 'model.summary_due', jsonb_build_object('model_id', id, 'name', name, 'version', version,
 		       'summary_published_at', summary_published_at)) FROM due`, now)

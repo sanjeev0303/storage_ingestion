@@ -120,6 +120,35 @@ describe("AssetsScreen", () => {
 
     expect(await screen.findByText("Restored")).toBeInTheDocument();
   });
+
+  it("shows only the result of the latest action, never a deletion and a restore together", async () => {
+    let status = "AVAILABLE";
+    const deletion = { id: "del-1", state: "SCHEDULED", purge_after: "2026-11-01T00:00:00Z", restorable: true };
+    server.use(
+      http.get(`${API}/assets/asset-1`, () => HttpResponse.json({ ...asset, status })),
+      http.get(`${API}/assets/asset-1/lifecycle`, () =>
+        HttpResponse.json({ ...lifecycle, status, ...(status === "SOFT_DELETED" && { deletion }) })),
+      http.get(`${API}/assets/asset-1/quarantine`, () => HttpResponse.json({}, { status: 404 })),
+      http.delete(`${API}/assets/asset-1`, () => {
+        status = "SOFT_DELETED";
+        return HttpResponse.json({ asset_id: "asset-1", status, created: true, deletion }, { status: 202 });
+      }),
+      http.post(`${API}/assets/asset-1/restore`, () => {
+        status = "AVAILABLE";
+        return HttpResponse.json({ asset_id: "asset-1", status });
+      }),
+    );
+    renderWithProviders(<AssetsScreen initialId="asset-1" />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Delete asset" }));
+    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Schedule deletion" }));
+    expect(await screen.findByText("Deletion scheduled")).toBeInTheDocument();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Restore asset" }));
+    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Restore asset" }));
+    expect(await screen.findByText("Restored")).toBeInTheDocument();
+    expect(screen.queryByText("Deletion scheduled")).not.toBeInTheDocument();
+  });
 });
 
 describe("RetentionScreen", () => {
@@ -295,5 +324,27 @@ describe("DeadLettersScreen", () => {
 
     expect(await screen.findByText("evt-replay-9")).toBeInTheDocument();
     expect(bodies).toEqual([{ reason: "consumer fixed" }]);
+  }, 20000);
+
+  it("starts clean when another entry is inspected", async () => {
+    const other = { ...letter, id: "dl-2", event_id: "evt-2", event_type: "asset.deleted" };
+    server.use(
+      http.get(`${API}/admin/dead-letters`, () => HttpResponse.json({ dead_letters: [letter, other] })),
+      http.get(`${API}/admin/dead-letters/dl-1`, () => HttpResponse.json(letter)),
+      http.get(`${API}/admin/dead-letters/dl-2`, () => HttpResponse.json(other)),
+      http.post(`${API}/admin/dead-letters/dl-1/replay`, () => HttpResponse.json({ replay_event_id: "evt-replay-9" })),
+    );
+    renderWithProviders(<DeadLettersScreen />, admin);
+
+    await userEvent.click((await screen.findAllByRole("button", { name: /Inspect/ }))[0]);
+    await userEvent.click(await screen.findByRole("button", { name: "Replay" }));
+    const dialog = await screen.findByRole("alertdialog");
+    await userEvent.type(within(dialog).getByLabelText(/Reason/), "consumer fixed");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Replay" }));
+    expect(await screen.findByText("evt-replay-9")).toBeInTheDocument();
+
+    await userEvent.click(screen.getAllByRole("button", { name: /Inspect/ })[1]);
+    expect(await screen.findByText("evt-2")).toBeInTheDocument();
+    expect(screen.queryByText("evt-replay-9")).not.toBeInTheDocument();
   }, 20000);
 });

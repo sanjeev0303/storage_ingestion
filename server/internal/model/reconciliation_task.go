@@ -66,6 +66,10 @@ type ReconciliationTask struct {
 // the task over, so the worker must not write its outcome.
 var ErrLeaseLost = errors.New("reconciliation lease lost")
 
+// ErrTaskNotExhausted: no EXHAUSTED reconciliation task has that ID, so
+// there is nothing for an operator to requeue.
+var ErrTaskNotExhausted = errors.New("no EXHAUSTED reconciliation task with that ID")
+
 // Discrepancies the reconciliation scans look for beyond live tasks.
 const (
 	// FindingOrphanSession: a provider multipart session no live session owns.

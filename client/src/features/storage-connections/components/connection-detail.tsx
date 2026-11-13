@@ -131,7 +131,16 @@ function Loaded({ connection }: { connection: StorageConnection }) {
           manage && !isPlatform ? (
             <>
               <Button onClick={() => setDialog("edit")}>Edit</Button>
-              {canRotate && <Button onClick={() => setDialog("rotate")}>Rotate credentials</Button>}
+              {/* With a credential staged, a direct rotation would race the promotion; use the second credential panel. */}
+              {canRotate && (
+                <Button
+                  onClick={() => setDialog("rotate")}
+                  disabled={Boolean(connection.staged_credential)}
+                  title={connection.staged_credential ? "Promote or discard the staged credentials first." : undefined}
+                >
+                  Rotate credentials
+                </Button>
+              )}
             </>
           ) : undefined
         }
@@ -255,7 +264,7 @@ function Loaded({ connection }: { connection: StorageConnection }) {
             <p className="mt-3 text-sm text-muted">Secrets are never shown after they are saved.</p>
           </Panel>
           {canRotate && <SecondCredential connection={connection} />}
-          {manage && !isPlatform && <IntegritySettings key={connection.revision} connection={connection} />}
+          {manage && !isPlatform && <IntegritySettings connection={connection} />}
           <Panel title="Revision" tone="in">
             <p className="mono-data" aria-label={`Revision ${connection.revision}`}>
               {connection.revision}
@@ -326,11 +335,13 @@ function Loaded({ connection }: { connection: StorageConnection }) {
   );
 }
 
+const STATUS_LABELS: Record<string, string> = { ACTIVE: "Active", PENDING: "Pending", DISABLED: "Disabled", DELETED: "Deleted" };
+
 function StatusBadges({ connection }: { connection: StorageConnection }) {
   return (
     <div className="flex flex-wrap items-center gap-2">
       <StateBadge tone={connection.status === "ACTIVE" ? "done" : connection.status === "PENDING" ? "attention" : "neutral"}>
-        {connection.status === "ACTIVE" ? "Active" : connection.status === "PENDING" ? "Pending" : connection.status === "DISABLED" ? "Disabled" : connection.status}
+        {STATUS_LABELS[connection.status] ?? connection.status}
       </StateBadge>
       {connection.is_default && <StateBadge>Default</StateBadge>}
       {connection.provider === "PLATFORM_MANAGED" && <StateBadge>Platform-managed</StateBadge>}
@@ -343,6 +354,7 @@ function StatusNote({ connection }: { connection: StorageConnection }) {
     PENDING: "Created but not tested. It cannot take uploads until a test passes.",
     ACTIVE: "Takes new uploads. Only Active connections do.",
     DISABLED: "Takes no new uploads. Data already stored here is still served, so keep the credentials working.",
+    DELETED: "Deleted. Its stored credentials are erased and it takes no uploads. The bucket's contents were not touched.",
   };
   return <p className="max-w-prose text-base text-muted">{text[connection.status] ?? ""}</p>;
 }
@@ -351,7 +363,9 @@ function LastTest({ connection }: { connection: StorageConnection }) {
   if (!connection.last_tested_at) {
     return <Outcome outcome="not_assessed" label="Not tested yet" />;
   }
-  const failed = Boolean(connection.last_error_category);
+  // A passing test sets last_test_ok_at to the same moment as last_tested_at.
+  // Anything else failed, even with no category recorded.
+  const failed = !connection.last_test_ok_at || Date.parse(connection.last_test_ok_at) < Date.parse(connection.last_tested_at);
   return (
     <div className="flex flex-col gap-2">
       <Outcome outcome={failed ? "failed" : "passed"} label={failed ? "Last test failed" : "Last test passed"} />

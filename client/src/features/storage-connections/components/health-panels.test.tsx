@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { renderWithProviders } from "@/test/render";
 import { API, server } from "@/test/server";
 import type { PostureReport, StorageConnection } from "../types";
@@ -101,6 +101,28 @@ describe("storage health panels", () => {
     expect(await screen.findByText(/Not saved: the connection failed its test/)).toBeInTheDocument();
   });
 
+  it("keeps unsaved integrity edits through a refetch, sends the revision they started from, and reloads once refused", async () => {
+    let sent: unknown;
+    server.use(
+      http.patch(`${API}/storage-connections/sc_1`, async ({ request }) => {
+        sent = await request.json();
+        return HttpResponse.json({ error: "stale", code: "revision_conflict" }, { status: 412 });
+      }),
+    );
+    const { rerender } = renderWithProviders(<IntegritySettings connection={connection} />, { permissions: ["storage.manage"] });
+    await userEvent.type(screen.getByLabelText(/Bucket owner account/), "123456789012");
+
+    rerender(<IntegritySettings connection={{ ...connection, checksum_mode: "WHEN_REQUIRED", revision: 5 }} />);
+    expect(await screen.findByText(/Someone else changed this connection after you started editing/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Bucket owner account/)).toHaveValue("123456789012");
+
+    await userEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    await waitFor(() => expect(sent).toEqual({ revision: 4, expected_owner: "123456789012" }));
+    await waitFor(() => expect(screen.getByLabelText(/Bucket owner account/)).toHaveValue(""));
+    expect(screen.getByLabelText("Request checksums")).toHaveValue("WHEN_REQUIRED");
+    expect(screen.queryByText(/Someone else changed this connection after you started editing/)).not.toBeInTheDocument();
+  });
+
   it("promotes staged credentials only after confirming", async () => {
     let promoted = false;
     server.use(
@@ -118,6 +140,68 @@ describe("storage health panels", () => {
     await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Test and promote" }));
     await waitFor(() => expect(promoted).toBe(true));
     expect(await screen.findByText(/Revoke the old keys/)).toBeInTheDocument();
+  });
+
+  it("says plainly when promote is refused because the staged credentials are not newer", async () => {
+    server.use(
+      http.post(`${API}/storage-connections/sc_1/credentials/promote`, () =>
+        HttpResponse.json({ error: "the staged credential is not newer", code: "conflict" }, { status: 409 }),
+      ),
+    );
+    renderWithProviders(
+      <SecondCredential connection={{ ...connection, staged_credential: { rotation: 1, staged_at: "2026-10-30T09:30:00Z" } }} />,
+      { permissions: ["storage.manage"] },
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Promote" }));
+    const dialog = await screen.findByRole("alertdialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Test and promote" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "Not promoted: the staged credentials are not newer than the ones in use.",
+    );
+  });
+
+  it.each([
+    { action: "Promote", confirm: "Test and promote", method: "post" as const, path: "credentials/promote", staged: true },
+    { action: "Discard", confirm: "Discard", method: "delete" as const, path: "credentials/staged", staged: true },
+    { action: "Roll back", confirm: "Roll back", method: "post" as const, path: "credentials/rollback", staged: false },
+  ])("says the credentials changed and reloads the connection when $action finds them changed", async ({ action, confirm, method, path, staged }) => {
+    server.use(
+      http[method](`${API}/storage-connections/sc_1/${path}`, () =>
+        HttpResponse.json({ error: "the credentials changed since they were read", code: "credential_changed" }, { status: 409 }),
+      ),
+    );
+    const shown = staged
+      ? { ...connection, staged_credential: { rotation: 2, staged_at: "2026-10-30T09:30:00Z" } }
+      : { ...connection, previous_credential_until: new Date(Date.now() + 86_400_000).toISOString() };
+    const { client } = renderWithProviders(<SecondCredential connection={shown} />, { permissions: ["storage.manage"] });
+    const refetch = vi.spyOn(client, "invalidateQueries");
+    await userEvent.click(screen.getByRole("button", { name: action }));
+    const dialog = await screen.findByRole("alertdialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: confirm }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "The credentials changed while you were looking. Check the latest state and try again.",
+    );
+    expect(refetch).toHaveBeenCalled();
+  });
+
+  it("offers no roll back while new credentials are staged", () => {
+    const until = new Date(Date.now() + 86_400_000).toISOString();
+    renderWithProviders(
+      <SecondCredential
+        connection={{ ...connection, previous_credential_until: until, staged_credential: { rotation: 2, staged_at: "2026-10-30T09:30:00Z" } }}
+      />,
+      { permissions: ["storage.manage"] },
+    );
+    expect(screen.queryByRole("button", { name: "Roll back" })).not.toBeInTheDocument();
+  });
+
+  it("takes Roll back away when the rollback window closes", async () => {
+    const until = new Date(Date.now() + 300).toISOString();
+    renderWithProviders(<SecondCredential connection={{ ...connection, previous_credential_until: until }} />, {
+      permissions: ["storage.manage"],
+    });
+    expect(screen.getByRole("button", { name: "Roll back" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Roll back" })).not.toBeInTheDocument(), { timeout: 2000 });
   });
 
   it("resolves a change found outside the platform", async () => {

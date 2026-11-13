@@ -1,6 +1,6 @@
 import "server-only";
 import { NextResponse, type NextRequest } from "next/server";
-import { BACKEND_URL, clientAddress, setSessionCookies, type Tokens } from "@/server/auth";
+import { BACKEND_URL, clientAddress, secure, setSessionCookies, type Tokens } from "@/server/auth";
 import { logServerError } from "@/server/log";
 
 // The provider sends the browser back here. The API only accepts callbacks
@@ -23,6 +23,34 @@ function moveOn(to: string) {
   );
 }
 
+// The sign-in is bound to the browser that started it: start keeps the
+// state in this cookie, and the callback must come back with it. Without
+// that, anyone could finish their own sign-in in someone else's browser and
+// leave them signed in to the wrong account (login CSRF).
+const SSO_STATE_COOKIE = "orb_sso_state";
+
+// The SAML response arrives as a cross-site form post, which only carries a
+// SameSite=None cookie, and browsers keep those only when Secure. Over plain
+// http (local development) Lax is the best there is: OpenID sign-in still
+// works there, SAML does not.
+export function bindState(res: NextResponse, authorizationUrl: string) {
+  let state = "";
+  try {
+    const params = new URL(authorizationUrl).searchParams;
+    state = params.get("state") ?? params.get("RelayState") ?? "";
+  } catch {
+    return;
+  }
+  if (!state) return;
+  res.cookies.set(SSO_STATE_COOKIE, state, {
+    httpOnly: true,
+    secure,
+    sameSite: secure ? "none" : "lax",
+    path: "/api/session",
+    maxAge: 600,
+  });
+}
+
 export function refused(reason: string) {
   const res = moveOn("/login?sso=refused");
   res.cookies.set(SSO_ERROR_COOKIE, reason.slice(0, 300), { httpOnly: true, sameSite: "lax", path: "/login", maxAge: 60 });
@@ -30,8 +58,18 @@ export function refused(reason: string) {
 }
 
 // Sends the provider's answer to the API, and on success starts the
-// session in the organization signed in to.
-export async function finishSignIn(req: NextRequest, backendPath: string, body: Record<string, string>) {
+// session in the organization signed in to. state is the one the answer
+// carries; this browser must have started that sign-in.
+export async function finishSignIn(req: NextRequest, backendPath: string, body: Record<string, string>, state: string) {
+  const res = await exchange(req, backendPath, body, state);
+  res.cookies.set(SSO_STATE_COOKIE, "", { path: "/api/session", maxAge: 0 });
+  return res;
+}
+
+async function exchange(req: NextRequest, backendPath: string, body: Record<string, string>, state: string) {
+  if (!state || req.cookies.get(SSO_STATE_COOKIE)?.value !== state) {
+    return refused("This sign-in was not started in this browser. Start again.");
+  }
   const headers = new Headers({ "Content-Type": "application/json" });
   const address = clientAddress(req);
   if (address) headers.set("x-forwarded-for", address);

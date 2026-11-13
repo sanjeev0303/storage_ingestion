@@ -25,7 +25,10 @@ export function CommandPalette() {
     function onKey(event: globalThis.KeyboardEvent) {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
+        // The same reset change() does, whichever way the palette goes.
         setOpen((value) => !value);
+        setQuery("");
+        setActive(0);
       }
     }
     window.addEventListener("keydown", onKey);
@@ -61,7 +64,7 @@ export function CommandPalette() {
 
   return (
     <>
-      <Button onClick={() => setOpen(true)} aria-label="Go to a page" className="px-3">
+      <Button onClick={() => change(true)} aria-label="Go to a page" className="px-3">
         <MagnifyingGlass aria-hidden />
         <span className="hidden sm:inline">Go to</span>
         <kbd className="mono-data hidden text-sm text-muted md:inline">Ctrl K</kbd>

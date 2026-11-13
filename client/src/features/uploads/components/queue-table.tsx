@@ -40,6 +40,16 @@ function queuedAs(hasProblem: boolean, ahead: number): QueuedAs {
   return { label: "Ready", text: "Ready. Start upload begins it." };
 }
 
+// Rounded the way people say it: precise seconds would only flicker.
+function timeLeft(seconds: number) {
+  if (seconds < 60) return "less than a minute left";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `about ${minutes} min left`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest > 0 ? `about ${hours} h ${rest} min left` : `about ${hours} h left`;
+}
+
 function badgeTone(state: UploadState) {
   if (state === "available") return "done" as const;
   if (state === "rejected" || state === "failed") return "attention" as const;
@@ -83,21 +93,41 @@ function UploadProgress({ snap }: { snap: UploadSnapshot }) {
   const sent = done ? snap.fileSize : snap.sentBytes;
   const percent = snap.fileSize > 0 ? Math.floor((sent / snap.fileSize) * 100) : 0;
   const parts = snap.mode === "multipart" && snap.partsTotal > 0 ? `, ${snap.partsDone} of ${snap.partsTotal} parts confirmed` : "";
-  const speed = snap.state === "uploading" && snap.speedBps > 0 ? `, ${formatBytes(snap.speedBps)}/s` : "";
-  const text = snap.state === "queued" ? "Not started" : `${percent}%, ${formatBytes(sent)} of ${formatBytes(snap.fileSize)}${speed}${parts}`;
+  const uploading = snap.state === "uploading" && !snap.paused;
+  const speed = uploading && snap.speedBps > 0 ? `, ${formatBytes(snap.speedBps)}/s, ${timeLeft((snap.fileSize - sent) / snap.speedBps)}` : "";
+  let text = snap.state === "queued" ? "Not started" : `${percent}%, ${formatBytes(sent)} of ${formatBytes(snap.fileSize)}${speed}${parts}`;
+  let note = "";
+  if (snap.state === "uploading" && snap.paused === "offline") {
+    text = `Paused: no connection. ${formatBytes(sent)} of ${formatBytes(snap.fileSize)} kept`;
+    note = "The upload goes on by itself once the connection is back.";
+  } else if (snap.state === "uploading" && snap.paused === "user") {
+    text = `Paused. ${formatBytes(sent)} of ${formatBytes(snap.fileSize)} kept`;
+  } else if (uploading && snap.slow) {
+    note = "Slow connection. The next parts go fewer at a time, so each one can finish.";
+  }
 
-  return <ProgressBar label={`Upload of ${snap.fileName}`} value={sent} max={snap.fileSize} text={text} />;
+  return (
+    <div>
+      <ProgressBar label={`Upload of ${snap.fileName}`} value={sent} max={snap.fileSize} text={text} />
+      {/* Always present, so a screen reader hears the pause and the slow link as they happen. */}
+      <p role="status" className={cn("max-w-64 text-sm text-muted", note && "mt-1")}>
+        {note}
+      </p>
+    </div>
+  );
 }
 
 function Processing({ snap, queued }: { snap: UploadSnapshot; queued: QueuedAs }) {
   const { state, asset } = snap;
   let text = queued.text;
+  if (state === "hashing" || state === "uploading") text = "Starts once the upload finishes";
   if (state === "finalizing") text = "Waiting for the upload to finish";
   if (state === "verifying") text = "The server is verifying the checksum";
   if (state === "processing") text = asset?.status === "QUARANTINED" ? "Held in quarantine until the checks finish" : "Being checked and scanned";
   if (state === "available") text = "Available in the catalog";
   if (state === "rejected") text = `Rejected and kept in quarantine${asset?.rejectionReason ? `: ${asset.rejectionReason.replaceAll("_", " ")}` : ""}`;
   if (state === "failed" || state === "cancelled") text = "Not processed";
+  if (snap.paused === "offline" && state !== "uploading") text = "Paused: no connection. Checking goes on once it is back.";
 
   return (
     <div className="max-w-64 text-sm">
@@ -122,8 +152,14 @@ function RowActions({ entry, snap, onRemove, onAskCancel }: { entry: QueueEntry;
   return (
     <div className="flex flex-wrap gap-2">
       {snap.state === "queued" && <Button onClick={onRemove}>Remove</Button>}
-      {["hashing", "uploading", "finalizing"].includes(snap.state) && <Button onClick={onAskCancel}>Cancel</Button>}
-      {["verifying", "processing"].includes(snap.state) && snap.pollingStopped && (
+      {snap.state === "uploading" && snap.mode === "multipart" && !snap.paused && <Button onClick={() => task.pause()}>Pause</Button>}
+      {snap.paused && (
+        <Button variant="primary" onClick={() => task.resume()}>
+          {snap.paused === "offline" ? "Check connection" : "Resume"}
+        </Button>
+      )}
+      {["hashing", "uploading", "finalizing"].includes(snap.state) && !snap.completionSent && <Button onClick={onAskCancel}>Cancel</Button>}
+      {["finalizing", "verifying", "processing"].includes(snap.state) && snap.pollingStopped && (
         <Button onClick={() => task.checkNow()}>Check again</Button>
       )}
       {["verifying", "processing"].includes(snap.state) && !snap.pollingStopped && (
@@ -269,7 +305,11 @@ const QueueRow = memo(function QueueRow({
           <Processing snap={snap} queued={queued} />
         </Td>
         <Td className="max-w-72">
-          <StateBadge tone={badgeTone(snap.state)}>{snap.state === "queued" ? queued.label : STATE_LABEL[snap.state]}</StateBadge>
+          {snap.paused ? (
+            <StateBadge tone="warning">Paused</StateBadge>
+          ) : (
+            <StateBadge tone={badgeTone(snap.state)}>{snap.state === "queued" ? queued.label : STATE_LABEL[snap.state]}</StateBadge>
+          )}
           {snap.failure && (
             <p role="alert" className={cn("mt-2 text-sm")}>
               {snap.failure.message}

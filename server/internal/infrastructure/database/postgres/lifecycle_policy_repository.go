@@ -265,6 +265,17 @@ func (r *LegalHoldRepository) List(ctx context.Context, tenantID string, include
 	`, tenantID, includeReleased)
 }
 
+func (r *LegalHoldRepository) Page(ctx context.Context, tenantID string, includeReleased bool, beforeAt time.Time, beforeID string, limit int) ([]model.LegalHold, error) {
+	return r.query(ctx, `
+		SELECT `+holdColumns+`
+		FROM legal_holds
+		WHERE tenant_id = $1 AND ($2 OR released_at IS NULL)
+		  AND ($3 = '' OR (placed_at, id) < ($4, $3))
+		ORDER BY placed_at DESC, id DESC
+		LIMIT $5
+	`, tenantID, includeReleased, beforeID, beforeAt, limit)
+}
+
 func (r *LegalHoldRepository) query(ctx context.Context, sql string, args ...any) ([]model.LegalHold, error) {
 	rows, err := r.db.Pool.Query(ctx, sql, args...)
 	if err != nil {

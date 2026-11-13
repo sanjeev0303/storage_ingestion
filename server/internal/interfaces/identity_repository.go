@@ -17,9 +17,15 @@ type IdentityRepository interface {
 	GetUserByEmail(ctx context.Context, email string) (model.User, error)
 	ListUsers(ctx context.Context, after string, limit int) ([]model.User, error)
 	CountPlatformAdmins(ctx context.Context) (int, error)
-	// SetUserStatus changes an account's status. Deactivating it revokes
-	// all its sessions in the same transaction.
-	SetUserStatus(ctx context.Context, userID string, status model.UserStatus, now time.Time, audit ...model.AuditEvent) (model.User, error)
+	// SetUserStatus changes an account's status from from, or fails with
+	// model.ErrUserStatusChanged. Deactivating it revokes all its sessions
+	// in the same transaction. Taking an ACTIVE account out of ACTIVE is
+	// refused for the last active platform administrator (model.ErrForbidden)
+	// and for the last active owner of an active organization
+	// (model.ErrLastOwner), checked under locks that serialise such changes.
+	SetUserStatus(ctx context.Context, userID string, from, status model.UserStatus, now time.Time, audit ...model.AuditEvent) (model.User, error)
+	// SetPlatformRole refuses, the same way, to take the role from the last
+	// active platform administrator.
 	SetPlatformRole(ctx context.Context, userID string, role model.PlatformRole, now time.Time, audit ...model.AuditEvent) error
 	// ChangePassword stores a new hash and revokes every other session of
 	// the account.
@@ -159,6 +165,11 @@ type QuotaRepository interface {
 	// declared bytes in one transaction, under the tenant's usage lock.
 	// A *model.QuotaError when a limit would be passed.
 	CreateReservedUpload(ctx context.Context, upload *model.UploadSession, idempotencyKey string, limits model.TenantQuota, multipart bool) error
+	// CreateReservedUploads stores single-request sessions of one tenant
+	// with their reservations in one transaction, all or nothing:
+	// model.ErrBatchNotReserved when any of them would be refused, and the
+	// caller then reserves them one at a time.
+	CreateReservedUploads(ctx context.Context, uploads []model.ReservedUpload, limits model.TenantQuota) error
 	Usage(ctx context.Context, tenantID string) (model.StorageUsage, error)
 	// Reconcile settles stale reservations and recounts the tenant's usage
 	// from its sessions and assets.

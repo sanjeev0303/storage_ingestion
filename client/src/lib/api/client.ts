@@ -106,7 +106,9 @@ export async function apiRaw(path: string, options: RequestOptions = {}): Promis
   if (res.ok) return res;
 
   const error = await readError(res);
-  if (error.status === 401) {
+  // A wrong current password (invalid_credentials) is a 401 too, but the
+  // session is fine; only a refused token or session means signing in again.
+  if (error.status === 401 && (!error.code || error.code === "unauthenticated" || error.code === "refresh_reused")) {
     for (const listener of unauthenticatedListeners) listener();
   }
   throw error;

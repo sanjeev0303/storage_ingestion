@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	nethttp "net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -349,6 +350,7 @@ func (h *GovernanceHandler) Routes() map[string]nethttp.HandlerFunc {
 		routes["POST /api/v1/assets/{id}/quarantine/release"] = h.release
 		routes["GET /api/v1/assets/{id}/findings"] = h.findings
 		routes["GET /api/v1/assets/{id}/blast-radius"] = h.blastRadius
+		routes["POST /api/v1/assets/{id}/unblock"] = h.unblock
 		routes["GET /api/v1/content-policy"] = h.contentPolicy
 		routes["PUT /api/v1/content-policy"] = h.setContentPolicy
 	}
@@ -413,6 +415,20 @@ func (h *GovernanceHandler) blastRadius(w nethttp.ResponseWriter, r *nethttp.Req
 	out.Snapshots = append([]model.BlastSnapshot{}, out.Snapshots...)
 	out.Downloads = append([]model.BlastDownload{}, out.Downloads...)
 	writeJSON(w, nethttp.StatusOK, out)
+}
+
+func (h *GovernanceHandler) unblock(w nethttp.ResponseWriter, r *nethttp.Request) {
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if err := h.quarantine.UnblockFor(r.Context(), principalOf(r), r.PathValue("id"), body.Reason); err != nil {
+		writeSecurityError(w, h.log, err)
+		return
+	}
+	writeJSON(w, nethttp.StatusOK, map[string]any{"asset_id": r.PathValue("id"), "blocked": false})
 }
 
 // contentPolicyBody is a tenant's content policy on the wire.
@@ -538,10 +554,24 @@ func (h *GovernanceHandler) listPolicies(w nethttp.ResponseWriter, r *nethttp.Re
 	writeJSON(w, nethttp.StatusOK, map[string]any{"policies": out})
 }
 
-// listHolds answers the active legal holds, or all of them with
-// ?include_released=true.
+// listHolds pages the active legal holds, or all of them with
+// ?include_released=true, newest first with ?cursor= and ?limit=.
 func (h *GovernanceHandler) listHolds(w nethttp.ResponseWriter, r *nethttp.Request) {
-	holds, err := h.lifecycle.HoldsFor(r.Context(), principalOf(r), r.URL.Query().Get("include_released") == "true")
+	query := r.URL.Query()
+	limit := 0
+	if raw := query.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			writeJSON(w, nethttp.StatusBadRequest, problem{Error: "limit must be a positive number", Code: "invalid_request"})
+			return
+		}
+		limit = n
+	}
+	holds, next, err := h.lifecycle.HoldPageFor(r.Context(), principalOf(r), query.Get("include_released") == "true", query.Get("cursor"), limit)
+	if errors.Is(err, model.ErrInvalidCursor) {
+		writeJSON(w, nethttp.StatusBadRequest, problem{Error: "invalid cursor", Code: "invalid_request"})
+		return
+	}
 	if err != nil {
 		h.governanceError(w, err)
 		return
@@ -550,8 +580,12 @@ func (h *GovernanceHandler) listHolds(w nethttp.ResponseWriter, r *nethttp.Reque
 	for _, hold := range holds {
 		out = append(out, holdBody(hold))
 	}
+	body := map[string]any{"holds": out}
+	if next != "" {
+		body["next_cursor"] = next
+	}
 	w.Header().Set("Cache-Control", "private, no-store")
-	writeJSON(w, nethttp.StatusOK, map[string]any{"holds": out})
+	writeJSON(w, nethttp.StatusOK, body)
 }
 
 // durationText writes a policy duration the way it is set ("720h0m0s"),

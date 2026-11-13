@@ -34,6 +34,7 @@ function Summary({ snapshots, waiting, needFix }: { snapshots: UploadSnapshot[];
   const sent = snapshots.reduce((sum, s) => sum + sentBytes(s), 0);
   const count = (...states: string[]) => snapshots.filter((s) => states.includes(s.state)).length;
   const ready = count("queued") - waiting - needFix;
+  const paused = snapshots.filter((s) => s.paused && ["hashing", "uploading", "finalizing"].includes(s.state)).length;
 
   return (
     <div className="flex flex-col gap-4" aria-live="polite">
@@ -41,7 +42,7 @@ function Summary({ snapshots, waiting, needFix }: { snapshots: UploadSnapshot[];
       <p className="text-sm text-muted">
         {formatNumber(snapshots.length)} {snapshots.length === 1 ? "file" : "files"}: {ready} ready to start, {waiting} waiting for a slot,{" "}
         {needFix} {needFix === 1 ? "needs" : "need"} a fix,{" "}
-        {count("hashing", "uploading", "finalizing")} uploading,{" "}
+        {count("hashing", "uploading", "finalizing") - paused} uploading, {paused} paused,{" "}
         {count("verifying", "processing")} being checked by the server, {count("available")} available, {count("rejected")} rejected,{" "}
         {count("failed", "cancelled")} failed or cancelled.
       </p>
@@ -150,9 +151,10 @@ export function UploadsScreen() {
               <Summary snapshots={snapshots} waiting={queue.waitingIds.length} needFix={needFix} />
               {(anyLarge || anyMultipart) && (
                 <p className="neo-in-sm p-3 text-sm">
-                  {anyLarge ? "Large files take a while. " : ""}Files over {formatBytes(SINGLE_LIMIT_BYTES)} upload in parts, four at a
-                  time. Keep this tab open. If you close it, the upload stops, and you can continue it from Unfinished uploads
-                  within about 30 minutes.
+                  {anyLarge ? "Large files take a while. " : ""}Files over {formatBytes(SINGLE_LIMIT_BYTES)} upload in parts, one to six at a
+                  time depending on the connection. If the connection drops, uploads pause and go on when it is back. Stay
+                  on this page. If you leave it or close the tab, the upload stops, and you can continue it from Unfinished uploads within
+                  about 30 minutes.
                 </p>
               )}
               <QueueTable

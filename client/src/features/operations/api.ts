@@ -56,8 +56,12 @@ export const listPolicies = (signal?: AbortSignal) =>
 export const policyHistory = (scope: string, scopeKey: string, signal?: AbortSignal) =>
   api<{ policies: PolicyInEffect[] }>("/retention/policies", { query: { scope, scope_key: scopeKey }, signal });
 
-export const listHolds = (includeReleased: boolean, signal?: AbortSignal) =>
-  api<{ holds: HeldHold[] }>("/legal-holds", { query: { include_released: includeReleased || undefined }, signal });
+// Newest placed first; next_cursor is absent on the last page.
+export const listHolds = (includeReleased: boolean, cursor?: string, signal?: AbortSignal) =>
+  api<{ holds: HeldHold[]; next_cursor?: string }>("/legal-holds", {
+    query: { include_released: includeReleased || undefined, cursor, limit: 50 },
+    signal,
+  });
 
 export const placeLegalHold = (body: LegalHoldRequest) =>
   api<LegalHold>("/legal-holds", { method: "POST", body });

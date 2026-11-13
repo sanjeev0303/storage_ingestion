@@ -78,6 +78,18 @@ func (r *DeletionRepository) SoftDelete(ctx context.Context, op model.DeletionOp
 	if !slices.Contains(from, model.AssetStatus(status)) {
 		return model.DeletionOperation{}, false, model.ErrInvalidAssetState
 	}
+	// The caller checked the processing job before this lock; a requeue
+	// since then (it needs this asset's share lock) made it active again.
+	if status == string(model.AssetStatusQuarantined) || status == string(model.AssetStatusProcessing) {
+		var jobState string
+		err := tx.QueryRow(ctx, `SELECT state FROM processing_jobs WHERE tenant_id = $1 AND asset_id = $2`, op.TenantID, op.AssetID).Scan(&jobState)
+		if errors.Is(err, pgx.ErrNoRows) || jobState == string(model.ProcessingPending) {
+			return model.DeletionOperation{}, false, model.ErrDeletionBlocked
+		}
+		if err != nil {
+			return model.DeletionOperation{}, false, fmt.Errorf("read processing job: %w", err)
+		}
+	}
 
 	var uploadID string
 	var sizeBytes int64
@@ -308,10 +320,15 @@ func (r *DeletionRepository) ExpediteProtected(ctx context.Context, tenantID, ho
 	return int(tag.RowsAffected()), nil
 }
 
+// Protect parks the operation until next. A started one (RETRY_WAIT) stays
+// RETRY_WAIT: PROTECTED would make it restorable with some objects already
+// gone. RETRY_WAIT, not the attempt count, says it started: Requeue and
+// Wait can leave a started operation with no attempt counted.
 func (r *DeletionRepository) Protect(ctx context.Context, operationID, owner string, now, next time.Time, reason string) error {
 	return r.leased(ctx, `
 		UPDATE deletion_operations
-		SET state = 'PROTECTED', protected_reason = $5, next_attempt_at = $4,
+		SET state = CASE WHEN state = 'RETRY_WAIT' THEN 'RETRY_WAIT' ELSE 'PROTECTED' END,
+		    protected_reason = $5, next_attempt_at = $4,
 		    lease_owner = NULL, lease_expires_at = NULL, updated_at = $3
 		WHERE id = $1 AND lease_owner = $2 AND lease_expires_at > $3
 		  AND state IN ('SCHEDULED', 'PROTECTED', 'RETRY_WAIT')
@@ -449,9 +466,13 @@ func (r *DeletionRepository) Fail(ctx context.Context, operationID, owner string
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
+	// A deletion failing after its storage deletion began keeps at least one
+	// attempt on record: Requeue reads it to tell a started one apart.
 	tag, err := tx.Exec(ctx, `
 		UPDATE deletion_operations
-		SET state = 'FAILED', last_error = NULLIF($4, ''), lease_owner = NULL, lease_expires_at = NULL, updated_at = $3
+		SET state = 'FAILED', last_error = NULLIF($4, ''), lease_owner = NULL, lease_expires_at = NULL, updated_at = $3,
+		    attempt_count = CASE WHEN state IN ('IN_PROGRESS', 'RETRY_WAIT', 'STORAGE_DELETED') THEN GREATEST(attempt_count, 1)
+		                         ELSE attempt_count END
 		WHERE id = $1 AND lease_owner = $2 AND lease_expires_at > $3 AND state IN `+liveStates,
 		operationID, owner, now, lastError)
 	if err != nil {
@@ -466,20 +487,27 @@ func (r *DeletionRepository) Fail(ctx context.Context, operationID, owner string
 	return tx.Commit(ctx)
 }
 
+// Cancel ends a deletion whose removal has not begun. RETRY_WAIT is only
+// reached once storage deletion started, so it cannot be cancelled: some
+// objects may be gone already.
 func (r *DeletionRepository) Cancel(ctx context.Context, operationID, owner string, now time.Time, reason string) error {
 	return r.leased(ctx, `
 		UPDATE deletion_operations
 		SET state = 'CANCELLED', last_error = NULLIF($4, ''), completed_at = $3,
 		    lease_owner = NULL, lease_expires_at = NULL, updated_at = $3
 		WHERE id = $1 AND lease_owner = $2 AND lease_expires_at > $3
-		  AND state IN ('SCHEDULED', 'PROTECTED', 'RETRY_WAIT')
+		  AND state IN ('SCHEDULED', 'PROTECTED')
 	`, operationID, owner, now, reason)
 }
 
+// Requeue gives a FAILED deletion a fresh attempt budget. One that never
+// started removing objects goes back to SCHEDULED, so it stays restorable;
+// one that did goes to RETRY_WAIT and finishes the removal.
 func (r *DeletionRepository) Requeue(ctx context.Context, tenantID, operationID string, now time.Time) (model.DeletionOperation, error) {
 	op, err := scanDeletion(r.db.Pool.QueryRow(ctx, `
 		UPDATE deletion_operations
-		SET state = 'RETRY_WAIT', attempt_count = 0, next_attempt_at = $3, last_error = NULL, updated_at = $3
+		SET state = CASE WHEN attempt_count = 0 AND storage_deleted_at IS NULL THEN 'SCHEDULED' ELSE 'RETRY_WAIT' END,
+		    attempt_count = 0, next_attempt_at = $3, last_error = NULL, updated_at = $3
 		WHERE tenant_id = $1 AND id = $2 AND state = 'FAILED'
 		RETURNING `+deletionColumns,
 		tenantID, operationID, now))

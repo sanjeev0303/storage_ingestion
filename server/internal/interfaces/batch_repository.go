@@ -201,6 +201,14 @@ type EntryChange struct {
 	NewGeneration bool
 }
 
+// EntryOutcome is what one change of a batch did: the entry as it now is,
+// or, with Err (model.ErrInvalidEntryState, model.ErrEntryNotFound), what
+// Transition would have returned for it on its own.
+type EntryOutcome struct {
+	Entry model.IngestionEntry
+	Err   error
+}
+
 // RetryRequest selects failed entries to try again.
 type RetryRequest struct {
 	TenantID  string

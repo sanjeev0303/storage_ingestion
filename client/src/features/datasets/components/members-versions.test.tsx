@@ -1,5 +1,6 @@
-import { screen, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { QueryClient } from "@tanstack/react-query";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
 import { API, server } from "@/test/server";
@@ -9,6 +10,7 @@ import type { DatasetMember, DatasetVersion } from "../types";
 import { MembersScreen } from "./members-screen";
 import { VersionDetail } from "./version-detail";
 import { VersionsScreen } from "./versions-screen";
+import VersionPage from "@/app/app/datasets/[id]/versions/[versionId]/page";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn() }),
@@ -281,5 +283,39 @@ describe("versions", () => {
     expect(await screen.findByText("one.txt")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Load more" }));
     expect(await screen.findByText("two.txt")).toBeInTheDocument();
+  });
+});
+
+describe("version page", () => {
+  // Next keeps the page mounted between /versions/X and /versions/Y, so the
+  // page is keyed by the version; nothing picked on one version leaks into the next.
+  it("starts fresh when it moves to another version", async () => {
+    const versions = [4, 3, 2, 1].map((n) => version({ id: `ver-${n}`, version: n }));
+    server.use(
+      http.get(`${API}/datasets/ds-1/versions`, () => HttpResponse.json({ versions })),
+      http.get(`${API}/datasets/ds-1/versions/:vid`, ({ params }) => HttpResponse.json(versions.find((v) => v.id === params.vid))),
+      http.get(`${API}/datasets/ds-1/versions/:vid/members`, () => HttpResponse.json({ members: [] })),
+      http.get(`${API}/datasets/ds-1/versions/:vid/diff`, () =>
+        HttpResponse.json({ differences: [], summary: { added: 0, removed: 0, changed: 0, relabeled: 0, unchanged: 6 } }),
+      ),
+    );
+    const page = (versionId: string) => VersionPage({ params: Promise.resolve({ id: "ds-1", versionId }) } as never);
+
+    // A version already seen is in the cache, so going back to it renders at
+    // once instead of passing through a loading state that would unmount the panels.
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const { rerender } = renderWithProviders(await page("ver-3"), { client });
+    await screen.findByRole("heading", { name: /^Version 3/ });
+
+    rerender(await page("ver-4"));
+    await screen.findByRole("heading", { name: /^Version 4/ });
+    await screen.findByRole("option", { name: "Version 1" });
+    await userEvent.selectOptions(screen.getByLabelText("Compared with"), "ver-1");
+    expect(screen.getByLabelText("Compared with")).toHaveValue("ver-1");
+
+    rerender(await page("ver-3"));
+    await screen.findByRole("heading", { name: /^Version 3/ });
+    // Version 3 is compared with the one before it, not with what version 4 had chosen.
+    await waitFor(() => expect(screen.getByLabelText("Compared with")).toHaveValue("ver-2"));
   });
 });

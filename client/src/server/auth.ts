@@ -14,7 +14,7 @@ export type Tokens = {
   session_id: string;
 };
 
-const secure = process.env.COOKIE_SECURE
+export const secure = process.env.COOKIE_SECURE
   ? process.env.COOKIE_SECURE === "true"
   : process.env.NODE_ENV === "production";
 
@@ -47,8 +47,16 @@ export function clearSessionCookies(res: NextResponse) {
 // refresh, and requests that were already in flight with the old cookie get
 // the same answer for a short while afterwards.
 const inflight = new Map<string, Promise<Tokens | null>>();
-const recent = new Map<string, { tokens: Tokens | null; until: number }>();
-const RECENT_MS = 30_000;
+const recent = new Map<string, { tokens: Tokens | null; failed: boolean; until: number }>();
+// Only requests already in flight with the old cookie need the cached answer,
+// and they arrive within a round trip; keep the window that short. The proxy
+// never presents a refresh token later than this after the request carrying it
+// arrived, so a slow request cannot outlive the cached answer.
+export const RECENT_MS = 5_000;
+
+// The refresh got no answer (network failure, 5xx). The API may still have
+// rotated the token, so it is not presented again within RECENT_MS.
+export class RefreshUnavailable extends Error {}
 
 // clientIP is the caller's address (clientAddress), passed on so the API's
 // per-address refresh limit counts each caller, not the console as a whole.
@@ -59,16 +67,23 @@ export async function refreshTokens(refreshToken: string, clientIP = ""): Promis
   }
 
   const done = recent.get(refreshToken);
+  if (done?.failed) throw new RefreshUnavailable();
   if (done) return done.tokens;
 
   const running = inflight.get(refreshToken);
   if (running) return running;
 
   const attempt = requestRefresh(refreshToken, clientIP)
-    .then((tokens) => {
-      recent.set(refreshToken, { tokens, until: Date.now() + RECENT_MS });
-      return tokens;
-    })
+    .then(
+      (tokens) => {
+        recent.set(refreshToken, { tokens, failed: false, until: Date.now() + RECENT_MS });
+        return tokens;
+      },
+      () => {
+        recent.set(refreshToken, { tokens: null, failed: true, until: Date.now() + RECENT_MS });
+        throw new RefreshUnavailable();
+      },
+    )
     .finally(() => inflight.delete(refreshToken));
   inflight.set(refreshToken, attempt);
   return attempt;

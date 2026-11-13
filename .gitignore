@@ -1,0 +1,5 @@
+# Local tooling and design-review artefacts, never part of the code.
+node_modules/
+.taste-skill/
+.impeccable/
+client/shots/

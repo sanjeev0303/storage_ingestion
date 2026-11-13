@@ -111,6 +111,30 @@ describe("ImportsScreen", () => {
     expect(seen!.sha).toMatch(/^[0-9a-f]{64}$/);
   });
 
+  it("does not open the job page once the user has left the imports page", async () => {
+    push.mockReset();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let started = false;
+    server.use(
+      http.post(`${API}/datasets/ds-1/manifests`, async () => {
+        started = true;
+        await gate;
+        return HttpResponse.json(job(), { status: 202 });
+      }),
+    );
+    const { unmount } = setup();
+    await userEvent.upload(await screen.findByLabelText(/^Manifest file/), manifestFile(goodLine));
+    await screen.findByText(/1 line,/);
+    await userEvent.click(screen.getByRole("button", { name: "Start import" }));
+    await waitFor(() => expect(started).toBe(true));
+
+    unmount();
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(push).not.toHaveBeenCalled();
+  });
+
   it("chooses a staged upload for a file over 8 MiB and does not offer inline", async () => {
     setup();
     await userEvent.upload(await screen.findByLabelText(/^Manifest file/), manifestFile(goodLine, 9 * 1024 * 1024));
@@ -132,6 +156,43 @@ describe("ImportsScreen", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Try again in 60 seconds");
   });
 
+  it("shows the check of the latest file even when an earlier file's check finishes later", async () => {
+    setup();
+    let release = () => {};
+    const slow = new File(["x"], "slow.jsonl");
+    Object.defineProperty(slow, "stream", {
+      value: () =>
+        new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            await new Promise<void>((resolve) => (release = resolve));
+            controller.enqueue(new TextEncoder().encode(`${goodLine}\n${goodLine}\n${goodLine}`));
+            controller.close();
+          },
+        }),
+    });
+    const input = await screen.findByLabelText(/^Manifest file/);
+    await userEvent.upload(input, slow);
+    await userEvent.upload(input, manifestFile(goodLine));
+    expect(await screen.findByText(/1 line,/)).toBeInTheDocument();
+    release();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByText(/3 lines,/)).not.toBeInTheDocument();
+    expect(screen.getByText(/1 line,/)).toBeInTheDocument();
+  });
+
+  it("does not open the job page when a staged import comes back without an upload link", async () => {
+    push.mockReset();
+    server.use(
+      http.post(`${API}/datasets/ds-1/manifests`, () => HttpResponse.json(job({ state: "AWAITING_UPLOAD", source: "STAGED" }), { status: 201 })),
+    );
+    setup();
+    await userEvent.upload(await screen.findByLabelText(/^Manifest file/), manifestFile(goodLine, 9 * 1024 * 1024));
+    await screen.findByText(/1 line,/);
+    await userEvent.click(screen.getByRole("button", { name: "Start import" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("gave no upload link");
+    expect(push).not.toHaveBeenCalled();
+  });
+
   it("is closed for archived datasets and denied without write", async () => {
     server.use(http.get(`${API}/datasets/ds-1`, () => HttpResponse.json(makeDataset({ lifecycle_status: "ARCHIVED" }))));
     const first = renderWithProviders(<ImportsScreen id="ds-1" />);
@@ -144,6 +205,21 @@ describe("ImportsScreen", () => {
 });
 
 describe("ImportJob", () => {
+  it("stops polling when the first load fails, until the user retries", async () => {
+    let requests = 0;
+    server.use(
+      http.get(`${API}/datasets/ds-1/manifests/job-1`, () => {
+        requests += 1;
+        return HttpResponse.json({ error: "boom" }, { status: 500 });
+      }),
+      http.get(`${API}/datasets/ds-1/manifests/job-1/errors`, () => HttpResponse.json({ errors: [] })),
+    );
+    renderWithProviders(<ImportJob id="ds-1" jobId="job-1" />);
+    await screen.findByRole("button", { name: "Try again" });
+    await new Promise((resolve) => setTimeout(resolve, 3500));
+    expect(requests).toBe(1);
+  }, 15000);
+
   it("shows progress and pages rejected lines by line number", async () => {
     const afters: (string | null)[] = [];
     server.use(
@@ -186,6 +262,22 @@ describe("ImportJob", () => {
     const dialog = await screen.findByRole("alertdialog");
     await userEvent.click(within(dialog).getByRole("button", { name: "Cancel import" }));
     expect(await screen.findByRole("button", { name: "Stopping" })).toBeDisabled();
+  });
+
+  it("stops waiting for a staged manifest once its upload link has expired, and says so", async () => {
+    let calls = 0;
+    server.use(
+      http.get(`${API}/datasets/ds-1/manifests/job-1`, () => {
+        calls += 1;
+        return HttpResponse.json(job({ state: "AWAITING_UPLOAD", source: "STAGED", created_at: "2026-01-01T00:00:00Z" }));
+      }),
+      http.get(`${API}/datasets/ds-1/manifests/job-1/errors`, () => HttpResponse.json({ errors: [] })),
+    );
+    renderWithProviders(<ImportJob id="ds-1" jobId="job-1" />);
+    expect(await screen.findByText(/upload link expired/)).toBeInTheDocument();
+    expect(screen.queryByText(/every 3 seconds/)).not.toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, 3500));
+    expect(calls).toBe(1);
   });
 
   it("keeps polling until the import is terminal", async () => {

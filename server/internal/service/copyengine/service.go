@@ -39,7 +39,7 @@ type Store interface {
 	DatasetAssets(ctx context.Context, tenantID, datasetID string) ([]postgres.StoredAsset, error)
 	VersionAssets(ctx context.Context, tenantID, versionID string) ([]postgres.StoredAsset, error)
 	GetStoredAsset(ctx context.Context, tenantID, assetID string) (postgres.StoredAsset, error)
-	SwitchConnection(ctx context.Context, tenantID, datasetID, targetID string, moved []postgres.SwitchedAsset, now time.Time) (int64, error)
+	FinishMigration(ctx context.Context, job model.CopyJob, owner string, moved []postgres.SwitchedAsset, report map[string]any, now time.Time) error
 
 	PendingReplicas(ctx context.Context, now time.Time, limit int) ([]postgres.PendingReplica, error)
 	PutReplica(ctx context.Context, rep model.AssetReplica) error

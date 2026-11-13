@@ -145,13 +145,28 @@ func (r *WebhookRepository) Deliveries(ctx context.Context, tenantID, endpointID
 	return page, encodeTimeCursor(last.CreatedAt, last.ID), nil
 }
 
-// Redeliver sends a delivery again from a fresh attempt count.
+// Redeliver sends a delivery again from a fresh attempt count, whatever its
+// status: delivery is at least once, so a DELIVERED one may be sent again
+// on request. One a worker is sending right now (its lease has not run
+// out) is refused, so it is not sent twice at once.
 func (r *WebhookRepository) Redeliver(ctx context.Context, tenantID, endpointID, deliveryID string, now time.Time) (model.WebhookDelivery, error) {
 	d, err := scanDelivery(r.db.Pool.QueryRow(ctx, `
 		UPDATE webhook_deliveries
 		SET status = 'PENDING', attempts = 0, next_attempt_at = $4, lease_owner = NULL, lease_expires_at = NULL
 		WHERE tenant_id = $1 AND endpoint_id = $2 AND id = $3
+		  AND (lease_expires_at IS NULL OR lease_expires_at < $4)
 		RETURNING `+deliveryColumns, tenantID, endpointID, deliveryID, now))
+	if errors.Is(err, model.ErrDeliveryNotFound) {
+		var exists bool
+		if err := r.db.Pool.QueryRow(ctx, `
+			SELECT EXISTS (SELECT 1 FROM webhook_deliveries WHERE tenant_id = $1 AND endpoint_id = $2 AND id = $3)`,
+			tenantID, endpointID, deliveryID).Scan(&exists); err != nil {
+			return d, fmt.Errorf("read webhook delivery: %w", err)
+		}
+		if exists {
+			return d, model.ErrDeliveryInFlight
+		}
+	}
 	if err == nil {
 		_, _ = r.db.Pool.Exec(ctx, `SELECT pg_notify('webhook_deliveries', '')`)
 	}
@@ -202,8 +217,9 @@ func (r *WebhookRepository) Claim(ctx context.Context, owner string, now time.Ti
 	})
 }
 
-// Record stores one attempt's result under the caller's lease. next is
-// when to try again; nil means delivered (ok) or given up.
+// Record stores one attempt's result under the caller's lease, which must
+// not have run out: by then another worker may have claimed the delivery.
+// next is when to try again; nil means delivered (ok) or given up.
 func (r *WebhookRepository) Record(ctx context.Context, id, owner string, now time.Time, ok bool, statusCode int, lastError string, next *time.Time) error {
 	status := model.HookFailed
 	switch {
@@ -220,15 +236,18 @@ func (r *WebhookRepository) Record(ctx context.Context, id, owner string, now ti
 	if ok {
 		delivered = &now
 	}
-	_, err := r.db.Pool.Exec(ctx, `
+	tag, err := r.db.Pool.Exec(ctx, `
 		UPDATE webhook_deliveries
 		SET status = $3, attempts = attempts + 1, next_attempt_at = $4, last_status_code = NULLIF($5, 0),
 		    last_error = NULLIF($6, ''), last_attempt_at = $7, delivered_at = COALESCE($8, delivered_at),
 		    lease_owner = NULL, lease_expires_at = NULL
-		WHERE id = $1 AND lease_owner = $2`,
+		WHERE id = $1 AND lease_owner = $2 AND lease_expires_at > $7 AND status = 'PENDING'`,
 		id, owner, status, nextAt, statusCode, lastError, now, delivered)
 	if err != nil {
 		return fmt.Errorf("record webhook delivery: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return model.ErrLeaseLost
 	}
 	return nil
 }

@@ -99,6 +99,8 @@ func (h *WebhookHandler) fail(w nethttp.ResponseWriter, err error) {
 		writeJSON(w, nethttp.StatusNotImplemented, problem{Error: err.Error(), Code: "not_configured"})
 	case errors.Is(err, model.ErrWebhookNotFound), errors.Is(err, model.ErrDeliveryNotFound):
 		writeJSON(w, nethttp.StatusNotFound, problem{Error: err.Error(), Code: "not_found"})
+	case errors.Is(err, model.ErrDeliveryInFlight):
+		writeJSON(w, nethttp.StatusConflict, problem{Error: err.Error(), Code: "conflict"})
 	default:
 		writeSecurityError(w, h.log, err)
 	}

@@ -251,13 +251,18 @@ func (r *TieringRepository) PackOf(ctx context.Context, tenantID, assetID string
 }
 
 // SetPackReadable records until when an archived pack, and every file in
-// it, can be read.
+// it, can be read. Like SetReadable, only while the pack is still archived.
 func (r *TieringRepository) SetPackReadable(ctx context.Context, tenantID, packID string, tier model.StorageTier, until *time.Time, now time.Time) error {
-	if _, err := r.db.Pool.Exec(ctx, `UPDATE packs SET storage_tier = $3, readable_until = $4, updated_at = $5 WHERE tenant_id = $1 AND id = $2`,
-		tenantID, packID, string(tier), until, now); err != nil {
+	tag, err := r.db.Pool.Exec(ctx, `UPDATE packs SET storage_tier = $3, readable_until = $4, updated_at = $5
+		WHERE tenant_id = $1 AND id = $2 AND storage_tier IN ('ARCHIVE', 'DEEP_ARCHIVE')`,
+		tenantID, packID, string(tier), until, now)
+	if err != nil {
 		return fmt.Errorf("record pack readable: %w", err)
 	}
-	_, err := r.db.Pool.Exec(ctx, `
+	if tag.RowsAffected() == 0 {
+		return nil
+	}
+	_, err = r.db.Pool.Exec(ctx, `
 		UPDATE assets SET storage_tier = $3, readable_until = $4, updated_at = $5
 		WHERE tenant_id = $1 AND id IN (SELECT asset_id FROM pack_entries WHERE pack_id = $2 AND state = 'PUBLISHED')
 	`, tenantID, packID, string(tier), until, now)
@@ -314,10 +319,12 @@ func (r *TieringRepository) SetTier(ctx context.Context, tenantID, assetID, from
 }
 
 // SetReadable records until when an archived asset can be read, and its
-// tier as the provider reports it.
+// tier as the provider reports it. Only an asset still archived: a restore
+// pass that read the provider before a tier move never writes over it.
 func (r *TieringRepository) SetReadable(ctx context.Context, tenantID, assetID string, tier model.StorageTier, until *time.Time, now time.Time) error {
 	_, err := r.db.Pool.Exec(ctx, `
-		UPDATE assets SET storage_tier = $3, readable_until = $4, updated_at = $5 WHERE tenant_id = $1 AND id = $2
+		UPDATE assets SET storage_tier = $3, readable_until = $4, updated_at = $5
+		WHERE tenant_id = $1 AND id = $2 AND storage_tier IN ('ARCHIVE', 'DEEP_ARCHIVE')
 	`, tenantID, assetID, string(tier), until, now)
 	if err != nil {
 		return fmt.Errorf("record readable until: %w", err)
@@ -367,7 +374,7 @@ func (r *TieringRepository) CreateRestore(ctx context.Context, x model.ArchiveRe
 	if err != nil {
 		return model.ArchiveRestore{}, false, fmt.Errorf("create restore: %w", err)
 	}
-	x.State, x.UpdatedAt = "PENDING", x.CreatedAt
+	x.State, x.UpdatedAt = model.RestorePending, x.CreatedAt
 	return x, true, nil
 }
 
@@ -383,9 +390,13 @@ func (r *TieringRepository) OpenRestores(ctx context.Context, limit int) ([]mode
 		SELECT `+restoreColumns+` FROM archive_restores WHERE state IN ('PENDING', 'RESTORING') ORDER BY updated_at LIMIT $1`, limit))
 }
 
+// UpdateRestore moves an open restore forward: PENDING to anything after
+// it, RESTORING to READY or FAILED. A pass working from a stale read never
+// moves a restore back or out of READY, FAILED or EXPIRED.
 func (r *TieringRepository) UpdateRestore(ctx context.Context, x model.ArchiveRestore) error {
 	_, err := r.db.Pool.Exec(ctx, `
-		UPDATE archive_restores SET state = $2, error = $3, ready_at = $4, readable_until = $5, updated_at = $6 WHERE id = $1
+		UPDATE archive_restores SET state = $2, error = $3, ready_at = $4, readable_until = $5, updated_at = $6
+		WHERE id = $1 AND (state = 'PENDING' OR (state = 'RESTORING' AND $2 <> 'RESTORING'))
 	`, x.ID, x.State, x.Error, x.ReadyAt, x.ReadableUntil, x.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("update restore: %w", err)
@@ -643,22 +654,50 @@ func (r *TieringRepository) Freed(ctx context.Context, tenantID string, versionI
 }
 
 // Expire marks versions expired and drops their member lists; the version
-// records (number, manifest hash, counts) stay.
-func (r *TieringRepository) Expire(ctx context.Context, tenantID string, versionIDs []string, by string, now time.Time) error {
+// records (number, manifest hash, counts) stay. A released version never
+// expires: if any asked for is released, nothing changes and Expire answers
+// the released ones, so the caller can plan again without them.
+func (r *TieringRepository) Expire(ctx context.Context, tenantID string, versionIDs []string, by string, now time.Time) ([]string, error) {
 	tx, err := r.db.Pool.Begin(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+	// Every version is locked first, so a release cannot land between this
+	// check and the expiry.
+	rows, err := tx.Query(ctx, `SELECT id, released_at IS NOT NULL FROM dataset_versions
+		WHERE tenant_id = $1 AND id = ANY($2) ORDER BY id FOR UPDATE`, tenantID, versionIDs)
+	if err != nil {
+		return nil, fmt.Errorf("lock versions: %w", err)
+	}
+	var released []string
+	for rows.Next() {
+		var id string
+		var isReleased bool
+		if err := rows.Scan(&id, &isReleased); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if isReleased {
+			released = append(released, id)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("lock versions: %w", err)
+	}
+	if len(released) > 0 {
+		return released, nil
+	}
 	if _, err := tx.Exec(ctx, `UPDATE dataset_versions SET expired_at = $3, expired_by = $4
 		WHERE tenant_id = $1 AND id = ANY($2) AND expired_at IS NULL`, tenantID, versionIDs, now, by); err != nil {
-		return fmt.Errorf("expire versions: %w", err)
+		return nil, fmt.Errorf("expire versions: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM dataset_version_members WHERE tenant_id = $1 AND version_id = ANY($2)`,
 		tenantID, versionIDs); err != nil {
-		return fmt.Errorf("drop expired members: %w", err)
+		return nil, fmt.Errorf("drop expired members: %w", err)
 	}
-	return tx.Commit(ctx)
+	return nil, tx.Commit(ctx)
 }
 
 // VersionProfile is how a snapshot's readable members are stored, per

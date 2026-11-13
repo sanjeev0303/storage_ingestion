@@ -272,6 +272,7 @@ All routes need a bearer token and an organization; the service scopes every cal
 | `POST /api/v1/datasets/{id}/readiness-assessments` | datasets.write | `202` |
 | `GET /api/v1/datasets/{id}/readiness-reports?all=&cursor=&limit=` | datasets.read | summaries, newest first |
 | `GET /api/v1/datasets/{id}/lineage`, `GET /api/v1/dataset-versions/{id}/lineage` | datasets.read | edges |
+| `GET /api/v1/catalog/objects/{id}/datasets?part=&cursor=&limit=` | datasets.read | drafts holding the object (by dataset name) and snapshots pinning one of its versions (by name, newest version first); without `part`, the first page of both with `next_datasets_cursor` and `next_snapshots_cursor`; `part=datasets` or `part=snapshots` pages one list |
 | `GET /api/v1/validation-profiles`, `GET /api/v1/validation-profiles/{id}?version=` | datasets.read | built-in and tenant profiles |
 | `POST /api/v1/validation-profiles` | datasets.manage | `201` |
 

@@ -97,8 +97,8 @@ function JobView({ job }: { job: ValidationJob }) {
           <>
             <ButtonLink href={`/app/datasets/${job.dataset_id}/validation`}>Back to the dataset</ButtonLink>
             {!terminal && (
-              <Button onClick={() => setConfirming(true)} disabled={!can("datasets.write") || job.cancel_requested}>
-                {job.cancel_requested ? "Stopping" : "Cancel job"}
+              <Button onClick={() => setConfirming(true)} disabled={!can("datasets.write") || job.cancel_requested || stopping}>
+                {job.cancel_requested || stopping ? "Stopping" : "Cancel job"}
               </Button>
             )}
           </>

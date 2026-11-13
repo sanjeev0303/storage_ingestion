@@ -94,13 +94,25 @@ func (r *IdentityRepository) CountPlatformAdmins(ctx context.Context) (int, erro
 	return n, err
 }
 
-func (r *IdentityRepository) SetUserStatus(ctx context.Context, userID string, status model.UserStatus, now time.Time, audit ...model.AuditEvent) (model.User, error) {
+func (r *IdentityRepository) SetUserStatus(ctx context.Context, userID string, from, status model.UserStatus, now time.Time, audit ...model.AuditEvent) (model.User, error) {
 	var u model.User
 	err := withTx(ctx, r.db, func(tx pgx.Tx) error {
+		if from == model.UserActive && status != model.UserActive {
+			// Organizations before users, the order ChangeMember locks in.
+			if err := keepOwners(ctx, tx, userID); err != nil {
+				return err
+			}
+			if err := keepAnAdmin(ctx, tx, userID); err != nil {
+				return err
+			}
+		}
 		var err error
 		u, err = scanUser(tx.QueryRow(ctx, `
-			UPDATE users AS u SET status = $2, updated_at = $3 WHERE u.id = $1 RETURNING `+userColumns,
-			userID, string(status), now))
+			UPDATE users AS u SET status = $3, updated_at = $4 WHERE u.id = $1 AND u.status = $2 RETURNING `+userColumns,
+			userID, string(from), string(status), now))
+		if errors.Is(err, model.ErrUserNotFound) {
+			return model.ErrUserStatusChanged
+		}
 		if err != nil {
 			return err
 		}
@@ -119,6 +131,11 @@ func (r *IdentityRepository) SetUserStatus(ctx context.Context, userID string, s
 
 func (r *IdentityRepository) SetPlatformRole(ctx context.Context, userID string, role model.PlatformRole, now time.Time, audit ...model.AuditEvent) error {
 	return withTx(ctx, r.db, func(tx pgx.Tx) error {
+		if role != model.PlatformAdmin {
+			if err := keepAnAdmin(ctx, tx, userID); err != nil {
+				return err
+			}
+		}
 		tag, err := tx.Exec(ctx, `UPDATE users SET platform_role = NULLIF($2, ''), updated_at = $3 WHERE id = $1`,
 			userID, string(role), now)
 		if err != nil {
@@ -129,6 +146,65 @@ func (r *IdentityRepository) SetPlatformRole(ctx context.Context, userID string,
 		}
 		return appendAudits(ctx, tx, audit)
 	})
+}
+
+// keepAnAdmin refuses to take userID's administration away when it is the
+// last active platform administrator. Locking every active administrator
+// serialises these changes: a concurrent one waits here, then counts what
+// is left.
+func keepAnAdmin(ctx context.Context, tx pgx.Tx, userID string) error {
+	rows, err := tx.Query(ctx, `
+		SELECT id FROM users WHERE platform_role = 'ADMIN' AND status = 'ACTIVE' ORDER BY id FOR UPDATE
+	`)
+	if err != nil {
+		return fmt.Errorf("lock platform administrators: %w", err)
+	}
+	admins, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return fmt.Errorf("lock platform administrators: %w", err)
+	}
+	if len(admins) == 1 && admins[0] == userID {
+		return fmt.Errorf("%w: the platform must keep one active administrator", model.ErrForbidden)
+	}
+	return nil
+}
+
+// keepOwners refuses to deactivate the last active owner of an active
+// organization, the rule ChangeMember enforces for demotions. The
+// organizations' locks, the ones ChangeMember takes, serialise the two.
+func keepOwners(ctx context.Context, tx pgx.Tx, userID string) error {
+	rows, err := tx.Query(ctx, `
+		SELECT o.id FROM organizations AS o JOIN memberships AS m ON m.org_id = o.id
+		WHERE m.user_id = $1 AND m.role_id = 'owner' AND m.status = 'ACTIVE' AND o.status = 'ACTIVE'
+		ORDER BY o.id
+		FOR UPDATE OF o
+	`, userID)
+	if err != nil {
+		return fmt.Errorf("lock owned organizations: %w", err)
+	}
+	orgs, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return fmt.Errorf("lock owned organizations: %w", err)
+	}
+	if len(orgs) == 0 {
+		return nil
+	}
+	var lastOwner bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM unnest($2::text[]) AS org(id)
+			WHERE NOT EXISTS (
+				SELECT 1 FROM memberships AS m JOIN users AS u ON u.id = m.user_id
+				WHERE m.org_id = org.id AND m.user_id <> $1 AND m.role_id = 'owner' AND m.status = 'ACTIVE' AND u.status = 'ACTIVE'
+			)
+		)
+	`, userID, orgs).Scan(&lastOwner); err != nil {
+		return fmt.Errorf("count owners: %w", err)
+	}
+	if lastOwner {
+		return model.ErrLastOwner
+	}
+	return nil
 }
 
 func (r *IdentityRepository) ChangePassword(ctx context.Context, userID, passwordHash, keepSessionID string, now time.Time, audit ...model.AuditEvent) error {
@@ -203,7 +279,7 @@ func (r *IdentityRepository) SessionByAccess(ctx context.Context, accessHash []b
 	u.Status, u.PlatformRole = model.UserStatus(status), model.PlatformRole(role)
 	// At most one write a minute per session, so reads stay reads.
 	_, _ = r.db.Pool.Exec(ctx, `
-		UPDATE auth_sessions SET last_used_at = $2 WHERE id = $1 AND last_used_at < $2 - interval '1 minute'
+		UPDATE auth_sessions SET last_used_at = $2 WHERE id = $1 AND last_used_at < $2::timestamptz - interval '1 minute'
 	`, s.ID, now)
 	return s, u, nil
 }

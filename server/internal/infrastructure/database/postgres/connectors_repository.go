@@ -146,7 +146,7 @@ func (r *ConnectorsRepository) RevokeShare(ctx context.Context, c model.ChatShar
 
 // AssetFacts reads what a share or a Git LFS answer needs of an asset.
 func (r *ConnectorsRepository) AssetFacts(ctx context.Context, tenantID, assetID string) (dataset, path, status string, err error) {
-	err = r.db.Pool.QueryRow(ctx, `SELECT COALESCE(a.dataset, ''), COALESCE(o.path, a.file_name), a.status FROM assets a
+	err = r.db.Pool.QueryRow(ctx, `SELECT COALESCE(a.dataset, ''), COALESCE(o.path, a.file_name), `+assetUsableStatus+` FROM assets a
 		LEFT JOIN catalog_objects o ON o.tenant_id = a.tenant_id AND o.id = a.object_id
 		WHERE a.tenant_id = $1 AND a.id = $2`, tenantID, assetID).Scan(&dataset, &path, &status)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -159,9 +159,9 @@ func (r *ConnectorsRepository) AssetFacts(ctx context.Context, tenantID, assetID
 
 // AssetByHash finds the newest live asset of a namespace with these bytes.
 func (r *ConnectorsRepository) AssetByHash(ctx context.Context, tenantID, dataset, sha256 string) (id, status string, size int64, found bool, err error) {
-	err = r.db.Pool.QueryRow(ctx, `SELECT id, status, size_bytes FROM assets
-		WHERE tenant_id = $1 AND dataset = $2 AND checksum_sha256 = $3 AND status <> 'DELETED'
-		ORDER BY (status = 'AVAILABLE') DESC, created_at DESC LIMIT 1`, tenantID, dataset, sha256).Scan(&id, &status, &size)
+	err = r.db.Pool.QueryRow(ctx, `SELECT a.id, `+assetUsableStatus+`, a.size_bytes FROM assets a
+		WHERE a.tenant_id = $1 AND a.dataset = $2 AND a.checksum_sha256 = $3 AND a.status <> 'DELETED'
+		ORDER BY (a.status = 'AVAILABLE' AND a.blocked_reason IS NULL) DESC, a.created_at DESC LIMIT 1`, tenantID, dataset, sha256).Scan(&id, &status, &size)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", "", 0, false, nil
 	}
@@ -277,7 +277,7 @@ func (r *ConnectorsRepository) PutDicom(ctx context.Context, tenantID, versionID
 // DicomInstances lists a version's instances matching what is set, in
 // study, series, instance order, skipping those whose bytes are gone.
 func (r *ConnectorsRepository) DicomInstances(ctx context.Context, tenantID, versionID string, f model.DicomFilter) ([]model.DicomInstance, error) {
-	where := []string{"d.tenant_id = $1", "d.version_id = $2", "a.status = 'AVAILABLE'"}
+	where := []string{"d.tenant_id = $1", "d.version_id = $2", "a.status = 'AVAILABLE'", "a.blocked_reason IS NULL"}
 	args := []any{tenantID, versionID}
 	add := func(column, value string) {
 		if value != "" {

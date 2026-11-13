@@ -29,6 +29,7 @@ Each is a copy job, `GET /api/v1/copy-jobs[?dataset_id=]`, `GET /api/v1/copy-job
   - The dry run returns the objects and bytes to copy and an egress estimate at the providers' list prices.
   - Without `dry_run` it queues the migration. Every object is copied, verified and given its source's lock. Only when all are does the dataset switch, in one transaction: its assets (and any sharing their bytes) read from the target, keeping their IDs; packed assets read their own copy; adopted objects become the platform's own copies; and the dataset's new uploads go to the target.
   - If any object fails, nothing switches and the report lists the failures.
+  - The switch and the job's completion are the same transaction, taken only while the job is still running under its worker's lease. A migration cancelled at any point before it, the last pass included, switches nothing; once it has switched, a cancel answers that the job has ended.
   - The source objects are left in place.
 - **Restore**: `POST /api/v1/datasets/{id}/restores {"version_id", "target_connection_id", "prefix"}` copies a snapshot's members to `<ready prefix>/<organization>/.restores/<prefix>/<path>` on the target, with a `manifest-sha256.txt` beside them.
 - **Restore drill**: `POST /api/v1/datasets/{id}/drills {"sample": 200, "from_replica": true}` re-reads a sample, from the replica as a restore would. The report gives:

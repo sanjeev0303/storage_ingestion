@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sanjeev0303/object-storage-platform/sdk/go/osp"
@@ -211,7 +213,7 @@ type Agent struct {
 	now     func() time.Time
 	device  device
 	seen    map[string]seenFile // size and time last seen, for settling
-	lastErr string
+	lastErr atomic.Value        // string: the last pass's error, which heartbeats send
 }
 
 type device struct {
@@ -285,9 +287,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	for {
 		if err := a.Tick(ctx); err != nil && ctx.Err() == nil {
 			a.log.Warn("pass failed; trying again", "error", err)
-			a.lastErr = err.Error()
+			a.lastErr.Store(err.Error())
 		} else {
-			a.lastErr = ""
+			a.lastErr.Store("")
 		}
 		select {
 		case <-ctx.Done():
@@ -298,27 +300,41 @@ func (a *Agent) Run(ctx context.Context) error {
 }
 
 // Tick is one pass: find what is ready, send what the rules allow, confirm
-// what was sent, and close what is finished. It stops at the first error it
-// cannot pass over; what was done is in the journal.
+// what was sent, and close what is finished. Every step runs, and each goes
+// on past a file it cannot handle, so one locked file holds nothing else up;
+// the errors come back together. What was done is in the journal.
 func (a *Agent) Tick(ctx context.Context) error {
 	if a.device.PathPrefix == "" {
 		if err := a.client.Do(ctx, http.MethodGet, "/api/v1/edge/me", nil, &a.device); err != nil {
 			return fmt.Errorf("who am I: %w", err)
 		}
 	}
-	if err := a.scan(); err != nil {
-		return err
+	errs := []error{a.scan()}
+	errs = append(errs, a.send(ctx))
+	errs = append(errs, a.report(ctx))
+	errs = append(errs, a.confirm(ctx))
+	errs = append(errs, a.closeFinished(ctx))
+	return errors.Join(errs...)
+}
+
+// perEntry reports whether err concerns one file alone, so a step goes on
+// with the others: the local file could not be read, or the platform refused
+// that one request. A lost link, a refused credential, a rate limit or a
+// server error would fail every request alike.
+func perEntry(err error) bool {
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) {
+		return true
 	}
-	if err := a.send(ctx); err != nil {
-		return err
+	var refused *osp.APIError
+	if !errors.As(err, &refused) {
+		return false
 	}
-	if err := a.report(ctx); err != nil {
-		return err
+	switch refused.Status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
+		return false
 	}
-	if err := a.confirm(ctx); err != nil {
-		return err
-	}
-	return a.closeFinished(ctx)
+	return refused.Status >= 400 && refused.Status < 500
 }
 
 func (a *Agent) objectPath(rel string) string {
@@ -384,6 +400,7 @@ func (a *Agent) add(file, rel string, info os.FileInfo, e Entry) error {
 }
 
 func (a *Agent) scan() error {
+	var errs []error
 	for _, w := range a.cfg.Watches {
 		var err error
 		switch w.Mode {
@@ -395,10 +412,10 @@ func (a *Agent) scan() error {
 			err = a.scanRecording(w)
 		}
 		if err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("scan %s: %w", w.Path, err)
+			errs = append(errs, fmt.Errorf("scan %s: %w", w.Path, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func listFiles(root string) ([]string, error) {
@@ -420,20 +437,23 @@ func (a *Agent) scanFiles(w Watch) error {
 	if err != nil {
 		return err
 	}
+	var errs []error
 	for _, file := range files {
 		info, err := os.Stat(file)
 		if err != nil || info.Size() == 0 {
 			continue
 		}
 		rel, _ := filepath.Rel(w.Path, file)
-		if a.journal.Get(file) == nil && !a.settled(file, info, w.SettleSeconds) {
+		// A journaled file rewritten since may still be being written, so it
+		// settles again too; one unchanged is left alone by add.
+		if !a.settled(file, info, w.SettleSeconds) {
 			continue
 		}
 		if err := a.add(file, rel, info, Entry{Delete: w.DeleteAfterConfirm}); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (a *Agent) scanRuns(w Watch) error {
@@ -441,6 +461,7 @@ func (a *Agent) scanRuns(w Watch) error {
 	if err != nil {
 		return err
 	}
+	var errs []error
 	for _, folder := range folders {
 		if !folder.IsDir() {
 			continue
@@ -465,9 +486,11 @@ func (a *Agent) scanRuns(w Watch) error {
 		}
 		files, err := listFiles(root)
 		if err != nil {
-			return err
+			errs = append(errs, err)
+			continue
 		}
 		expected := int64(0)
+		var failed []error
 		for _, file := range files {
 			info, err := os.Stat(file)
 			if err != nil || info.Size() == 0 {
@@ -476,8 +499,14 @@ func (a *Agent) scanRuns(w Watch) error {
 			expected++
 			rel, _ := filepath.Rel(w.Path, file)
 			if err := a.add(file, rel, info, Entry{Recording: name, Kind: "RUN", Delete: w.DeleteAfterConfirm}); err != nil {
-				return err
+				failed = append(failed, err)
 			}
+		}
+		if len(failed) > 0 {
+			// Sealed only once every file is in the journal: a sealed run is
+			// not looked at again.
+			errs = append(errs, failed...)
+			continue
 		}
 		run.Sealed, run.Expected = true, expected
 		if timedOut {
@@ -487,7 +516,7 @@ func (a *Agent) scanRuns(w Watch) error {
 			return err
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (a *Agent) scanRecording(w Watch) error {
@@ -507,6 +536,7 @@ func (a *Agent) scanRecording(w Watch) error {
 	if idle <= 0 {
 		idle = 10 * time.Minute
 	}
+	var errs []error
 	for _, file := range files {
 		g := re.FindStringSubmatch(filepath.Base(file))
 		if g == nil {
@@ -522,12 +552,14 @@ func (a *Agent) scanRecording(w Watch) error {
 		rel, _ := filepath.Rel(w.Path, file)
 		end := info.ModTime().UTC()
 		start := end.Add(-chunk)
-		if err := a.add(file, rel, info, Entry{Recording: g[1], Kind: "RECORDING", Delete: w.DeleteAfterConfirm, StartsAt: &start, EndsAt: &end}); err != nil {
-			return err
+		name := a.recordingFor(g[1])
+		if err := a.add(file, rel, info, Entry{Recording: name, Kind: "RECORDING", Delete: w.DeleteAfterConfirm, StartsAt: &start, EndsAt: &end}); err != nil {
+			errs = append(errs, err)
+			continue
 		}
-		run := a.journal.Run(g[1])
+		run := a.journal.Run(name)
 		if run == nil {
-			run = &RunState{Name: g[1], Kind: "RECORDING"}
+			run = &RunState{Name: name, Kind: "RECORDING"}
 		}
 		run.LastFile = a.now()
 		run.Sealed = false
@@ -544,7 +576,21 @@ func (a *Agent) scanRecording(w Watch) error {
 			}
 		}
 	}
-	return nil
+	return errors.Join(errs...)
+}
+
+// recordingFor names the recording a new chunk of name joins. The platform
+// takes no more chunks into a recording closed COMPLETE, so a chunk that
+// comes after that starts the next one: name~2, name~3 and so on.
+func (a *Agent) recordingFor(name string) string {
+	next := name
+	for n := 2; ; n++ {
+		run := a.journal.Run(next)
+		if run == nil || run.Closed != "COMPLETE" {
+			return next
+		}
+		next = fmt.Sprintf("%s~%d", name, n)
+	}
 }
 
 // queue is what to send now, most important first, oldest among equals.
@@ -552,7 +598,7 @@ func (a *Agent) queue() []*Entry {
 	var out []*Entry
 	open := inWindow(a.cfg.Windows, a.now())
 	for _, e := range a.journal.Entries() {
-		if e.State != StateQueued {
+		if e.State != StateQueued || (e.NextTry != nil && a.now().Before(*e.NextTry)) {
 			continue
 		}
 		// Age rules can raise a file that has waited.
@@ -582,7 +628,8 @@ func (a *Agent) send(ctx context.Context) error {
 	work := make(chan *Entry)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	var first error
+	var errs []error
+	stop := false
 	for range a.cfg.Concurrency {
 		wg.Add(1)
 		go func() {
@@ -591,8 +638,9 @@ func (a *Agent) send(ctx context.Context) error {
 				err := a.sendOne(ctx, e)
 				if err != nil {
 					mu.Lock()
-					if first == nil {
-						first = err
+					errs = append(errs, err)
+					if !perEntry(err) {
+						stop = true
 					}
 					mu.Unlock()
 				}
@@ -601,16 +649,16 @@ func (a *Agent) send(ctx context.Context) error {
 	}
 	for _, e := range queue {
 		mu.Lock()
-		stop := first != nil
+		stopped := stop
 		mu.Unlock()
-		if stop || ctx.Err() != nil {
+		if stopped || ctx.Err() != nil {
 			break
 		}
 		work <- e
 	}
 	close(work)
 	wg.Wait()
-	return first
+	return errors.Join(errs...)
 }
 
 func (a *Agent) sendOne(ctx context.Context, e *Entry) error {
@@ -623,12 +671,20 @@ func (a *Agent) sendOne(ctx context.Context, e *Entry) error {
 		return err
 	}
 	if info.Size() != e.Size || !info.ModTime().Equal(e.ModTime) {
-		// Rewritten since it was hashed: the next scan picks it up afresh.
-		return a.journalForget(e)
+		// Rewritten since it was hashed. Only files mode scans a journaled
+		// file again, so hash it here, and send it once it has held still
+		// for a pass.
+		sum, size, err := osp.SHA256File(e.File)
+		if err != nil {
+			return err
+		}
+		e.SHA256, e.Size, e.ModTime = sum, size, info.ModTime()
+		e.UploadID, e.PartSize, e.Parts = "", 0, nil
+		return a.journal.Put(e)
 	}
 	opts := osp.UploadOptions{Dataset: a.device.Namespace, Path: e.Path, SHA256: e.SHA256, Store: entryStore{j: a.journal, file: e.File}, Limiter: a.limiter}
 	if e.UploadID != "" {
-		opts.Resume = &osp.Progress{UploadID: e.UploadID, PartSize: e.PartSize, Parts: e.Parts}
+		opts.Resume = &osp.Progress{UploadID: e.UploadID, PartSize: e.PartSize, Parts: e.Parts, SHA256: e.SHA256, Size: e.Size}
 	}
 	_, err = a.client.UploadFile(ctx, e.File, opts)
 	if err != nil && e.UploadID != "" && (osp.IsStatus(err, http.StatusNotFound) || osp.IsStatus(err, http.StatusConflict) || osp.IsStatus(err, http.StatusGone)) {
@@ -647,12 +703,22 @@ func (a *Agent) sendOne(ctx context.Context, e *Entry) error {
 			switch {
 			case refused.Status == http.StatusForbidden || refused.Status == http.StatusUnauthorized:
 				return fmt.Errorf("the credential was refused: %w", err)
-			case refused.Status >= 400 && refused.Status < 500 && refused.Status != http.StatusTooManyRequests:
+			case finalRefusal(refused):
 				// This file will never go as it is; the others still can.
 				current := a.journal.Get(e.File)
 				current.State, current.Reason = StateRejected, refused.Message
 				a.log.Warn("the platform refused a file; the local copy stays", "path", e.Path, "reason", refused.Message)
 				return a.journal.Put(current)
+			case refused.Status >= 400 && refused.Status < 500:
+				// Busy or pending on the platform's side: try again later,
+				// waiting longer each time.
+				current := a.journal.Get(e.File)
+				current.Tries++
+				next := a.now().Add(min(30*time.Second<<min(current.Tries-1, 7), time.Hour))
+				current.NextTry = &next
+				if perr := a.journal.Put(current); perr != nil {
+					return perr
+				}
 			}
 		}
 		return fmt.Errorf("upload %s: %w", e.Path, err)
@@ -660,34 +726,73 @@ func (a *Agent) sendOne(ctx context.Context, e *Entry) error {
 	current := a.journal.Get(e.File)
 	now := a.now()
 	current.State, current.UploadedAt = StateUploaded, &now
+	current.Tries, current.NextTry = 0, nil
 	return a.journal.Put(current)
 }
 
-func (a *Agent) journalForget(e *Entry) error {
-	e.Size, e.ModTime = -1, time.Time{}
-	return a.journal.Put(e)
+// finalRefusal reports whether the platform refused a file for good: the
+// request can never pass as it is, or the path already holds an object. A
+// 408, a 409 for a path another upload holds or an upload pending
+// reconciliation, and a 429 all pass in time.
+func finalRefusal(refused *osp.APIError) bool {
+	switch refused.Status {
+	case http.StatusBadRequest, http.StatusRequestEntityTooLarge, http.StatusUnsupportedMediaType, http.StatusUnprocessableEntity:
+		return true
+	case http.StatusConflict:
+		return refused.Code == "path_exists"
+	}
+	return false
 }
 
 // report tells each recording about its sent chunks.
 func (a *Agent) report(ctx context.Context) error {
+	var errs []error
 	for _, e := range a.journal.Entries() {
 		if e.Recording == "" || e.Reported || (e.State != StateUploaded && e.State != StateConfirmed) {
 			continue
 		}
-		id, err := a.recordingID(ctx, e.Recording, e.Kind)
+		err := a.reportOne(ctx, e)
+		var refused *osp.APIError
+		if errors.As(err, &refused) && refused.Code == "recording_complete" {
+			// The platform completed the recording without this chunk and the
+			// journal never heard (the agent stopped first): the chunk starts
+			// the next recording.
+			err = a.markComplete(e.Recording)
+			if err == nil {
+				e.Recording = a.recordingFor(e.Recording)
+				err = a.reportOne(ctx, e)
+			}
+		}
 		if err != nil {
-			return err
-		}
-		if err := a.client.Do(ctx, http.MethodPost, "/api/v1/edge/recordings/"+id+"/chunks", map[string]any{
-			"path": e.Path, "sha256": e.SHA256, "size_bytes": e.Size, "starts_at": e.StartsAt, "ends_at": e.EndsAt}, nil); err != nil {
-			return fmt.Errorf("report %s: %w", e.Path, err)
-		}
-		e.Reported = true
-		if err := a.journal.Put(e); err != nil {
-			return err
+			errs = append(errs, err)
+			if !perEntry(err) {
+				break
+			}
 		}
 	}
-	return nil
+	return errors.Join(errs...)
+}
+
+func (a *Agent) reportOne(ctx context.Context, e *Entry) error {
+	id, err := a.recordingID(ctx, e.Recording, e.Kind)
+	if err != nil {
+		return err
+	}
+	if err := a.client.Do(ctx, http.MethodPost, "/api/v1/edge/recordings/"+id+"/chunks", map[string]any{
+		"path": e.Path, "sha256": e.SHA256, "size_bytes": e.Size, "starts_at": e.StartsAt, "ends_at": e.EndsAt}, nil); err != nil {
+		return fmt.Errorf("report %s: %w", e.Path, err)
+	}
+	e.Reported = true
+	return a.journal.Put(e)
+}
+
+func (a *Agent) markComplete(name string) error {
+	run := a.journal.Run(name)
+	if run == nil {
+		run = &RunState{Name: name, LastFile: a.now()}
+	}
+	run.Closed = "COMPLETE"
+	return a.journal.PutRun(run)
 }
 
 func (a *Agent) recordingID(ctx context.Context, name, kind string) (string, error) {
@@ -711,55 +816,58 @@ func (a *Agent) recordingID(ctx context.Context, name, kind string) (string, err
 // confirm asks about what was sent. A local copy goes only on AVAILABLE: the
 // platform computed this SHA-256 from the stored bytes and its checks passed.
 func (a *Agent) confirm(ctx context.Context) error {
+	var errs []error
 	for _, e := range a.journal.Entries() {
-		switch {
-		case e.State == StateUploaded:
-			var state struct {
-				State  string `json:"state"`
-				Reason string `json:"reason"`
-			}
-			q := osp.Query("/api/v1/edge/confirm", map[string]string{"path": e.Path, "sha256": e.SHA256})
-			if err := a.client.Do(ctx, http.MethodGet, q, nil, &state); err != nil {
-				return fmt.Errorf("confirm %s: %w", e.Path, err)
-			}
-			switch state.State {
-			case "AVAILABLE":
-				e.State, e.Reason = StateConfirmed, ""
-			case "REJECTED":
-				e.State, e.Reason = StateRejected, state.Reason
-				a.log.Warn("the platform rejected a file; the local copy stays", "path", e.Path, "reason", state.Reason)
-			case "MISSING":
-				// Sent but never seen: after a while, send it again.
-				if e.UploadedAt != nil && a.now().Sub(*e.UploadedAt) > 10*time.Minute {
-					e.State, e.UploadID, e.PartSize, e.Parts = StateQueued, "", 0, nil
-				}
-			}
-			if err := a.journal.Put(e); err != nil {
-				return err
-			}
-			if e.State != StateConfirmed {
-				continue
-			}
-			fallthrough
-		case e.State == StateConfirmed && e.Delete && !e.Removed:
-			if !e.Delete || e.Removed {
-				continue
-			}
-			if err := os.Remove(e.File); err != nil && !os.IsNotExist(err) {
-				return err
-			}
-			e.Removed = true
-			if err := a.journal.Put(e); err != nil {
-				return err
+		if err := a.confirmOne(ctx, e); err != nil {
+			errs = append(errs, err)
+			if !perEntry(err) {
+				break
 			}
 		}
 	}
-	return nil
+	return errors.Join(errs...)
+}
+
+func (a *Agent) confirmOne(ctx context.Context, e *Entry) error {
+	if e.State == StateUploaded {
+		var state struct {
+			State  string `json:"state"`
+			Reason string `json:"reason"`
+		}
+		q := osp.Query("/api/v1/edge/confirm", map[string]string{"path": e.Path, "sha256": e.SHA256})
+		if err := a.client.Do(ctx, http.MethodGet, q, nil, &state); err != nil {
+			return fmt.Errorf("confirm %s: %w", e.Path, err)
+		}
+		switch state.State {
+		case "AVAILABLE":
+			e.State, e.Reason = StateConfirmed, ""
+		case "REJECTED":
+			e.State, e.Reason = StateRejected, state.Reason
+			a.log.Warn("the platform rejected a file; the local copy stays", "path", e.Path, "reason", state.Reason)
+		case "MISSING":
+			// Sent but never seen: after a while, send it again.
+			if e.UploadedAt != nil && a.now().Sub(*e.UploadedAt) > 10*time.Minute {
+				e.State, e.UploadID, e.PartSize, e.Parts = StateQueued, "", 0, nil
+			}
+		}
+		if err := a.journal.Put(e); err != nil {
+			return err
+		}
+	}
+	if e.State != StateConfirmed || !e.Delete || e.Removed {
+		return nil
+	}
+	if err := os.Remove(e.File); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	e.Removed = true
+	return a.journal.Put(e)
 }
 
 // closeFinished ends each sealed run or recording whose files are settled.
 func (a *Agent) closeFinished(ctx context.Context) error {
 	entries := a.journal.Entries()
+	var errs []error
 	for _, run := range a.journal.Runs() {
 		if !run.Sealed || run.Closed == "COMPLETE" {
 			continue
@@ -774,6 +882,11 @@ func (a *Agent) closeFinished(ctx context.Context) error {
 			count++
 			switch e.State {
 			case StateConfirmed:
+				// A COMPLETE close counts what the platform has, so a chunk it
+				// has not been told of yet must wait.
+				if !e.Reported {
+					pending = true
+				}
 			case StateRejected:
 				missing = append(missing, e.Path+": rejected "+e.Reason)
 			case StateVanished:
@@ -788,24 +901,38 @@ func (a *Agent) closeFinished(ctx context.Context) error {
 		if count == 0 {
 			continue
 		}
-		id, err := a.recordingID(ctx, run.Name, run.Kind)
-		if err != nil {
-			return err
+		if err := a.closeOne(ctx, run, missing, count); err != nil {
+			errs = append(errs, err)
+			if !perEntry(err) {
+				break
+			}
 		}
-		var closed struct {
-			State string `json:"state"`
-		}
-		expected := run.Expected
-		if err := a.client.Do(ctx, http.MethodPost, "/api/v1/edge/recordings/"+id+"/close", map[string]any{"expected": expected, "missing": missing}, &closed); err != nil {
-			return fmt.Errorf("close %s: %w", run.Name, err)
-		}
-		fresh := a.journal.Run(run.Name)
-		fresh.Closed, fresh.Told = closed.State, len(missing)
-		if err := a.journal.PutRun(fresh); err != nil {
-			return err
-		}
-		a.log.Info("run closed", "name", run.Name, "state", closed.State, "files", count)
 	}
+	return errors.Join(errs...)
+}
+
+func (a *Agent) closeOne(ctx context.Context, run *RunState, missing []string, count int64) error {
+	id, err := a.recordingID(ctx, run.Name, run.Kind)
+	if err != nil {
+		return err
+	}
+	var closed struct {
+		State string `json:"state"`
+	}
+	err = a.client.Do(ctx, http.MethodPost, "/api/v1/edge/recordings/"+id+"/close", map[string]any{"expected": run.Expected, "missing": missing}, &closed)
+	var refused *osp.APIError
+	if errors.As(err, &refused) && refused.Code == "recording_complete" {
+		return a.markComplete(run.Name) // completed already, and final
+	}
+	if err != nil {
+		return fmt.Errorf("close %s: %w", run.Name, err)
+	}
+	fresh := a.journal.Run(run.Name)
+	fresh.Closed, fresh.Told = closed.State, len(missing)
+	if err := a.journal.PutRun(fresh); err != nil {
+		return err
+	}
+	a.log.Info("run closed", "name", run.Name, "state", closed.State, "files", count)
 	return nil
 }
 
@@ -837,6 +964,7 @@ func (a *Agent) Status() Pending {
 // Heartbeat reports what is waiting on this device.
 func (a *Agent) Heartbeat(ctx context.Context) error {
 	p := a.Status()
+	note, _ := a.lastErr.Load().(string)
 	return a.client.Do(ctx, http.MethodPost, "/api/v1/edge/heartbeat", map[string]any{"pending_files": p.Files, "pending_bytes": p.Bytes,
-		"failed_files": p.Failed, "oldest_pending": p.Oldest, "agent_version": Version, "note": a.lastErr}, nil)
+		"failed_files": p.Failed, "oldest_pending": p.Oldest, "agent_version": Version, "note": note}, nil)
 }

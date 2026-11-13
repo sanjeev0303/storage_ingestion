@@ -1,5 +1,7 @@
 package request
 
+import "log/slog"
+
 // StorageCredentials are a connection's secrets. They are accepted only on
 // create and rotate, and never returned by any API.
 type StorageCredentials struct {
@@ -10,6 +12,12 @@ type StorageCredentials struct {
 	AccountKey         string `json:"account_key,omitempty"`
 	SASToken           string `json:"sas_token,omitempty"`
 }
+
+// A request body logged or printed by mistake shows a placeholder, never
+// the secrets. JSON encoding is left alone: clients and tests send it.
+func (StorageCredentials) String() string       { return "[redacted credentials]" }
+func (StorageCredentials) GoString() string     { return "[redacted credentials]" }
+func (StorageCredentials) LogValue() slog.Value { return slog.StringValue("[redacted credentials]") }
 
 // CreateStorageConnectionRequest creates a connection to the
 // organization's own storage.

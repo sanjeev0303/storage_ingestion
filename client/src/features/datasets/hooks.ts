@@ -3,6 +3,7 @@ import { useOrganizationId } from "@/lib/auth/session";
 import { orgKey } from "@/lib/query/keys";
 import { usePagedQuery } from "@/lib/query/paged";
 import * as api from "./api";
+import { uploadWaitOver } from "./helpers";
 import { TERMINAL_IMPORT_STATES, type MemberRequest, type DuplicatePolicy } from "./types";
 
 const IMPORT_POLL_MS = 3000;
@@ -132,8 +133,12 @@ export function useImport(id: string, jobId: string) {
     queryFn: ({ signal }) => api.getImport(id, jobId, signal),
     enabled: Boolean(organizationId),
     refetchInterval: (query) => {
-      const state = query.state.data?.state;
-      return state && TERMINAL_IMPORT_STATES.includes(state) ? false : IMPORT_POLL_MS;
+      const data = query.state.data;
+      // A first load that failed shows an error with a retry; polling it would only repeat the failure.
+      if (query.state.status === "error" && !data) return false;
+      if (data && TERMINAL_IMPORT_STATES.includes(data.state)) return false;
+      if (data && uploadWaitOver(data, query.state.dataUpdatedAt)) return false;
+      return IMPORT_POLL_MS;
     },
   });
 }

@@ -52,6 +52,25 @@ describe("CostsScreen", () => {
   });
 });
 
+describe("CostsScreen budget", () => {
+  it("keeps an unsaved budget through a refetch and says someone else changed it", async () => {
+    let current = { monthly_usd: 0, monthly_requests: 0, action: "ALERT", updated_at: "2026-10-30T09:00:00Z" };
+    server.use(
+      http.get(`${API}/cost-report`, () => HttpResponse.json(report)),
+      http.get(`${API}/cost-budget`, () => HttpResponse.json(current)),
+      http.get(`${API}/tier-rules`, () => HttpResponse.json({ rules: [] })),
+      http.get(`${API}/tier-moves`, () => HttpResponse.json({ moves: [] })),
+    );
+    const { client } = renderWithProviders(<CostsScreen />, { permissions: ["org.read", "org.manage"] });
+    await userEvent.type(await screen.findByLabelText(/Dollars a month/), "50");
+
+    current = { ...current, action: "BLOCK", updated_at: "2026-10-30T10:00:00Z" };
+    await client.invalidateQueries();
+    expect(await screen.findByText(/Someone else changed the budget after you started editing/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Dollars a month/)).toHaveValue("50");
+  });
+});
+
 describe("DatasetLifecycle", () => {
   it("previews an expiry and carries it out after the typed confirmation", async () => {
     const sent: Record<string, unknown>[] = [];

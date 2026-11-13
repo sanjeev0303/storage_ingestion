@@ -74,3 +74,52 @@ func TestPoliciesAndHoldsCanBeReadBack(t *testing.T) {
 		t.Fatalf("policies need retention.manage, got %v", err)
 	}
 }
+
+func TestHoldsArePagedNewestFirst(t *testing.T) {
+	e := newEnv(t)
+	svc := e.service("worker-a")
+	ctx := context.Background()
+	admin := member("tenant-1", "user-2", model.RoleAdmin)
+
+	var placed []model.LegalHold
+	for _, reason := range []string{"first", "second", "third"} {
+		h, err := svc.PlaceHoldFor(ctx, admin, model.LegalHold{Scope: model.ScopeTenant, Reason: reason})
+		if err != nil {
+			t.Fatal(err)
+		}
+		placed = append(placed, h)
+		e.clock = e.clock.Add(time.Minute)
+	}
+	if err := svc.ReleaseHoldFor(ctx, admin, placed[1].ID); err != nil {
+		t.Fatal(err)
+	}
+
+	page, next, err := svc.HoldPageFor(ctx, admin, true, "", 2)
+	if err != nil || len(page) != 2 || page[0].ID != placed[2].ID || page[1].ID != placed[1].ID || next == "" {
+		t.Fatalf("first page: %+v %q %v", page, next, err)
+	}
+	page, next, err = svc.HoldPageFor(ctx, admin, true, next, 2)
+	if err != nil || len(page) != 1 || page[0].ID != placed[0].ID || next != "" {
+		t.Fatalf("last page: %+v %q %v", page, next, err)
+	}
+
+	// Released holds stay out unless asked for, and paging skips none.
+	page, next, err = svc.HoldPageFor(ctx, admin, false, "", 1)
+	if err != nil || len(page) != 1 || page[0].ID != placed[2].ID || next == "" {
+		t.Fatalf("active first page: %+v %q %v", page, next, err)
+	}
+	page, next, err = svc.HoldPageFor(ctx, admin, false, next, 1)
+	if err != nil || len(page) != 1 || page[0].ID != placed[0].ID || next != "" {
+		t.Fatalf("active last page: %+v %q %v", page, next, err)
+	}
+
+	for _, bad := range []string{"%%%", "bm90LWEtY3Vyc29y"} {
+		if _, _, err := svc.HoldPageFor(ctx, admin, true, bad, 2); !errors.Is(err, model.ErrInvalidCursor) {
+			t.Fatalf("cursor %q: %v", bad, err)
+		}
+	}
+	developer := member("tenant-1", "user-4", model.RoleDeveloper)
+	if _, _, err := svc.HoldPageFor(ctx, developer, false, "", 0); !errors.Is(err, model.ErrForbidden) {
+		t.Fatalf("hold reasons need retention.manage, got %v", err)
+	}
+}

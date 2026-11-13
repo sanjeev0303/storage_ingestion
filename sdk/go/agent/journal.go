@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sanjeev0303/object-storage-platform/sdk/go/osp"
 )
 
 // Entry states.
@@ -40,6 +42,8 @@ type Entry struct {
 	Reported   bool           `json:"reported,omitempty"` // the recording knows this chunk
 	Removed    bool           `json:"removed,omitempty"`  // the local copy was deleted
 	Reason     string         `json:"reason,omitempty"`
+	Tries      int            `json:"tries,omitempty"`    // refusals that pass in time, in a row
+	NextTry    *time.Time     `json:"next_try,omitempty"` // not sent again before this
 	UploadID   string         `json:"upload_id,omitempty"`
 	PartSize   int64          `json:"part_size,omitempty"`
 	Parts      map[int]string `json:"parts,omitempty"`
@@ -141,7 +145,14 @@ func (j *Journal) compact() error {
 			return err
 		}
 	}
-	for _, e := range j.entries {
+	for file, e := range j.entries {
+		// A file confirmed and deleted needs nothing more, once any recording
+		// it belongs to is COMPLETE: until then closing it counts its files.
+		run := j.runs[e.Recording]
+		if e.State == StateConfirmed && e.Removed && (e.Recording == "" || (run != nil && run.Closed == "COMPLETE")) {
+			delete(j.entries, file)
+			continue
+		}
 		if err := enc.Encode(record{Entry: e}); err != nil {
 			f.Close()
 			return err
@@ -265,14 +276,16 @@ type entryStore struct {
 	file string
 }
 
-func (s entryStore) SaveUpload(uploadID string, partSize int64) error {
+// The entry already names its file (size, time and SHA-256), so only the
+// upload is kept.
+func (s entryStore) SaveUpload(p osp.Progress) error {
 	s.j.mu.Lock()
 	defer s.j.mu.Unlock()
 	e := s.j.entries[s.file]
 	if e == nil {
 		return fmt.Errorf("no journal entry for %s", s.file)
 	}
-	e.UploadID, e.PartSize, e.Parts = uploadID, partSize, map[int]string{}
+	e.UploadID, e.PartSize, e.Parts = p.UploadID, p.PartSize, map[int]string{}
 	return s.j.write(record{Entry: e})
 }
 

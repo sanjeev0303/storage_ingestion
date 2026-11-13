@@ -317,7 +317,9 @@ func (s *Service) verify(ctx context.Context, p model.Pack, loc interfaces.Stora
 			Version: e.Version, Offset: e.Offset, Length: e.Length, Size: e.SizeBytes, SHA256: e.ChecksumSHA256,
 			Compression: compaction.CompressionNone})
 	}
-	if err := m.Validate(s.cfg.MaxEntries); err != nil {
+	// The limit is the entry count fixed when the pack was planned: a lower
+	// PACKING_MAX_ENTRIES set since must not fail a pack planned before it.
+	if err := m.Validate(p.EntryCount); err != nil {
 		return "", err
 	}
 
@@ -350,7 +352,7 @@ func (s *Service) verify(ctx context.Context, p model.Pack, loc interfaces.Stora
 	if err != nil {
 		return "", err
 	}
-	if _, err := compaction.ParseManifest(back, s.cfg.MaxEntries); err != nil || !bytes.Equal(back, doc) {
+	if _, err := compaction.ParseManifest(back, p.EntryCount); err != nil || !bytes.Equal(back, doc) {
 		return "", fmt.Errorf("%w: the manifest does not read back as written", model.ErrPackCorrupt)
 	}
 	sum := sha256.Sum256(doc)

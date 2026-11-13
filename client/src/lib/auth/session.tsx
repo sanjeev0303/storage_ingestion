@@ -2,7 +2,7 @@
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { usePathname, useRouter } from "next/navigation";
-import { createContext, useCallback, useContext, useEffect, useMemo, useSyncExternalStore, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useSyncExternalStore, type ReactNode } from "react";
 import { accountApi, api, onUnauthenticated, setActiveOrganization } from "@/lib/api/client";
 import type { Me, Membership, Role, User } from "@/lib/api/types/identity";
 import type { Permission } from "@/lib/permissions";
@@ -76,16 +76,18 @@ export function SessionProvider({ children, fallback }: { children: ReactNode; f
   const client = useQueryClient();
   const chosen = useSyncExternalStore(subscribeToOrganization, readStoredOrganization, () => null);
 
-  useEffect(() => {
-    leavingSession = false;
-  }, []);
-
   const me = useQuery({
     queryKey: accountKey("me"),
     queryFn: ({ signal }) => accountApi<Me>("/auth/me", { signal }),
     retry: false,
     staleTime: 60_000,
   });
+
+  // Reset on mount and whenever the API confirms a session again, so a session
+  // that ends later still redirects even if this provider outlived the last one.
+  useEffect(() => {
+    leavingSession = false;
+  }, [me.dataUpdatedAt]);
 
   const active = useMemo(
     () => me.data?.memberships.filter((m) => m.status === "ACTIVE") ?? [],
@@ -98,9 +100,12 @@ export function SessionProvider({ children, fallback }: { children: ReactNode; f
     return null;
   }, [chosen, active]);
 
-  // Set while rendering so child queries, which run after this render, always
-  // send the organization this render shows.
-  setActiveOrganization(organizationId);
+  // A layout effect runs before any passive effect of the same commit, and
+  // queries start fetching in passive effects, so child queries always send
+  // the organization this render shows.
+  useLayoutEffect(() => {
+    setActiveOrganization(organizationId);
+  }, [organizationId]);
 
   const membership = active.find((m) => m.organization_id === organizationId) ?? null;
 

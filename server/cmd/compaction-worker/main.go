@@ -17,6 +17,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/metrics"
 	compactionservice "github.com/sanjeev0303/object-storage-platform/internal/service/compaction"
 	compactionworker "github.com/sanjeev0303/object-storage-platform/internal/worker/compaction"
+	"github.com/sanjeev0303/object-storage-platform/internal/worker/heartbeat"
 )
 
 func main() {
@@ -97,6 +98,7 @@ func run() error {
 		stopMetrics := metrics.Serve(cc.MetricsAddr, db.Pool.Ping, log)
 		defer stopMetrics()
 	}
+	go heartbeat.Run(ctx, db, "compaction", "", log)
 	compactionworker.Run(ctx, service, cc.PollInterval, log)
 	log.Info("compaction worker stopped")
 	return nil

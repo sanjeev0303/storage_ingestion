@@ -89,6 +89,12 @@ export type ResumeRecord = {
   sha256: string;
   part_size: number;
   parts: StoredPart[];
+  // Parts sent to storage whose confirmation has not reached the API yet (the
+  // connection dropped or the tab closed first). The API checks them against
+  // the provider before they count.
+  unconfirmed?: StoredPart[];
+  // SHA-256 of the file's first MiB, to tell the same file chosen again.
+  head_sha256?: string;
   expires_at: string;
   saved_at: string;
 };
@@ -133,5 +139,12 @@ export type UploadSnapshot = {
   asset?: { objectId?: string; status?: AssetStatus; rejectionReason?: string };
   // Status polling gave up after its limit; "Check again" resumes it.
   pollingStopped: boolean;
+  // The completion was sent, so the server may publish the file: it can no
+  // longer be cancelled.
+  completionSent?: boolean;
   resumed: boolean;
+  // Paused by the person, or because the API cannot be reached.
+  paused?: "user" | "offline";
+  // Measured speed is below what a large upload needs.
+  slow?: boolean;
 };

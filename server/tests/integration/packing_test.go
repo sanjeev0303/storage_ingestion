@@ -779,13 +779,13 @@ func TestPackingStaysOnEachConnection(t *testing.T) {
 	keyring := testKeyring(t)
 
 	ranged := activeConnection(t, connections, acme.org.ID, "Ranged bucket", keyring)
-	if _, err := connections.RecordTest(ctx, acme.org.ID, ranged.ID, interfaces.ConnectionTestRecord{OK: true, At: time.Now().UTC(),
+	if _, err := connections.RecordTest(ctx, acme.org.ID, ranged.ID, interfaces.ConnectionTestRecord{OK: true, At: time.Now().UTC(), CredentialVersion: 1,
 		Capabilities: &model.ProviderCapabilities{PresignedUpload: true, Multipart: true, RangeReads: true}}); err != nil {
 		t.Fatal(err)
 	}
 	plain := activeConnection(t, connections, acme.org.ID, "No ranges", keyring)
 	foreign := activeConnection(t, connections, other.org.ID, "Other tenant", keyring)
-	if _, err := connections.RecordTest(ctx, other.org.ID, foreign.ID, interfaces.ConnectionTestRecord{OK: true, At: time.Now().UTC(),
+	if _, err := connections.RecordTest(ctx, other.org.ID, foreign.ID, interfaces.ConnectionTestRecord{OK: true, At: time.Now().UTC(), CredentialVersion: 1,
 		Capabilities: &model.ProviderCapabilities{RangeReads: true}}); err != nil {
 		t.Fatal(err)
 	}

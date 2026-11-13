@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { FormProvider, useForm } from "react-hook-form";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog, Modal } from "@/components/ui/dialog";
@@ -12,7 +12,7 @@ import { StateBadge } from "@/components/ui/status";
 import { SubmitButton } from "@/components/ui/submit-button";
 import { Time } from "@/components/ui/time";
 import { notify } from "@/components/ui/toast";
-import { describeError, isApiError } from "@/lib/api/errors";
+import { ApiError, describeError, isApiError } from "@/lib/api/errors";
 import { useOrganizationId, useSession } from "@/lib/auth/session";
 import { orgKey } from "@/lib/query/keys";
 import { zodResolver } from "@/lib/validation/resolver";
@@ -31,6 +31,7 @@ import {
 import { useRefreshStorage } from "../hooks";
 import { buildCredentials, emptyCredentials, rotateSchema, type RotateForm } from "../schema";
 import type { ChecksumMode, DriftKind, PostureStatus, StorageConnection, TestResponse } from "../types";
+import { CHANGED_ELSEWHERE, STALE } from "./connection-dialogs";
 import { CredentialFields } from "./credential-fields";
 import { TestResult } from "./test-result";
 
@@ -63,6 +64,8 @@ const STATUS: Record<PostureStatus, { label: string; tone: "done" | "warning" | 
 };
 
 const ORDER: PostureStatus[] = ["FAIL", "WARN", "NOT_CHECKED", "PASS"];
+
+const CREDENTIAL_CHANGED = "The credentials changed while you were looking. Check the latest state and try again.";
 
 export function PosturePanel({ connection }: { connection: StorageConnection }) {
   const organizationId = useOrganizationId();
@@ -163,7 +166,31 @@ const CHECKSUM_TEXT: Record<ChecksumMode, string> = {
 };
 
 export function IntegritySettings({ connection }: { connection: StorageConnection }) {
+  // The form restarts with the latest values after a save, or once a refused
+  // save has brought in a newer revision. A background refetch alone keeps the edits.
+  const [reloads, setReloads] = useState(0);
+  const [refusedRevision, setRefusedRevision] = useState<number | null>(null);
+  if (refusedRevision !== null && connection.revision !== refusedRevision) {
+    setRefusedRevision(null);
+    setReloads(reloads + 1);
+  }
+  return <IntegrityForm key={reloads} latest={connection} onSaved={() => setReloads(reloads + 1)} onRefused={setRefusedRevision} />;
+}
+
+function IntegrityForm({
+  latest,
+  onSaved,
+  onRefused,
+}: {
+  latest: StorageConnection;
+  onSaved: () => void;
+  onRefused: (revision: number) => void;
+}) {
   const refresh = useRefreshStorage();
+  // The connection as it was when editing started. Changes are worked out
+  // against it and sent with its revision, so a change made elsewhere since is
+  // refused rather than overwritten.
+  const [connection, setConnection] = useState(latest);
   const pinnable = connection.provider === "AWS_S3" || connection.provider === "GOOGLE_CLOUD_STORAGE";
   const [mode, setMode] = useState<ChecksumMode>(connection.checksum_mode ?? "AUTO");
   const [owner, setOwner] = useState(connection.expected_owner ?? "");
@@ -176,9 +203,19 @@ export function IntegritySettings({ connection }: { connection: StorageConnectio
     ...(pinnable && owner.trim() !== (connection.expected_owner ?? "") && { expected_owner: owner.trim() }),
     ...(keyChanged && { encryption_key: key.trim() }),
   }) });
+  // Our own save also moves the revision; that is not a change made elsewhere.
+  const changedElsewhere = !save.isSuccess && latest.revision !== connection.revision;
   const ownerValid = owner.trim() === "" || /^[0-9]{6,20}$/.test(owner.trim());
   const changed =
     mode !== (connection.checksum_mode ?? "AUTO") || (pinnable && owner.trim() !== (connection.expected_owner ?? "")) || keyChanged;
+  // Untouched, the form follows the latest values: there are no edits to keep,
+  // and the change may well be the user's own, made in another dialog here.
+  if (!changed && !save.isPending && latest.revision !== connection.revision) {
+    setConnection(latest);
+    setMode(latest.checksum_mode ?? "AUTO");
+    setOwner(latest.expected_owner ?? "");
+    setKey(latest.encryption_key ?? "");
+  }
   const keyLabel =
     connection.provider === "GOOGLE_CLOUD_STORAGE"
       ? "Cloud KMS key name"
@@ -194,11 +231,19 @@ export function IntegritySettings({ connection }: { connection: StorageConnectio
       onSuccess: async () => {
         await refresh();
         notify.success("Saved; the change passed a connection test");
+        onSaved();
       },
-      onError: (error) => {
+      onError: async (error) => {
         const result = testResultFromError(error);
-        if (result) setRefused(result);
-        else notify.error(error);
+        if (result) {
+          setRefused(result);
+        } else if (isApiError(error) && error.code === "revision_conflict") {
+          notify.info(STALE);
+          onRefused(connection.revision);
+          await refresh();
+        } else {
+          notify.error(error);
+        }
       },
     });
   }
@@ -206,6 +251,11 @@ export function IntegritySettings({ connection }: { connection: StorageConnectio
   return (
     <Panel title="Integrity settings" description="Changing either is tested against the bucket before it is saved." tone="in">
       <form onSubmit={submit} className="flex flex-col gap-4">
+        {changedElsewhere && (
+          <p role="status" className="neo-in-sm p-3 text-base">
+            {CHANGED_ELSEWHERE}
+          </p>
+        )}
         <Field label="Request checksums">
           {(props) => (
             <Select {...props} name="checksum_mode" value={mode} onChange={(e) => setMode(e.target.value as ChecksumMode)}>
@@ -254,7 +304,26 @@ export function SecondCredential({ connection }: { connection: StorageConnection
   const [staging, setStaging] = useState(false);
   const [confirm, setConfirm] = useState<"promote" | "rollback" | "discard" | null>(null);
   const [result, setResult] = useState<{ value: TestResponse; note: string } | null>(null);
-  const rollbackOpen = Boolean(connection.previous_credential_until && new Date(connection.previous_credential_until) > new Date());
+  const until = connection.previous_credential_until ? Date.parse(connection.previous_credential_until) : 0;
+  const [now, setNow] = useState(() => Date.now());
+  // Render again when the rollback window closes, so Roll back does not linger.
+  useEffect(() => {
+    if (until <= now) return;
+    const timer = setTimeout(() => setNow(Date.now()), until - now);
+    return () => clearTimeout(timer);
+  }, [until, now]);
+  const rollbackOpen = until > now;
+  // Rolling back while new keys are staged would leave the staged ones
+  // promoting over the restored ones; settle the staged credential first.
+  const canRollBack = rollbackOpen && !connection.staged_credential;
+
+  // Someone else staged, promoted or rolled back since this was read. Show
+  // the latest state and say so in plain words.
+  async function explain(error: unknown) {
+    if (!isApiError(error) || error.code !== "credential_changed") return error;
+    await refresh();
+    return new ApiError({ status: 409, message: CREDENTIAL_CHANGED });
+  }
 
   return (
     <Panel
@@ -275,7 +344,7 @@ export function SecondCredential({ connection }: { connection: StorageConnection
       ) : (
         <p className="text-base text-muted">Nothing staged.</p>
       )}
-      {rollbackOpen && (
+      {canRollBack && (
         <p className="mt-2 text-sm text-muted">
           The replaced credential can be put back until <Time value={connection.previous_credential_until} />.
         </p>
@@ -291,7 +360,7 @@ export function SecondCredential({ connection }: { connection: StorageConnection
         ) : (
           <Button onClick={() => setStaging(true)}>Stage new credentials</Button>
         )}
-        {rollbackOpen && <Button onClick={() => setConfirm("rollback")}>Roll back</Button>}
+        {canRollBack && <Button onClick={() => setConfirm("rollback")}>Roll back</Button>}
       </div>
       {result && (
         <div className="mt-4">
@@ -317,6 +386,14 @@ export function SecondCredential({ connection }: { connection: StorageConnection
             const value = await promoteCredentials(connection.id);
             setResult({ value, note: "Promoted. Revoke the old keys at the provider once nothing else uses them." });
           } catch (error) {
+            if (isApiError(error) && error.code === "credential_changed") throw await explain(error);
+            if (isApiError(error) && error.isConflict) {
+              await refresh();
+              throw new ApiError({
+                status: 409,
+                message: "Not promoted: the staged credentials are not newer than the ones in use. Discard them and stage new ones.",
+              });
+            }
             const refused = testResultFromError(error);
             if (!refused) throw error;
             setResult({ value: refused, note: "Not promoted: the staged credentials failed their test. The current ones are still in use." });
@@ -331,7 +408,11 @@ export function SecondCredential({ connection }: { connection: StorageConnection
         description="The credentials the last promotion replaced go back in use at once, if the provider still accepts them."
         confirmLabel="Roll back"
         onConfirm={async () => {
-          await rollbackCredentials(connection.id);
+          try {
+            await rollbackCredentials(connection.id);
+          } catch (error) {
+            throw await explain(error);
+          }
           await refresh();
           notify.success("Rolled back");
         }}
@@ -343,7 +424,11 @@ export function SecondCredential({ connection }: { connection: StorageConnection
         description="They are erased without ever being used."
         confirmLabel="Discard"
         onConfirm={async () => {
-          await discardStaged(connection.id);
+          try {
+            await discardStaged(connection.id);
+          } catch (error) {
+            throw await explain(error);
+          }
           await refresh();
         }}
       />

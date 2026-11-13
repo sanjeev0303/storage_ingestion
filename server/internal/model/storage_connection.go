@@ -112,9 +112,6 @@ var authMethods = map[StorageProviderType][]StorageAuthMethod{
 	ProviderAzureBlob:    {AuthAccountKey, AuthSASToken},
 }
 
-// AuthMethods lists the methods a provider accepts.
-func AuthMethods(p StorageProviderType) []StorageAuthMethod { return slices.Clone(authMethods[p]) }
-
 // SecretFields are the credential fields a method needs.
 func (m StorageAuthMethod) SecretFields() []string {
 	switch m {

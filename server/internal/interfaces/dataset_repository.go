@@ -55,10 +55,10 @@ type DatasetRepository interface {
 	// ListImports pages a dataset's imports, newest first.
 	ListImports(ctx context.Context, tenantID, datasetID, after string, limit int) (imports []model.ManifestImport, next string, err error)
 	ListImportErrors(ctx context.Context, tenantID, importID string, afterLine int64, limit int) ([]model.ImportError, error)
-	// ObjectDatasets returns the datasets whose draft holds the catalog
-	// object and the snapshots that pinned one of its versions, at most
-	// limit of each.
-	ObjectDatasets(ctx context.Context, tenantID, objectID string, limit int) (model.ObjectDatasets, error)
+	// ObjectMemberships pages the datasets whose draft holds the catalog
+	// object; ObjectSnapshots the snapshots that pinned one of its versions.
+	ObjectMemberships(ctx context.Context, tenantID, objectID, after string, limit int) (members []model.ObjectMembership, next string, err error)
+	ObjectSnapshots(ctx context.Context, tenantID, objectID, after string, limit int) (snapshots []model.ObjectSnapshot, next string, err error)
 	// ClaimImports leases due imports: importID alone, or any when it is "".
 	ClaimImports(ctx context.Context, owner, importID string, now time.Time, lease time.Duration, limit int) ([]model.ManifestImport, error)
 	InlineManifest(ctx context.Context, importID string, offset int64) ([]byte, error)
@@ -67,6 +67,9 @@ type DatasetRepository interface {
 	ExtendImport(ctx context.Context, importID, owner string, now time.Time, lease time.Duration) (bool, error)
 	FinishImport(ctx context.Context, importID, owner string, state model.ImportState, lastError string, now time.Time) error
 	RetryImport(ctx context.Context, importID, owner string, next time.Time, lastError string, now time.Time) error
+	// ReleaseImport gives up owner's lease on an import that shutdown cut
+	// short: it is due again now, and the attempt is not counted.
+	ReleaseImport(ctx context.Context, importID, owner string, now time.Time) error
 	CancelImport(ctx context.Context, tenantID, importID string, now time.Time) (model.ManifestImport, error)
 
 	CreateProfile(ctx context.Context, p model.ValidationProfile) (model.ValidationProfile, error)
@@ -88,6 +91,8 @@ type DatasetRepository interface {
 	CompleteValidation(ctx context.Context, job model.ValidationJob, owner string, report model.ValidationReport, findings []model.Finding) error
 	FailValidation(ctx context.Context, jobID, owner, lastError string, now time.Time) error
 	RetryValidation(ctx context.Context, jobID, owner string, next time.Time, lastError string, now time.Time) error
+	// ReleaseValidation does for a validation what ReleaseImport does.
+	ReleaseValidation(ctx context.Context, jobID, owner string, now time.Time) error
 	CancelValidation(ctx context.Context, tenantID, jobID string, now time.Time) (model.ValidationJob, error)
 	// StopValidation ends a running job its worker found cancelled.
 	StopValidation(ctx context.Context, jobID, owner string, now time.Time) error

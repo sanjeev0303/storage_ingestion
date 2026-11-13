@@ -17,6 +17,7 @@ import json
 import random
 import socket
 import tarfile
+import threading
 import time
 
 from .client import APIError
@@ -43,6 +44,19 @@ class Verifier:
         self.rate, self.seed, self.keep, self.strict = rate, seed, keep, strict
         self.checked = self.failed = 0
         self.failures = []
+        # Shards prefetched side by side share one verifier.
+        self._lock = threading.Lock()
+
+    # DataLoader workers get a copy; a lock cannot be copied across
+    # processes, so each copy makes its own.
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state.pop("_lock", None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._lock = threading.Lock()
 
     def wants(self, path):
         if self.rate >= 1:
@@ -54,7 +68,8 @@ class Verifier:
         """True when the bytes are the ones pinned, or were not sampled."""
         if not self.wants(path):
             return True
-        self.checked += 1
+        with self._lock:
+            self.checked += 1
         reason = ""
         if want_size is not None and len(data) != want_size:
             reason = f"size {len(data)}, pinned {want_size}"
@@ -68,9 +83,10 @@ class Verifier:
         return True
 
     def fail(self, path, reason):
-        self.failed += 1
-        if len(self.failures) < self.keep:
-            self.failures.append({"path": path, "reason": reason})
+        with self._lock:
+            self.failed += 1
+            if len(self.failures) < self.keep:
+                self.failures.append({"path": path, "reason": reason})
 
     def report(self, client, run_id, version_id="", host=None):
         """Records what was checked on a training run, with the host that

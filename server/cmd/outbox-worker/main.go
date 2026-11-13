@@ -23,6 +23,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/metrics"
 	"github.com/sanjeev0303/object-storage-platform/internal/platform/retry"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/events"
+	"github.com/sanjeev0303/object-storage-platform/internal/worker/heartbeat"
 	outboxworker "github.com/sanjeev0303/object-storage-platform/internal/worker/outbox"
 )
 
@@ -145,6 +146,7 @@ func run() error {
 		defer close(listening)
 		db.Listen(ctx, "outbox_events", wake, log)
 	}()
+	go heartbeat.Run(ctx, db, "outbox", owner, log)
 	outboxworker.Run(ctx, publisher, reconciler, ec.PublishInterval, ec.ReconcileInterval, wake, log)
 	<-listening
 	log.Info("outbox worker stopped")

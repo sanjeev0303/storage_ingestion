@@ -110,6 +110,19 @@ func (r *SSORepository) LinkedUser(ctx context.Context, issuer, subject string) 
 	return userID, err
 }
 
+// SAMLIssuerInUse reports whether another organization's SAML connection
+// names this identity provider entity ID.
+func (r *SSORepository) SAMLIssuerInUse(ctx context.Context, issuer, orgID string) (bool, error) {
+	var inUse bool
+	err := r.db.Pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM sso_connections WHERE protocol = $1 AND issuer = $2 AND org_id <> $3)`,
+		model.ProtocolSAML, issuer, orgID).Scan(&inUse)
+	if err != nil {
+		return false, fmt.Errorf("check saml issuer: %w", err)
+	}
+	return inUse, nil
+}
+
 // Provision writes a first sign-in's account, link and membership together.
 func (r *SSORepository) Provision(ctx context.Context, p model.SSOProvision, now time.Time, audit ...model.AuditEvent) error {
 	return withTx(ctx, r.db, func(tx pgx.Tx) error {

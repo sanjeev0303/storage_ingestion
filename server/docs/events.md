@@ -175,7 +175,7 @@ The payload is not copied: it stays in the outbox, referenced by event ID, and `
 |---|---|---|
 | List | `event-admin dead-letters -status OPEN` | newest first |
 | Inspect | `event-admin inspect -id ID` | the dead letter, the event's metadata, the inbox record, and whether a resend would be refused |
-| Retry | `event-admin retry -id ID -reason "..."` | same identity. Checks the business state first. Then, in one transaction: outbox → PENDING with a new generation, inbox DEAD → FAILED with a fresh budget, dead letter → RETRIED |
+| Retry | `event-admin retry -id ID -reason "..."` | same identity. Checks the business state first. Then, in one transaction: outbox → PENDING with a new generation, inbox DEAD → FAILED with a fresh budget, dead letter → RETRIED. Refused (409 `conflict`) while a publisher holds the event's lease: taking it would publish the event twice |
 | Replay | `event-admin replay -id ID -reason "..."` | a new event ID with `causation_id` = the original, next in its aggregate's order; dead letter → REPLAYED with the new ID |
 | Resolve / discard | `event-admin resolve`/`discard -id ID -reason "..."` | closes it with the operator's reason |
 

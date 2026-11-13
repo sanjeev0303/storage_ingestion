@@ -12,6 +12,7 @@ var (
 	ErrProfileNotReady = errors.New("the version's column profile is not ready")
 	ErrReleaseTaken    = errors.New("that release label is already used in this dataset")
 	ErrNoRelease       = errors.New("no release with that label")
+	ErrVersionExpired  = errors.New("the version has expired: its member list is gone")
 )
 
 // QualitySettings are a dataset's quality settings.

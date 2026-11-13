@@ -683,8 +683,16 @@ func (h *DatasetHandler) manifestImports(w nethttp.ResponseWriter, r *nethttp.Re
 	writeJSON(w, nethttp.StatusOK, out)
 }
 
+// objectDatasets answers both lists, or one of them with ?part=datasets or
+// ?part=snapshots, which is how a client pages it with cursor.
 func (h *DatasetHandler) objectDatasets(w nethttp.ResponseWriter, r *nethttp.Request) {
-	found, err := h.service.ObjectDatasets(r.Context(), principalOf(r), r.PathValue("id"))
+	query := r.URL.Query()
+	limit, err := datasetInt(query.Get("limit"))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	found, err := h.service.ObjectDatasets(r.Context(), principalOf(r), r.PathValue("id"), query.Get("part"), query.Get("cursor"), limit)
 	if err != nil {
 		h.fail(w, err)
 		return
@@ -702,7 +710,14 @@ func (h *DatasetHandler) objectDatasets(w nethttp.ResponseWriter, r *nethttp.Req
 			"version": s.Version, "object_version": s.ObjectVersion,
 		})
 	}
-	writeJSON(w, nethttp.StatusOK, map[string]any{"datasets": members, "snapshots": snapshots})
+	out := map[string]any{"datasets": members, "snapshots": snapshots}
+	if found.NextMembers != "" {
+		out["next_datasets_cursor"] = found.NextMembers
+	}
+	if found.NextSnapshots != "" {
+		out["next_snapshots_cursor"] = found.NextSnapshots
+	}
+	writeJSON(w, nethttp.StatusOK, out)
 }
 
 func (h *DatasetHandler) validationJob(w nethttp.ResponseWriter, r *nethttp.Request) {

@@ -1,5 +1,10 @@
 # Release candidate verification
 
+> **Status note, 2026-11-12.** This report predates later work, so parts of it are out of date:
+> - The console in `client/` exists: about 70 pages over the real API, built in phases 14 and 15 (`docs/phase15-report.md`). Section 10 below is superseded.
+> - The open D-items of section 3.2 were rechecked in section 3.3; most are fixed there.
+> - The cleanup in "3.3 Cleanup not done" is done: the package-only stub files are deleted, `DATABASE_URL_UNPOOLED` is gone from `.env.example`, and a root `.gitattributes` keeps `*.go` and `*.sql` LF.
+
 Verified on 2026-10-21 against `main` at `9459999` (PR #2, phases 6–11), with the changes listed in section 3 applied on top as uncommitted edits. One Windows 11 laptop, Docker Desktop, Go 1.25.0 (`GOTOOLCHAIN=go1.25.0`; the race run used the `golang:1.25` image pinned to go1.25.0). Every result below was produced by a command in section 4; nothing is estimated unless it says so.
 
 ## 1. Executive summary
@@ -101,7 +106,7 @@ The D-items above were rechecked against the code after the competitor-gap work.
 | D9 | Fixed | `processing.recordStorage` returns the error when the asset is missing; there is no fallback to the platform bucket |
 | D11 | Fixed | `s3/copy.go`: one `CopyObject` up to 5 GiB, a multipart `UploadPartCopy` above, to 5 TiB |
 
-Also rechecked: R1 (processing leases are renewed while a job runs), R2 (bulk ingestion has its own `ingestion_entry` budget, 3,000 a minute), P1 (every worker takes `PROMOTION_PREFIX`), H1 (a readiness endpoint checks the database) and S3 (Disable locks the organization's row first) are fixed. M1 is fixed in `scripts/migrate.ps1` (an advisory lock, and each file recorded in its own transaction), and `cmd/migrate` now does the same from any machine (`docs/migrations.md`). R5 (slow cancellation of a million-entry job) was not rechecked.
+Also rechecked: R1 (processing leases are renewed while a job runs), R2 (bulk ingestion has its own `ingestion_entry` budget, 3,000 a minute), P1 (every worker takes `PROMOTION_PREFIX`), H1 (a readiness endpoint checks the database) and S3 (Disable locks the organization's row first) are fixed. M1 is fixed in `scripts/migrate.ps1` (an advisory lock, and each file recorded in its own transaction), and `cmd/migrate` now does the same from any machine (`docs/migrations.md`). R5 is fixed (2026-11-12): a partial index on waiting entries (migration 000049) and a sweep that keeps cancelling for one poll interval instead of stopping after 20 batches. Cancelling a 1,000,000-entry job took 65 s at 13k–21k entries/s with no slowdown, against 498 s on the code before the fix and 1,436 s in this report (`docs/ingestion.md`, `docs/load-testing.md`, `TestIngestionCancellingALargeJobKeepsItsRate`).
 
 Unverified behaviour, not counted as defects:
 
@@ -392,6 +397,8 @@ Reconciliation is not in the e2e test. It is covered by `TestLocalStackRecoversL
 **Reliability.** The open items are R1 (15-minute recovery after a crash), R2 (the default rate limit), R5 (slow cancellation of huge jobs), D2, D7, D4 and D11, plus the throughput limits measured in section 5.1. Recovery after a worker crash, duplicate deliveries, lost completions and interrupted deletions are covered by the tests named in section 5.1.
 
 ## 10. Remaining frontend work
+
+_Superseded: the console was built after this report (see the status note at the top)._
 
 `client/` holds only `.gitkeep`. The user-facing frontend is a separate, unstarted product component. Every workflow below has a working API today.
 

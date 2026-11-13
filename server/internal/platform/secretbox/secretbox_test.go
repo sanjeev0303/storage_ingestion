@@ -85,3 +85,91 @@ func TestBadKeysAreRefused(t *testing.T) {
 		t.Fatalf("parse: %v %v", keys, err)
 	}
 }
+
+func TestEnvelopeSealsEachValueUnderItsOwnDataKey(t *testing.T) {
+	ring, _ := NewKeyring(map[int][]byte{1: key(1)}, 1)
+	env := NewEnvelope(ring)
+	ad := []byte("storage-credential/v1|tenant-a|conn-1|AWS_S3|1")
+	sealed, err := env.Seal([]byte("secret"), ad)
+	if err != nil || sealed.KeyVersion != 1 || len(sealed.WrappedKey) == 0 || bytes.Contains(sealed.Ciphertext, []byte("secret")) {
+		t.Fatalf("sealed: %+v %v", sealed, err)
+	}
+	if plain, err := env.Open(sealed, ad); err != nil || string(plain) != "secret" {
+		t.Fatalf("open: %q %v", plain, err)
+	}
+	// The secret is not sealed by the master key itself.
+	if _, err := ring.Open(sealed, ad); !errors.Is(err, ErrOpen) {
+		t.Fatalf("the master key opened the value directly: %v", err)
+	}
+	// Bound to its connection and version, through both layers.
+	for _, other := range []string{"storage-credential/v1|tenant-a|conn-2|AWS_S3|1", "storage-credential/v1|tenant-a|conn-1|AWS_S3|2"} {
+		if _, err := env.Open(sealed, []byte(other)); !errors.Is(err, ErrOpen) {
+			t.Fatalf("opened under %s: %v", other, err)
+		}
+	}
+	// Another value's wrapped key does not open this one.
+	again, _ := env.Seal([]byte("secret"), ad)
+	if bytes.Equal(again.WrappedKey, sealed.WrappedKey) {
+		t.Fatal("two values share a data key")
+	}
+	swapped := sealed
+	swapped.WrappedKey = again.WrappedKey
+	if _, err := env.Open(swapped, ad); !errors.Is(err, ErrOpen) {
+		t.Fatalf("opened with another value's data key: %v", err)
+	}
+	// A wrapped data key cannot pass for a value sealed directly.
+	asDirect := Sealed{KeyVersion: 1, Nonce: sealed.WrappedKey[1:13], Ciphertext: sealed.WrappedKey[13:]}
+	if _, err := env.Open(asDirect, ad); !errors.Is(err, ErrOpen) {
+		t.Fatalf("a wrapped key opened as a value: %v", err)
+	}
+	for _, bad := range [][]byte{{200}, {12, 1, 2}} {
+		broken := sealed
+		broken.WrappedKey = bad
+		if _, err := env.Open(broken, ad); !errors.Is(err, ErrOpen) {
+			t.Fatalf("malformed wrapped key %v: %v", bad, err)
+		}
+	}
+}
+
+func TestEnvelopeOpensValuesSealedBeforeIt(t *testing.T) {
+	ring, _ := NewKeyring(map[int][]byte{1: key(1)}, 1)
+	direct, _ := ring.Seal([]byte("old secret"), []byte("ad"))
+	if plain, err := NewEnvelope(ring).Open(direct, []byte("ad")); err != nil || string(plain) != "old secret" {
+		t.Fatalf("direct value: %q %v", plain, err)
+	}
+}
+
+func TestRewrapMovesValuesToTheNewestKeyWithoutChangingThem(t *testing.T) {
+	old, _ := NewKeyring(map[int][]byte{1: key(1)}, 1)
+	ad := []byte("ad")
+	enveloped, _ := NewEnvelope(old).Seal([]byte("enveloped"), ad)
+	direct, _ := old.Seal([]byte("direct"), ad)
+
+	ring, _ := NewKeyring(map[int][]byte{1: key(1), 2: key(2)}, 2)
+	env := NewEnvelope(ring)
+	moved, err := env.Rewrap(enveloped, ad)
+	if err != nil || moved.KeyVersion != 2 {
+		t.Fatalf("rewrap: %+v %v", moved, err)
+	}
+	// Only the data key's wrapping changed; the sealed secret is the same.
+	if !bytes.Equal(moved.Ciphertext, enveloped.Ciphertext) || !bytes.Equal(moved.Nonce, enveloped.Nonce) {
+		t.Fatal("rewrap re-encrypted the secret")
+	}
+	upgraded, err := env.Rewrap(direct, ad)
+	if err != nil || upgraded.KeyVersion != 2 || len(upgraded.WrappedKey) == 0 {
+		t.Fatalf("upgrade: %+v %v", upgraded, err)
+	}
+	newOnly, _ := NewKeyring(map[int][]byte{2: key(2)}, 2)
+	for want, s := range map[string]Sealed{"enveloped": moved, "direct": upgraded} {
+		if plain, err := NewEnvelope(newOnly).Open(s, ad); err != nil || string(plain) != want {
+			t.Fatalf("%s after rewrap, without the old key: %q %v", want, plain, err)
+		}
+	}
+	// Until the rewrap is done, old values still open with both keys loaded.
+	if plain, err := env.Open(enveloped, ad); err != nil || string(plain) != "enveloped" {
+		t.Fatalf("old value during the move: %q %v", plain, err)
+	}
+	if _, err := env.Rewrap(enveloped, []byte("other")); !errors.Is(err, ErrOpen) {
+		t.Fatalf("rewrapped under the wrong context: %v", err)
+	}
+}

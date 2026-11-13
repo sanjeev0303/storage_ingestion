@@ -3,6 +3,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useId, useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
+import { ChangedElsewhere } from "@/components/ui/changed-elsewhere";
 import { CopyButton } from "@/components/ui/copy-button";
 import { ConfirmDialog } from "@/components/ui/dialog";
 import { Checkbox, Field, Input, Select, Textarea } from "@/components/ui/field";
@@ -35,25 +36,30 @@ export function SsoScreen() {
     queryFn: ({ signal }) => getSso(signal),
     enabled: Boolean(organizationId),
   });
+  // The form restarts with the latest settings after a save or when asked. A
+  // background refetch alone must not wipe what the user typed.
+  const [reloads, setReloads] = useState(0);
 
   if (settings.isPending) return <SkeletonRows rows={5} />;
   if (settings.isError) return <ErrorState error={settings.error} onRetry={() => settings.refetch()} />;
 
   return (
     <div className="flex flex-col gap-6">
-      <SsoSettingsView key={settings.data.updated_at ?? "new"} current={settings.data} />
+      <SsoSettingsView key={reloads} latest={settings.data} onReload={() => setReloads((n) => n + 1)} />
       {can("org.manage") && <ScimPanel />}
     </div>
   );
 }
 
-function SsoSettingsView({ current }: { current: SsoSettings }) {
+function SsoSettingsView({ latest, onReload }: { latest: SsoSettings; onReload: () => void }) {
+  // The settings as they were when editing started.
+  const [current] = useState(latest);
   const oidcOn = current.redirect_uris.length > 0;
   const [protocol, setProtocol] = useState<SsoProtocol>(current.protocol ?? (current.saml && !oidcOn ? "SAML" : "OIDC"));
 
   return (
     <div className="grid gap-6 lg:grid-cols-3">
-      <SsoForm current={current} protocol={protocol} onProtocol={setProtocol} />
+      <SsoForm current={current} latest={latest} protocol={protocol} onProtocol={setProtocol} onReload={onReload} />
       {protocol === "SAML" && current.saml ? (
         <Panel
           title="At your identity provider"
@@ -110,12 +116,16 @@ const PROTOCOLS: { id: SsoProtocol; label: string; help: string }[] = [
 
 function SsoForm({
   current,
+  latest,
   protocol,
   onProtocol,
+  onReload,
 }: {
   current: SsoSettings;
+  latest: SsoSettings;
   protocol: SsoProtocol;
   onProtocol: (p: SsoProtocol) => void;
+  onReload: () => void;
 }) {
   const { can } = useSession();
   const canManage = can("org.manage");
@@ -132,6 +142,8 @@ function SsoForm({
   const [removing, setRemoving] = useState(false);
   const save = useOrgMutation(putSso, ["sso"]);
   const remove = useOrgMutation(deleteSso, ["sso"]);
+  // Our own save also moves updated_at; that is not a change made elsewhere.
+  const changedElsewhere = !save.isSuccess && !remove.isSuccess && latest.updated_at !== current.updated_at;
 
   const domainList = domains
     .split(/[\s,]+/)
@@ -160,6 +172,7 @@ function SsoForm({
       setSecret("");
       setMetadata("");
       notify.success("Single sign-on saved");
+      onReload();
     } catch (err) {
       setError(describeError(err));
     }
@@ -188,6 +201,7 @@ function SsoForm({
       }
     >
       <form onSubmit={submit} noValidate className="flex flex-col gap-5">
+        {changedElsewhere && <ChangedElsewhere subject="single sign-on" onReload={onReload} />}
         <fieldset disabled={!canManage} className="flex flex-col gap-5">
           <fieldset className="flex flex-col gap-3">
             <legend className="mb-1 text-sm font-medium">How your provider signs people in</legend>
@@ -328,6 +342,7 @@ function SsoForm({
         onConfirm={async () => {
           await remove.mutateAsync(undefined);
           notify.success("Single sign-on removed");
+          onReload();
         }}
       />
     </Panel>

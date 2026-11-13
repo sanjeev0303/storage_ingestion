@@ -34,6 +34,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/service/ingestion"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/quota"
 	uploadservice "github.com/sanjeev0303/object-storage-platform/internal/service/upload"
+	"github.com/sanjeev0303/object-storage-platform/internal/worker/heartbeat"
 	uploadworker "github.com/sanjeev0303/object-storage-platform/internal/worker/upload"
 )
 
@@ -196,6 +197,7 @@ func run() error {
 
 	log.Info("upload worker started", "owner", owner, "poll_interval", ic.PollInterval,
 		"global_upload_slots", ic.GlobalUploadSlots, "small_file_threshold", ic.SmallFileThreshold)
+	go heartbeat.Run(ctx, db, "upload", owner, log)
 	uploadworker.Run(ctx, svc, quotas, owner, ic.PollInterval, ic.ReconcileInterval, log)
 	wg.Wait()
 	log.Info("upload worker stopped")

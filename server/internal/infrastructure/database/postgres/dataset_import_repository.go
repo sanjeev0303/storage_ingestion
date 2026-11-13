@@ -2,6 +2,8 @@ package postgres
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -278,6 +280,20 @@ func (r *DatasetRepository) RetryImport(ctx context.Context, importID, owner str
 	return nil
 }
 
+// ReleaseImport gives up owner's lease on an import that shutdown cut
+// short, due again now, keeping the checkpoint and not counting the attempt.
+func (r *DatasetRepository) ReleaseImport(ctx context.Context, importID, owner string, now time.Time) error {
+	_, err := r.db.Pool.Exec(ctx, `
+		UPDATE dataset_manifest_imports SET lease_owner = NULL, lease_expires_at = NULL, next_attempt_at = $3,
+		                                    attempts = GREATEST(attempts - 1, 0), updated_at = $3
+		WHERE id = $1 AND lease_owner = $2 AND state = 'RUNNING'
+	`, importID, owner, now)
+	if err != nil {
+		return fmt.Errorf("release import: %w", err)
+	}
+	return nil
+}
+
 // CancelImport cancels an import that no worker holds at once, and asks
 // the worker holding one to stop after its batch. Members a cancelled
 // import already added stay in the draft.
@@ -361,50 +377,101 @@ func (r *DatasetRepository) ListImports(ctx context.Context, tenantID, datasetID
 	return imports, encodeTimeCursor(imports[limit-1].CreatedAt, imports[limit-1].ID), nil
 }
 
-// ObjectDatasets finds where a catalog object is used. Draft members are
-// found by object; snapshot members by the object's assets (one per
-// version), which is how they are indexed.
-func (r *DatasetRepository) ObjectDatasets(ctx context.Context, tenantID, objectID string, limit int) (model.ObjectDatasets, error) {
-	var out model.ObjectDatasets
+// ObjectMemberships pages the datasets whose draft holds a catalog
+// object, by dataset name. Draft members are indexed by object.
+func (r *DatasetRepository) ObjectMemberships(ctx context.Context, tenantID, objectID, after string, limit int) ([]model.ObjectMembership, string, error) {
+	var name, id string
+	if after != "" {
+		if err := decodeKeyCursor(after, &name, &id); err != nil {
+			return nil, "", err
+		}
+	}
 	rows, err := r.db.Pool.Query(ctx, `
 		SELECT d.id, d.name, COALESCE(m.label, ''), COALESCE(m.split, ''), m.created_at
 		FROM dataset_members AS m
 		JOIN datasets AS d ON d.id = m.dataset_id AND d.tenant_id = m.tenant_id
 		WHERE m.tenant_id = $1 AND m.object_id = $2
-		ORDER BY d.name
-		LIMIT $3
-	`, tenantID, objectID, limit)
+		  AND ($3 = '' OR (d.name, d.id) > ($4, $3))
+		ORDER BY d.name, d.id
+		LIMIT $5
+	`, tenantID, objectID, id, name, limit+1)
 	if err != nil {
-		return out, fmt.Errorf("list object memberships: %w", err)
+		return nil, "", fmt.Errorf("list object memberships: %w", err)
 	}
-	out.Members, err = collect(rows, func(row pgx.Row) (model.ObjectMembership, error) {
+	members, err := collect(rows, func(row pgx.Row) (model.ObjectMembership, error) {
 		var m model.ObjectMembership
 		err := row.Scan(&m.DatasetID, &m.DatasetName, &m.Label, &m.Split, &m.AddedAt)
 		return m, err
 	})
-	if err != nil {
-		return out, err
+	if err != nil || len(members) <= limit {
+		return members, "", err
 	}
+	members = members[:limit]
+	last := members[limit-1]
+	return members, encodeKeyCursor(last.DatasetName, last.DatasetID), nil
+}
 
-	rows, err = r.db.Pool.Query(ctx, `
+// ObjectSnapshots pages the snapshots that pinned a version of a catalog
+// object, by dataset name and then newest version first. Snapshot members
+// are found by the object's assets (one per version), which is how they
+// are indexed.
+func (r *DatasetRepository) ObjectSnapshots(ctx context.Context, tenantID, objectID, after string, limit int) ([]model.ObjectSnapshot, string, error) {
+	var name, id string
+	var version int
+	if after != "" {
+		if err := decodeKeyCursor(after, &name, &id, &version); err != nil {
+			return nil, "", err
+		}
+	}
+	rows, err := r.db.Pool.Query(ctx, `
 		SELECT d.id, d.name, v.id, v.version, vm.object_version
 		FROM assets AS a
 		JOIN dataset_version_members AS vm ON vm.asset_id = a.id AND vm.tenant_id = a.tenant_id
 		JOIN dataset_versions AS v ON v.id = vm.version_id AND v.tenant_id = vm.tenant_id
 		JOIN datasets AS d ON d.id = v.dataset_id AND d.tenant_id = v.tenant_id
 		WHERE a.tenant_id = $1 AND a.object_id = $2
-		ORDER BY d.name, v.version DESC
-		LIMIT $3
-	`, tenantID, objectID, limit)
+		  AND ($3 = '' OR (d.name, d.id) > ($4, $3) OR ((d.name, d.id) = ($4, $3) AND v.version < $5))
+		ORDER BY d.name, d.id, v.version DESC
+		LIMIT $6
+	`, tenantID, objectID, id, name, version, limit+1)
 	if err != nil {
-		return out, fmt.Errorf("list object snapshots: %w", err)
+		return nil, "", fmt.Errorf("list object snapshots: %w", err)
 	}
-	out.Snapshots, err = collect(rows, func(row pgx.Row) (model.ObjectSnapshot, error) {
+	snapshots, err := collect(rows, func(row pgx.Row) (model.ObjectSnapshot, error) {
 		var s model.ObjectSnapshot
 		err := row.Scan(&s.DatasetID, &s.DatasetName, &s.VersionID, &s.Version, &s.ObjectVersion)
 		return s, err
 	})
-	return out, err
+	if err != nil || len(snapshots) <= limit {
+		return snapshots, "", err
+	}
+	snapshots = snapshots[:limit]
+	last := snapshots[limit-1]
+	return snapshots, encodeKeyCursor(last.DatasetName, last.DatasetID, last.Version), nil
+}
+
+// A key cursor is the sort key of the last row of a page. Dataset names
+// may hold any character, so the key is JSON rather than joined text.
+func encodeKeyCursor(key ...any) string {
+	raw, _ := json.Marshal(key)
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func decodeKeyCursor(cursor string, key ...any) error {
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return model.ErrInvalidCursor
+	}
+	var parts []json.RawMessage
+	if json.Unmarshal(raw, &parts) != nil || len(parts) != len(key) {
+		return model.ErrInvalidCursor
+	}
+	for i, part := range parts {
+		if json.Unmarshal(part, key[i]) != nil {
+			return model.ErrInvalidCursor
+		}
+	}
+	return nil
 }
 
 // versionDiffSQL pairs two versions' members by object. Both sides are

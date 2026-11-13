@@ -82,7 +82,21 @@ func (s *Service) require(ctx context.Context, p model.Principal, perm model.Per
 	if !p.Valid() {
 		return model.ErrUnauthenticated
 	}
-	return audit.Require(ctx, s.deps.Audit, p, perm, action, "catalog_object", resourceID)
+	if err := audit.Require(ctx, s.deps.Audit, p, perm, action, "catalog_object", resourceID); err != nil {
+		return err
+	}
+	// A token confined to some datasets sees nothing outside them: another
+	// namespace's object is not found, as in delivery.
+	if p.Scope.Restricted && resourceID != "" {
+		o, err := s.deps.Repo.Get(ctx, p.TenantID, resourceID)
+		if err != nil {
+			return err
+		}
+		if !p.Scope.Allows(o.Dataset) {
+			return model.ErrObjectNotFound
+		}
+	}
+	return nil
 }
 
 // ─── Reads ────────────────────────────────────────────────────────────
@@ -104,6 +118,9 @@ func (s *Service) Lookup(ctx context.Context, p model.Principal, dataset, path s
 	}
 	if dataset != "" && !model.ValidDataset(dataset) {
 		return model.CatalogObject{}, fmt.Errorf("%w: invalid dataset", ErrInvalidRequest)
+	}
+	if !p.Scope.Allows(dataset) {
+		return model.CatalogObject{}, model.ErrObjectNotFound
 	}
 	_, key, err := model.NormalizePath(path, model.DefaultPathPolicy)
 	if err != nil {
@@ -202,6 +219,10 @@ func (s *Service) filter(p model.Principal, req ListRequest) (model.CatalogFilte
 		CreatedAfter: req.CreatedAfter, CreatedBefore: req.CreatedBefore, UpdatedAfter: req.UpdatedAfter,
 		UpdatedBefore: req.UpdatedBefore, Metadata: req.Metadata, IncludeUnpublished: req.IncludeUnpublished,
 		Limit: req.Limit,
+	}
+	// A confined token lists its own datasets only, one at a time.
+	if p.Scope.Restricted && (f.AnyDataset || !p.Scope.Allows(f.Dataset)) {
+		return f, fmt.Errorf("%w: name one of the token's datasets", ErrInvalidRequest)
 	}
 	switch req.Order {
 	case "", string(model.OrderByPath):

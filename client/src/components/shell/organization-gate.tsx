@@ -5,12 +5,12 @@ import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/states";
 import { PageHeader } from "@/components/ui/page";
 import { Panel } from "@/components/ui/panel";
-import { useSession } from "@/lib/auth/session";
+import { storeOrganization, useSession } from "@/lib/auth/session";
 
 // Every data screen needs an organization. Users in several must pick one
 // first; users in none have nothing to show.
 export function OrganizationGate({ children }: { children: ReactNode }) {
-  const { organizationId, memberships, switchOrganization, signOut } = useSession();
+  const { organizationId, memberships, signOut } = useSession();
 
   if (organizationId) return <>{children}</>;
 
@@ -36,7 +36,8 @@ export function OrganizationGate({ children }: { children: ReactNode }) {
                 <p className="font-semibold">{m.organization_name ?? m.organization_id}</p>
                 <p className="text-sm text-muted">Role: {m.role_id}</p>
               </div>
-              <Button variant="primary" onClick={() => switchOrganization(m.organization_id)}>
+              {/* Stays on this page, so a deep link (a share page, say) opens once an organization is chosen. */}
+              <Button variant="primary" onClick={() => storeOrganization(m.organization_id)}>
                 Open
               </Button>
             </li>

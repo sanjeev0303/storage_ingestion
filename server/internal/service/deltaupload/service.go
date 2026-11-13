@@ -266,8 +266,13 @@ func (s *Service) Complete(ctx context.Context, p model.Principal, id string) (m
 	if len(missing) > 0 {
 		return d, fmt.Errorf("%w: %d chunks have not arrived", model.ErrDeltaState, len(missing))
 	}
-	if err := s.deps.Store.Queue(ctx, id); err != nil {
+	queued, err := s.deps.Store.Queue(ctx, id)
+	if err != nil {
 		return d, err
+	}
+	if !queued {
+		// Completed or expired since it was read: answer where it got to.
+		return s.deps.Store.Get(ctx, p.TenantID, id)
 	}
 	s.record(ctx, p, "delta_upload.complete", id, nil)
 	d.State = model.DeltaQueued
@@ -301,9 +306,14 @@ func (s *Service) RunOnce(ctx context.Context, owner string) (bool, error) {
 		return false, err
 	}
 	for _, d := range expired {
-		s.dropStaged(ctx, d)
-		if err := s.deps.Store.Finish(ctx, d.ID, model.DeltaExpired, "", "nobody finished it in time", s.now()); err != nil {
+		// Read as OPEN, but the client may have completed it since: its
+		// chunks go only if it really expired.
+		ok, err := s.deps.Store.Expire(ctx, d.ID, s.now())
+		if err != nil {
 			return false, err
+		}
+		if ok {
+			s.dropStaged(ctx, d)
 		}
 	}
 	d, ok, err := s.deps.Store.Claim(ctx, owner, assembleLease, assembleTries)
@@ -332,13 +342,27 @@ func (s *Service) RunOnce(ctx context.Context, owner string) (bool, error) {
 		// Bytes that do not hash as promised will not on a second try either;
 		// anything else may. The lease runs out and another pass tries.
 		if errors.Is(err, model.ErrChunkCorrupt) || d.Attempts >= assembleTries {
-			s.dropStaged(ctx, d)
-			return true, s.deps.Store.Finish(ctx, d.ID, model.DeltaFailed, "", err.Error(), s.now())
+			return true, s.finish(ctx, d, owner, model.DeltaFailed, "", err.Error())
 		}
 		return true, fmt.Errorf("assemble %s: %w", d.ID, err)
 	}
+	return true, s.finish(ctx, d, owner, model.DeltaDone, uploadID, "")
+}
+
+// finish records the outcome while owner still holds the upload, and only
+// then drops its chunks: a worker that lost its lease leaves them to the
+// one that took it over.
+func (s *Service) finish(ctx context.Context, d model.DeltaUpload, owner, state, uploadID, failure string) error {
+	ok, err := s.deps.Store.Finish(ctx, d.ID, owner, state, uploadID, failure, s.now())
+	if err != nil {
+		return err
+	}
+	if !ok {
+		s.deps.Log.Warn("a delta upload's lease was lost before it finished", "id", d.ID, "state", state)
+		return nil
+	}
 	s.dropStaged(ctx, d)
-	return true, s.deps.Store.Finish(ctx, d.ID, model.DeltaDone, uploadID, "", s.now())
+	return nil
 }
 
 func (s *Service) dropStaged(ctx context.Context, d model.DeltaUpload) {
@@ -477,8 +501,8 @@ func (s *Service) openAsset(ctx context.Context, tenantID, assetID string, first
 	if err != nil {
 		return nil, err
 	}
-	if asset.Status != model.AssetStatusAvailable {
-		return nil, fmt.Errorf("the file is %s", asset.Status)
+	if !asset.IsAvailable() {
+		return nil, fmt.Errorf("the file is %s and not usable", asset.Status)
 	}
 	loc, err := s.deps.Router.Locate(ctx, tenantID, asset.StorageConnectionID)
 	if err != nil {

@@ -128,6 +128,29 @@ func TestHTTPDatasetWorkflow(t *testing.T) {
 		len(used.Snapshots) != 1 || used.Snapshots[0].VersionID != v.ID || used.Snapshots[0].Version != 1 {
 		t.Fatalf("object usage: %+v", used)
 	}
+	// Each list pages on its own: a second dataset holding the object
+	// comes on the next page of drafts, and the snapshots are not repeated.
+	var second response.DatasetResponse
+	s.expect(t, tok, "", http.MethodPost, "/api/v1/datasets", `{"name":"web-usage"}`, http.StatusCreated, &second)
+	s.expect(t, tok, "", http.MethodPost, "/api/v1/datasets/"+second.ID+"/members", fmt.Sprintf(`{"members":[{"object_id":%q}]}`, objs[0].ObjectID), http.StatusOK, nil)
+	var usedPage struct {
+		Datasets []struct {
+			DatasetID string `json:"dataset_id"`
+		} `json:"datasets"`
+		Snapshots []json.RawMessage `json:"snapshots"`
+		Next      string            `json:"next_datasets_cursor"`
+	}
+	usage := "/api/v1/catalog/objects/" + objs[0].ObjectID + "/datasets?part=datasets&limit=1"
+	s.expect(t, auditorTok, "", http.MethodGet, usage, "", http.StatusOK, &usedPage)
+	if len(usedPage.Datasets) != 1 || usedPage.Datasets[0].DatasetID != ds.ID || usedPage.Next == "" || len(usedPage.Snapshots) != 0 {
+		t.Fatalf("first page of drafts: %+v", usedPage)
+	}
+	cursor := usedPage.Next
+	usedPage.Next = ""
+	s.expect(t, auditorTok, "", http.MethodGet, usage+"&cursor="+cursor, "", http.StatusOK, &usedPage)
+	if len(usedPage.Datasets) != 1 || usedPage.Datasets[0].DatasetID != second.ID || usedPage.Next != "" {
+		t.Fatalf("second page of drafts: %+v", usedPage)
+	}
 
 	// Validation: accepted, run by the worker, reported, with pages of
 	// findings.
@@ -238,6 +261,9 @@ func TestHTTPDatasetWorkflow(t *testing.T) {
 		"/api/v1/datasets?limit=abc", "/api/v1/datasets?limit=100000", "/api/v1/datasets?cursor=garbage", "/api/v1/datasets?status=SHINY",
 		base + "/members?cursor=garbage", base + "/versions?before=-1", base + "/lineage?depth=99", base + "/lineage?direction=sideways",
 		"/api/v1/validation-reports/" + job.ReportID + "/findings?severity=FATAL", base + "/validations?cursor=garbage",
+		"/api/v1/catalog/objects/" + objs[0].ObjectID + "/datasets?part=sideways",
+		"/api/v1/catalog/objects/" + objs[0].ObjectID + "/datasets?cursor=abc",
+		"/api/v1/catalog/objects/" + objs[0].ObjectID + "/datasets?part=snapshots&cursor=garbage",
 	} {
 		if r := s.call(t, tok, "", http.MethodGet, path, ""); r.status != http.StatusBadRequest {
 			t.Fatalf("%s: %s", path, r)
@@ -569,5 +595,45 @@ func TestHTTPDatasetVersionDiff(t *testing.T) {
 	erased := availability(v1.ID)[objs[2].ObjectID]
 	if erased.Availability != "ERASED" || erased.ErasedAt == nil || erased.ChecksumSHA256 == "" || erased.Path == "" {
 		t.Fatalf("an erased member keeps its record and says when: %+v", erased)
+	}
+}
+
+func TestHTTPObjectDatasetSnapshotsPage(t *testing.T) {
+	s := openSecurityStack(t, nil)
+	acme := s.team(t, "ds-used")
+	tok := s.signIn(t, acme.devUser.Email, acme.devPW).AccessToken
+	obj := s.publishAt(t, acme.developer, "used/a.txt", textData("used", 30))
+	var ds response.DatasetResponse
+	s.expect(t, tok, "", http.MethodPost, "/api/v1/datasets", `{"name":"used-by"}`, http.StatusCreated, &ds)
+	s.expect(t, tok, "", http.MethodPost, "/api/v1/datasets/"+ds.ID+"/members", fmt.Sprintf(`{"members":[{"object_id":%q}]}`, obj.ObjectID), http.StatusOK, nil)
+	for range 3 {
+		s.expect(t, tok, "", http.MethodPost, "/api/v1/datasets/"+ds.ID+"/snapshots", "", http.StatusCreated, nil)
+	}
+
+	// Newest version first, one per page, each exactly once.
+	var versions []int
+	cursor := ""
+	for page := 0; page < 5; page++ {
+		var got struct {
+			Snapshots []struct {
+				Version int `json:"version"`
+			} `json:"snapshots"`
+			Datasets []json.RawMessage `json:"datasets"`
+			Next     string            `json:"next_snapshots_cursor"`
+		}
+		s.expect(t, tok, "", http.MethodGet, "/api/v1/catalog/objects/"+obj.ObjectID+"/datasets?part=snapshots&limit=1&cursor="+cursor, "", http.StatusOK, &got)
+		if len(got.Datasets) != 0 {
+			t.Fatalf("part=snapshots answered drafts: %+v", got)
+		}
+		for _, v := range got.Snapshots {
+			versions = append(versions, v.Version)
+		}
+		if got.Next == "" {
+			break
+		}
+		cursor = got.Next
+	}
+	if fmt.Sprint(versions) != "[3 2 1]" {
+		t.Fatalf("snapshot pages: %v", versions)
 	}
 }

@@ -662,8 +662,8 @@ func TestConsumerCrashBeforeTheBusinessCommitIsRetried(t *testing.T) {
 	ev := e.completed(t, "u1")
 	e.publishAll(t)
 
-	// The first consumer dies in the middle of the handler, before its
-	// change commits: it records nothing more.
+	// The first consumer is stopped in the middle of the handler, before
+	// its change commits: it records no outcome, and gives its attempt back.
 	crashing := &recorder{started: make(chan struct{}), release: make(chan struct{})}
 	ctx, crash := context.WithCancel(context.Background())
 	done := make(chan events.ConsumeStats)
@@ -676,19 +676,18 @@ func TestConsumerCrashBeforeTheBusinessCommitIsRetried(t *testing.T) {
 	if stats := <-done; stats.Interrupted != 1 {
 		t.Fatalf("expected an interrupted delivery: %+v", stats)
 	}
-	if rec := e.record(t, processingQueue, ev.ID); rec.Status != model.InboxProcessing || rec.Attempts != 1 {
-		t.Fatalf("nothing is recorded by a crashed consumer: %+v", rec)
+	if rec := e.record(t, processingQueue, ev.ID); rec.Status != model.InboxFailed || rec.Attempts != 0 || rec.LeaseOwner != "" {
+		t.Fatalf("a stopped consumer releases the event without counting the attempt: %+v", rec)
 	}
 
-	// Its lease and the message's visibility run out; another consumer
-	// does the work.
+	// Another consumer does the work.
 	e.expireLeases(t)
 	e.clock.advance(time.Minute)
 	healthy := &recorder{}
 	if stats := consume(t, e.newConsumer(t, e.inbox, "consumer-b", healthy.handlers())); stats.Completed != 1 {
 		t.Fatalf("redelivery: %+v", stats)
 	}
-	if rec := e.record(t, processingQueue, ev.ID); rec.Status != model.InboxCompleted || rec.Attempts != 2 || healthy.count(ev.ID) != 1 {
+	if rec := e.record(t, processingQueue, ev.ID); rec.Status != model.InboxCompleted || rec.Attempts != 1 || healthy.count(ev.ID) != 1 {
 		t.Fatalf("inbox %+v, calls %d", rec, healthy.count(ev.ID))
 	}
 }
@@ -1426,7 +1425,8 @@ func TestShutdownLeavesWorkForTheNextWorker(t *testing.T) {
 		t.Fatalf("the next consumer finishes all three: %+v", stats)
 	}
 	for _, id := range ids {
-		if rec := e.record(t, processingQueue, id); rec.Status != model.InboxCompleted || healthy.count(id) != 1 {
+		// Shutdown used up no attempt.
+		if rec := e.record(t, processingQueue, id); rec.Status != model.InboxCompleted || rec.Attempts != 1 || healthy.count(id) != 1 {
 			t.Fatalf("inbox %+v", rec)
 		}
 	}

@@ -31,6 +31,7 @@ import (
 	"github.com/sanjeev0303/object-storage-platform/internal/service/chunkstore"
 	"github.com/sanjeev0303/object-storage-platform/internal/service/events"
 	packingservice "github.com/sanjeev0303/object-storage-platform/internal/service/packing"
+	"github.com/sanjeev0303/object-storage-platform/internal/worker/heartbeat"
 	packingworker "github.com/sanjeev0303/object-storage-platform/internal/worker/packing"
 )
 
@@ -44,6 +45,14 @@ func main() {
 func run() error {
 	once := flag.Bool("once", false, "run one packing cycle, print what it did as JSON and exit")
 	flag.Parse()
+	var unpack *unpackOptions
+	if flag.Arg(0) == "unpack" {
+		opts, err := parseUnpack(flag.Args()[1:])
+		if err != nil {
+			return err
+		}
+		unpack = &opts
+	}
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -58,7 +67,7 @@ func run() error {
 		return fmt.Errorf("load event configuration: %w", err)
 	}
 	log := logger.New(cfg.AppEnv)
-	if *once {
+	if *once || unpack != nil {
 		// stdout carries the JSON output; logs go to stderr.
 		log = logger.NewTo(os.Stderr, cfg.AppEnv)
 	}
@@ -112,6 +121,13 @@ func run() error {
 		return fmt.Errorf("create packing service: %w", err)
 	}
 
+	if unpack != nil {
+		stats, err := svc.Unpack(context.Background(), unpack.tenant, unpack.pack, unpack.dryRun)
+		if printErr := printJSON(stats); printErr != nil {
+			return printErr
+		}
+		return err
+	}
 	if *once {
 		stats, err := svc.RunOnce(context.Background())
 		if printErr := printJSON(stats); printErr != nil {
@@ -176,6 +192,7 @@ func run() error {
 
 	log.Info("pack worker started", "owner", owner, "poll_interval", pc.PollInterval, "writers", pc.ActiveWriters,
 		"target_pack_bytes", pc.TargetPackBytes, "max_object_bytes", pc.MaxObjectBytes, "min_age", pc.MinAge)
+	go heartbeat.Run(ctx, db, "packing", owner, log)
 	packingworker.Run(ctx, svc, pc.PollInterval, log)
 	wg.Wait()
 	log.Info("pack worker stopped")

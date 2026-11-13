@@ -46,6 +46,22 @@ func TestDatasetTransitions(t *testing.T) {
 	}
 }
 
+// Writes that set lifecycle_status in SQL without a from-state guard rely
+// on these moves: a draft change leaving a validated outcome (leaveReady),
+// a validation settling, and a stuck validation released.
+func TestLeavingReadyIsAllowed(t *testing.T) {
+	for _, from := range []DatasetLifecycle{LifecycleReady, LifecycleReadyWithWarnings, LifecycleFailed} {
+		if !CanTransitionDataset(from, LifecycleDraft) {
+			t.Errorf("a draft change must move %s to DRAFT", from)
+		}
+	}
+	for _, to := range []DatasetLifecycle{LifecycleReady, LifecycleReadyWithWarnings, LifecycleFailed, LifecycleDraft} {
+		if !CanTransitionDataset(LifecycleValidating, to) {
+			t.Errorf("a validation must settle VALIDATING to %s", to)
+		}
+	}
+}
+
 func TestThresholdOutcome(t *testing.T) {
 	five := int64(5)
 	cases := []struct {

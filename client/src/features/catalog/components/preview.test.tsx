@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -48,6 +48,29 @@ describe("Preview", () => {
     expect(image).toHaveAttribute("src", "blob:preview-1");
     unmount();
     expect(revoke).toHaveBeenCalledWith("blob:preview-1");
+  });
+
+  it("makes no blob URL for an image that arrives after the preview is gone", async () => {
+    const create = vi.fn(() => "blob:preview-2");
+    URL.createObjectURL = create;
+    URL.revokeObjectURL = vi.fn();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let asked = false;
+    server.use(
+      http.get(`${API}/assets/a/content`, async () => {
+        asked = true;
+        await gate;
+        return new HttpResponse(new Uint8Array([1, 2, 3]), { headers: { "Content-Type": "image/png" } });
+      }),
+    );
+    const { unmount } = renderWithProviders(<Preview assetId="a" contentType="image/png" sizeBytes={3} status="AVAILABLE" />);
+    await userEvent.click(screen.getByRole("button", { name: "Show preview" }));
+    await waitFor(() => expect(asked).toBe(true));
+    unmount();
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(create).not.toHaveBeenCalled();
   });
 
   it("shows the problem when the bytes cannot be fetched", async () => {

@@ -31,12 +31,12 @@ These confinements apply to every API token: an upload outside a token's dataset
 }
 ```
 
-`osp-agent -config agent.json` runs until stopped; `-once` does one pass; `-status` prints what waits. Empty files, as markers usually are, are not sent: the platform stores nothing empty. A file the platform refuses (too large, say) is counted as failed and does not hold the others up.
+`osp-agent -config agent.json` runs until stopped; `-once` does one pass; `-status` prints what waits. Empty files, as markers usually are, are not sent: the platform stores nothing empty. A file the platform refuses for good (400, 413, 415, 422, or 409 `path_exists`: too large, say) is counted as failed and does not hold the others up. Other refusals (a busy path, a reconciliation in progress, 408) are tried again later, 30 seconds after the first and doubling to at most an hour. A file the agent cannot read (locked by the instrument, say) is skipped for that pass; a lost connection, 401, 403, 429 or 5xx ends the pass's sending and is tried at the next.
 
 | Mode | What counts as ready |
 |---|---|
 | `run` | Each subfolder is a run. Nothing goes until its `marker` appears (`CopyComplete.txt`, `RTAComplete.txt`). After `incomplete_after_hours` with no marker, what is there is sent and the run is reported incomplete. |
-| `recording` | Rotating chunks whose name the pattern's first group groups into one logical recording. A chunk covers `chunk_seconds` up to its modified time. A recording that goes quiet for `close_after_idle_seconds` is closed. |
+| `recording` | Rotating chunks whose name the pattern's first group groups into one logical recording. A chunk covers `chunk_seconds` up to its modified time. A recording that goes quiet for `close_after_idle_seconds` is closed. Chunks that come after a recording closed `COMPLETE` start the next one, named `<name>~2`, `<name>~3` and so on, because a complete recording takes no more chunks (409 `recording_complete`). |
 | `files` | Each file, once it has not changed for `settle_seconds`. |
 
 **The journal** (`state_dir/journal.log`) is synced to disk after every record: each file's hash and state, each upload's ID and each part's ETag. After a power cut the agent continues with the parts not yet sent. A record cut short is ignored, because it was never acknowledged.
@@ -77,7 +77,7 @@ A device's own credential calls these; the agent does so for you:
 
 - `POST /api/v1/edge/recordings {"name", "kind", "gap_seconds"}` opens a `RUN` or `RECORDING`, or answers the one with that name.
 - `POST /api/v1/edge/recordings/{id}/chunks {"path", "sha256", "size_bytes", "starts_at", "ends_at"}` appends a file or a time window. It is idempotent: the same path and hash again changes nothing, other bytes at that path answer **409** `chunk_differs`. Chunks may arrive late and in any order. A chunk that closes a gap in the recording's time sends `edge.backfill_closed`.
-- `POST /api/v1/edge/recordings/{id}/close {"expected", "missing"}` ends it. Only when nothing is missing, the count is what was expected, and every file is published with exactly its SHA-256 does it become `COMPLETE`: its files join the dataset's draft, a snapshot is taken, and `edge.run_complete` is sent. Otherwise it is `INCOMPLETE`, saying what is missing, with no snapshot, and `edge.run_incomplete` is sent. Closing again later can complete it.
+- `POST /api/v1/edge/recordings/{id}/close {"expected", "missing"}` ends it. Only when nothing is missing, the count is what was expected, and every file is published with exactly its SHA-256 does it become `COMPLETE`: its files join the dataset's draft, a snapshot is taken, and `edge.run_complete` is sent. Otherwise it is `INCOMPLETE`, saying what is missing, with no snapshot, and `edge.run_incomplete` is sent. Closing again later can complete it. A chunk that arrives while a close is under way is never left out of a `COMPLETE` recording's snapshot: the close counts the chunks again under the recording's lock and, if one arrived, closes again with it.
 
 `GET /api/v1/edge-recordings[?device_id=]` and `GET /api/v1/edge-recordings/{id}` (`org.read`) show them, with chunks and gaps.
 

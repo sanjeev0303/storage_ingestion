@@ -4,6 +4,8 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api/client";
 import { Panel } from "@/components/ui/panel";
 import { ErrorState, SkeletonRows } from "@/components/ui/states";
+import { StateBadge } from "@/components/ui/status";
+import { Table, Td, Th } from "@/components/ui/table";
 import { Time } from "@/components/ui/time";
 import { useSession } from "@/lib/auth/session";
 import { orgKey } from "@/lib/query/keys";
@@ -16,9 +18,47 @@ type WorkStatus = {
   imports: { active: number };
   validations: { queued: number; running: number };
   deletions: { pending: number };
-  // Older APIs do not send it.
+  // Older APIs do not send these.
   storage?: { shared_assets: number; shared_bytes: number };
+  workers?: WorkerHealth[];
 };
+
+// One kind of worker. instances is sent to platform administrators only.
+type WorkerHealth = {
+  kind: string;
+  state: "RUNNING" | "STALE" | "NOT_SEEN";
+  last_seen_at?: string;
+  instances?: { instance: string; started_at: string; last_seen_at: string; stale: boolean }[];
+};
+
+const WORKERS: Record<string, { name: string; does: string }> = {
+  upload: { name: "Upload", does: "Bulk ingestion: manifests, entry retries and cancellations" },
+  processing: { name: "Processing", does: "Verifies and scans uploads, then publishes them" },
+  packing: { name: "Packing", does: "Packs small files into larger stored objects" },
+  dataset: { name: "Dataset", does: "Manifest imports, validations and readiness assessments" },
+  outbox: { name: "Outbox", does: "Publishes events to the queue and reconciles them" },
+  cleanup: { name: "Cleanup", does: "Scheduled deletions, retention and leftover files" },
+  reconciliation: { name: "Reconciliation", does: "Checks stuck uploads and storage against the database" },
+  compaction: { name: "Compaction", does: "Removes operational records past their retention" },
+  webhook: { name: "Webhook", does: "Sends webhook deliveries" },
+};
+
+const WORKER_STATE = {
+  RUNNING: { tone: "done", text: "Running" },
+  STALE: { tone: "warning", text: "No recent heartbeat" },
+  NOT_SEEN: { tone: "neutral", text: "Not seen" },
+} as const;
+
+// Both panels read the same snapshot; react-query shares the request.
+function useWorkStatus() {
+  const { organizationId } = useSession();
+  return useQuery({
+    queryKey: orgKey(organizationId, "operations", "status"),
+    queryFn: ({ signal }) => api<WorkStatus>("/operations/status", { signal }),
+    enabled: Boolean(organizationId),
+    refetchInterval: 15_000,
+  });
+}
 
 function waited(seconds: number) {
   if (seconds < 90) return `${seconds} s`;
@@ -29,13 +69,7 @@ function waited(seconds: number) {
 // The organization's background work, counted in one snapshot by the API.
 // It answers "is my upload stuck, or just queued?".
 export function WorkStatus() {
-  const { organizationId } = useSession();
-  const status = useQuery({
-    queryKey: orgKey(organizationId, "operations", "status"),
-    queryFn: ({ signal }) => api<WorkStatus>("/operations/status", { signal }),
-    enabled: Boolean(organizationId),
-    refetchInterval: 15_000,
-  });
+  const status = useWorkStatus();
 
   if (status.isPending) {
     return (
@@ -102,6 +136,97 @@ export function WorkStatus() {
           </div>
         ))}
       </dl>
+    </Panel>
+  );
+}
+
+// Whether each kind of worker is alive, from the heartbeat every worker
+// process writes every 30 seconds. Workers serve every organization.
+export function WorkerHealthPanel() {
+  const status = useWorkStatus();
+  const title = "Workers";
+
+  if (status.isPending) {
+    return (
+      <Panel title={title}>
+        <SkeletonRows rows={3} />
+      </Panel>
+    );
+  }
+  if (status.isError) {
+    return (
+      <Panel title={title}>
+        <ErrorState error={status.error} onRetry={() => status.refetch()} />
+      </Panel>
+    );
+  }
+  const workers = status.data.workers;
+  if (!workers) {
+    return (
+      <Panel title={title}>
+        <p className="text-base text-muted">This API does not report worker heartbeats.</p>
+      </Panel>
+    );
+  }
+  const detailed = workers.some((w) => w.instances !== undefined);
+
+  return (
+    <Panel
+      title={title}
+      description="Each worker process writes a heartbeat every 30 seconds. A worker silent for 2 minutes shows no recent heartbeat. Workers are shared by every organization."
+    >
+      <Table>
+        <caption className="sr-only">Worker heartbeats</caption>
+        <thead>
+          <tr>
+            <Th>Worker</Th>
+            <Th>State</Th>
+            <Th>Last heartbeat</Th>
+            {detailed && <Th>Processes</Th>}
+          </tr>
+        </thead>
+        <tbody>
+          {workers.map((w) => {
+            const known = WORKERS[w.kind];
+            const state = WORKER_STATE[w.state] ?? WORKER_STATE.NOT_SEEN;
+            return (
+              <tr key={w.kind}>
+                <Td>
+                  <span className="font-medium">{known?.name ?? w.kind}</span>
+                  {known && <div className="text-sm text-muted">{known.does}</div>}
+                </Td>
+                <Td>
+                  <StateBadge tone={state.tone}>{state.text}</StateBadge>
+                </Td>
+                <Td>{w.last_seen_at ? <Time value={w.last_seen_at} /> : <span className="text-muted">Never in the last day</span>}</Td>
+                {detailed && (
+                  <Td>
+                    {w.instances && w.instances.length > 0 ? (
+                      <ul className="flex flex-col gap-1">
+                        {w.instances.map((i) => (
+                          <li key={i.instance} className="text-sm">
+                            <span className="mono-data">{i.instance}</span>
+                            <span className="text-muted">
+                              , started <Time value={i.started_at} />
+                              {i.stale && (
+                                <>
+                                  , last heartbeat <Time value={i.last_seen_at} />
+                                </>
+                              )}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <span className="text-muted">None</span>
+                    )}
+                  </Td>
+                )}
+              </tr>
+            );
+          })}
+        </tbody>
+      </Table>
     </Panel>
   );
 }

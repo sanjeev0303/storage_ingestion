@@ -34,6 +34,7 @@ var (
 	ErrRoleNotFound       = errors.New("role not found")
 	ErrRoleInUse          = errors.New("the role is assigned to members")
 	ErrLastOwner          = errors.New("an organization must keep at least one active owner")
+	ErrUserStatusChanged  = errors.New("the account's status changed meanwhile; reload and try again")
 	ErrEscalation         = errors.New("cannot grant or change permissions beyond your own")
 	ErrTenantRequired     = errors.New("select an organization for this request")
 )

@@ -39,9 +39,6 @@ func ClassForFindings(codes []string) string {
 	return class
 }
 
-// MoreRestricted reports whether a is more restricted than b.
-func MoreRestricted(a, b string) bool { return classRank[a] > classRank[b] }
-
 var (
 	ErrAPITokenNotFound  = errors.New("API token not found")
 	ErrInvalidAPIToken   = errors.New("invalid API token")

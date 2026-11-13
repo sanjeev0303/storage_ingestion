@@ -12,6 +12,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sanjeev0303/object-storage-platform/internal/dto/event"
@@ -176,6 +177,9 @@ func (s *Service) CreateFor(ctx context.Context, p model.Principal, in CreateInp
 	if in.ConnectionID == "" {
 		in.ConnectionID = model.PlatformConnectionID
 	}
+	if model.IsPlatformConnection(in.ConnectionID) && in.Source == model.AdoptURLList && in.Inline == "" {
+		return bad("a URL list on the platform's storage is sent inline")
+	}
 	if !model.AdoptionImports(in.Source) {
 		if model.IsPlatformConnection(in.ConnectionID) {
 			return bad("objects are adopted from one of the organization's own storage connections")
@@ -303,6 +307,12 @@ func (s *Service) read(ctx context.Context, job model.AdoptionJob) error {
 	if err != nil {
 		return err
 	}
+	// The platform's bucket holds every organization's objects, so a job on
+	// the platform connection never reads its source from it.
+	fromBucket := job.Source != model.AdoptSTAC && job.InlineSource == ""
+	if fromBucket && model.IsPlatformConnection(job.ConnectionID) {
+		return errors.New("a source on the platform's storage must be sent inline")
+	}
 	switch job.Source {
 	case model.AdoptManifest, model.AdoptURLList:
 		var src io.ReadCloser = io.NopCloser(strings.NewReader(job.InlineSource))
@@ -413,9 +423,16 @@ func (s *Service) process(ctx context.Context, job model.AdoptionJob, stats *Run
 	}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
+	// ended is set once a guarded write says the job is no longer running
+	// (cancelled meanwhile): no further entry is started.
+	var ended atomic.Bool
 	slots := make(chan struct{}, s.cfg.Concurrency)
 	for _, entry := range entries {
 		slots <- struct{}{}
+		if ended.Load() {
+			<-slots
+			break
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -429,7 +446,9 @@ func (s *Service) process(ctx context.Context, job model.AdoptionJob, stats *Run
 			if done.State == model.AdoptFailed && done.Attempts < s.cfg.MaxAttempts {
 				done.State = model.AdoptPending // tried again next cycle
 			}
-			if err := s.deps.Store.FinishEntry(ctx, done, s.now()); err != nil {
+			if err := s.deps.Store.FinishEntry(ctx, done, s.now()); errors.Is(err, model.ErrLeaseLost) {
+				ended.Store(true)
+			} else if err != nil {
 				s.log.Warn("record adoption entry", "job_id", job.ID, "line", entry.Line, "error", err)
 			}
 			mu.Lock()
@@ -447,6 +466,10 @@ func (s *Service) process(ctx context.Context, job model.AdoptionJob, stats *Run
 		}()
 	}
 	wg.Wait()
+	if ended.Load() {
+		s.log.Info("adoption job ended while it ran; stopped", "job_id", job.ID, "tenant_id", job.TenantID)
+		return model.ErrLeaseLost
+	}
 	if _, err := s.deps.Store.Count(ctx, job.ID, s.now()); err != nil {
 		return err
 	}

@@ -2,7 +2,6 @@ package model
 
 import (
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 )
@@ -76,6 +75,9 @@ type UploadSession struct {
 	ExpiresAt     time.Time
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
+	// AssetID is the asset processing made from the upload. Only listings
+	// fill it; it is empty until processing creates one.
+	AssetID string
 	// CompletedAt and AbortedAt record when completion or abort/expiry was
 	// confirmed. Nil until then.
 	CompletedAt *time.Time
@@ -133,27 +135,6 @@ func (u UploadSession) Validate() error {
 	return nil
 }
 
-// TransitionTo changes the upload status only when the transition
-// is allowed by the upload lifecycle.
-func (u *UploadSession) TransitionTo(next UploadStatus) error {
-	if u == nil {
-		return errors.New("upload session is nil")
-	}
-
-	if !CanTransition(u.Status, next) {
-		return fmt.Errorf(
-			"cannot transition upload from %s to %s",
-			u.Status,
-			next,
-		)
-	}
-
-	u.Status = next
-	u.UpdatedAt = time.Now().UTC()
-
-	return nil
-}
-
 // CanTransition reports whether the upload lifecycle allows from -> next.
 // Repositories apply the same rule as a conditional database update.
 func CanTransition(from, next UploadStatus) bool {
@@ -187,10 +168,4 @@ func CanTransition(from, next UploadStatus) bool {
 	}
 
 	return false
-}
-
-// CanPromote reports whether the object may leave quarantine.
-// Only a session whose stored bytes passed checksum verification may.
-func (u UploadSession) CanPromote() bool {
-	return u.Status == UploadStatusVerified
 }
